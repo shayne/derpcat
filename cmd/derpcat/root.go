@@ -56,9 +56,9 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return 2
 	}
 
-	level := rootTelemetryLevel(args, parsed.Flags)
+	level := rootTelemetryLevel(parsed.Flags)
 
-	remaining := parsed.RemainingArgs
+	remaining := rewriteRootHelpArgs(parsed.RemainingArgs)
 	if len(remaining) == 0 {
 		fmt.Fprint(stderr, yargs.GenerateGlobalHelp(rootHelpConfig, rootGlobalFlags{}))
 		return 2
@@ -99,28 +99,31 @@ func isRootHelpRequest(args []string) bool {
 	if len(args) == 0 {
 		return false
 	}
-	return args[0] == "-h" || args[0] == "--help" || args[0] == "help"
+	return args[0] == "-h" || args[0] == "--help" || (args[0] == "help" && len(args) == 1)
 }
 
-func rootTelemetryLevel(args []string, flags rootGlobalFlags) telemetry.Level {
-	level := telemetry.LevelDefault
-	for _, arg := range args {
-		switch arg {
-		case "-v", "--verbose":
-			if flags.Verbose {
-				level = telemetry.LevelVerbose
-			}
-		case "-q", "--quiet":
-			if flags.Quiet {
-				level = telemetry.LevelQuiet
-			}
-		case "-s", "--silent":
-			if flags.Silent {
-				level = telemetry.LevelSilent
-			}
-		}
+func rewriteRootHelpArgs(args []string) []string {
+	if len(args) < 2 || args[0] != "help" {
+		return args
 	}
-	return level
+
+	rewritten := make([]string, 0, len(args))
+	rewritten = append(rewritten, args[1], "--help")
+	rewritten = append(rewritten, args[2:]...)
+	return rewritten
+}
+
+func rootTelemetryLevel(flags rootGlobalFlags) telemetry.Level {
+	switch {
+	case flags.Silent:
+		return telemetry.LevelSilent
+	case flags.Quiet:
+		return telemetry.LevelQuiet
+	case flags.Verbose:
+		return telemetry.LevelVerbose
+	default:
+		return telemetry.LevelDefault
+	}
 }
 
 func runVersion(stdout io.Writer) int {

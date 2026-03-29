@@ -39,7 +39,7 @@ func TestRunRejectsUnknownSubcommand(t *testing.T) {
 }
 
 func TestRunRootHelpSucceeds(t *testing.T) {
-	for _, args := range [][]string{{"-h"}, {"--help"}} {
+	for _, args := range [][]string{{"-h"}, {"--help"}, {"help"}} {
 		t.Run(args[0], func(t *testing.T) {
 			var stdout, stderr bytes.Buffer
 			code := run(args, nil, &stdout, &stderr)
@@ -56,6 +56,34 @@ func TestRunRootHelpSucceeds(t *testing.T) {
 				t.Fatalf("stdout = %q, want empty", got)
 			}
 		})
+	}
+}
+
+func TestRunHelpListenShowsListenHelp(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"help", "listen"}, nil, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("run() = %d, want 0", code)
+	}
+	if got := stderr.String(); got != listenUsage+"\n" {
+		t.Fatalf("stderr = %q, want exact listen usage", got)
+	}
+	if got := stdout.String(); got != "" {
+		t.Fatalf("stdout = %q, want empty", got)
+	}
+}
+
+func TestRunHelpBogusRejected(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"help", "bogus"}, nil, &stdout, &stderr)
+	if code != 2 {
+		t.Fatalf("run() = %d, want 2", code)
+	}
+	if got := stderr.String(); got != "unknown subcommand \"bogus\"\n" {
+		t.Fatalf("stderr = %q, want exact unknown subcommand message", got)
+	}
+	if got := stdout.String(); got != "" {
+		t.Fatalf("stdout = %q, want empty", got)
 	}
 }
 
@@ -139,7 +167,9 @@ func TestRunVerbosityFlagsBeforeListen(t *testing.T) {
 		wantPrefix string
 	}{
 		{name: "quiet", args: []string{"-q", "listen"}, wantPrefix: ""},
+		{name: "quiet equals true", args: []string{"--quiet=true", "listen"}, wantPrefix: ""},
 		{name: "silent", args: []string{"-s", "listen"}, wantPrefix: ""},
+		{name: "silent equals true", args: []string{"--silent=true", "listen"}, wantPrefix: ""},
 		{name: "verbose", args: []string{"-v", "listen"}, wantPrefix: "waiting-for-claim\n"},
 	}
 
