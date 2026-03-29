@@ -9,6 +9,7 @@ import (
 
 	"github.com/shayne/derpcat/pkg/telemetry"
 	"github.com/shayne/derpcat/pkg/token"
+	"github.com/shayne/yargs"
 )
 
 type lockedBuffer struct {
@@ -143,13 +144,57 @@ func TestListenHelpTargetsCanonicalUsage(t *testing.T) {
 			if code != 0 {
 				t.Fatalf("run() = %d, want 0", code)
 			}
-			if got := stderr.String(); got != listenUsage+"\n" {
-				t.Fatalf("stderr = %q, want exact listen usage", got)
+			if got, want := stderr.String(), yargs.GenerateSubCommandHelp(
+				testListenHelpConfig(),
+				"listen",
+				struct {
+					Verbose bool `flag:"verbose" short:"v" help:"Show relay status updates"`
+					Quiet   bool `flag:"quiet" short:"q" help:"Reduce relay status output"`
+					Silent  bool `flag:"silent" short:"s" help:"Suppress relay status output"`
+				}{},
+				struct {
+					PrintTokenOnly bool   `flag:"print-token-only" help:"Print only the session token"`
+					ForceRelay     bool   `flag:"force-relay" help:"Disable direct probing"`
+					TCPListen      string `flag:"tcp-listen" help:"Accept one local TCP connection and forward its bytes to the session sink"`
+					TCPConnect     string `flag:"tcp-connect" help:"Connect to a local TCP service and forward session bytes to it"`
+				}{},
+				struct{}{},
+			); got != want {
+				t.Fatalf("stderr = %q, want yargs help %q", got, want)
 			}
 			if got := stdout.String(); got != "" {
 				t.Fatalf("stdout = %q, want empty", got)
 			}
 		})
+	}
+}
+
+func TestListenHelpLLMTargetsCanonicalOutput(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"listen", "--help-llm"}, nil, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("run() = %d, want 0", code)
+	}
+	if got, want := stderr.String(), yargs.GenerateSubCommandHelpLLM(
+		testListenHelpConfig(),
+		"listen",
+		struct {
+			Verbose bool `flag:"verbose" short:"v" help:"Show relay status updates"`
+			Quiet   bool `flag:"quiet" short:"q" help:"Reduce relay status output"`
+			Silent  bool `flag:"silent" short:"s" help:"Suppress relay status output"`
+		}{},
+		struct {
+			PrintTokenOnly bool   `flag:"print-token-only" help:"Print only the session token"`
+			ForceRelay     bool   `flag:"force-relay" help:"Disable direct probing"`
+			TCPListen      string `flag:"tcp-listen" help:"Accept one local TCP connection and forward its bytes to the session sink"`
+			TCPConnect     string `flag:"tcp-connect" help:"Connect to a local TCP service and forward session bytes to it"`
+		}{},
+		struct{}{},
+	); got != want {
+		t.Fatalf("stderr = %q, want yargs LLM help %q", got, want)
+	}
+	if got := stdout.String(); got != "" {
+		t.Fatalf("stdout = %q, want empty", got)
 	}
 }
 
@@ -159,8 +204,23 @@ func TestListenRejectsStrayPositionalArgs(t *testing.T) {
 	if code != 2 {
 		t.Fatalf("runListen() = %d, want 2", code)
 	}
-	if got := stderr.String(); !strings.HasPrefix(got, "usage: derpcat listen") {
-		t.Fatalf("stderr = %q, want usage text", got)
+	if got, want := stderr.String(), yargs.GenerateSubCommandHelp(
+		testListenHelpConfig(),
+		"listen",
+		struct {
+			Verbose bool `flag:"verbose" short:"v" help:"Show relay status updates"`
+			Quiet   bool `flag:"quiet" short:"q" help:"Reduce relay status output"`
+			Silent  bool `flag:"silent" short:"s" help:"Suppress relay status output"`
+		}{},
+		struct {
+			PrintTokenOnly bool   `flag:"print-token-only" help:"Print only the session token"`
+			ForceRelay     bool   `flag:"force-relay" help:"Disable direct probing"`
+			TCPListen      string `flag:"tcp-listen" help:"Accept one local TCP connection and forward its bytes to the session sink"`
+			TCPConnect     string `flag:"tcp-connect" help:"Connect to a local TCP service and forward session bytes to it"`
+		}{},
+		struct{}{},
+	); got != want {
+		t.Fatalf("stderr = %q, want yargs help %q", got, want)
 	}
 	if got := stdout.String(); got != "" {
 		t.Fatalf("stdout = %q, want empty", got)
@@ -206,5 +266,30 @@ func TestListenHonorsVerbosityLevel(t *testing.T) {
 				t.Fatalf("listener stderr = %q, want prefix %q", listenerStderr, tc.wantStderr)
 			}
 		})
+	}
+}
+
+func testListenHelpConfig() yargs.HelpConfig {
+	return yargs.HelpConfig{
+		Command: yargs.CommandInfo{
+			Name:        "derpcat",
+			Description: "Move one byte stream between hosts over public DERP with direct UDP promotion when available.",
+			Examples: []string{
+				"derpcat listen",
+				"cat file | derpcat send <token>",
+				"derpcat version",
+			},
+		},
+		SubCommands: map[string]yargs.SubCommandInfo{
+			"listen": {
+				Name:        "listen",
+				Description: "Listen for one incoming derpcat session and receive data.",
+				Usage:       "[--print-token-only] [--tcp-listen addr | --tcp-connect addr] [--force-relay]",
+				Examples: []string{
+					"derpcat listen",
+					"derpcat listen --tcp-connect 127.0.0.1:9000",
+				},
+			},
+		},
 	}
 }

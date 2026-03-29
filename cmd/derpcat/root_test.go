@@ -78,8 +78,14 @@ func TestRunHelpListenShowsListenHelp(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("run() = %d, want 0", code)
 	}
-	if got := stderr.String(); got != listenUsage+"\n" {
-		t.Fatalf("stderr = %q, want exact listen usage", got)
+	if got, want := stderr.String(), yargs.GenerateSubCommandHelp(
+		listenHelpConfig,
+		"listen",
+		listenGlobalFlags{},
+		listenFlags{},
+		struct{}{},
+	); got != want {
+		t.Fatalf("stderr = %q, want exact listen help %q", got, want)
 	}
 	if got := stdout.String(); got != "" {
 		t.Fatalf("stdout = %q, want empty", got)
@@ -459,8 +465,14 @@ func TestRunListenHelpSucceeds(t *testing.T) {
 			if code != 0 {
 				t.Fatalf("run() = %d, want 0", code)
 			}
-			if got := stderr.String(); got != listenUsage+"\n" {
-				t.Fatalf("stderr = %q, want exact listen usage", got)
+			if got, want := stderr.String(), yargs.GenerateSubCommandHelp(
+				listenHelpConfig,
+				"listen",
+				listenGlobalFlags{},
+				listenFlags{},
+				struct{}{},
+			); got != want {
+				t.Fatalf("stderr = %q, want exact listen help %q", got, want)
 			}
 			if got := stdout.String(); got != "" {
 				t.Fatalf("stdout = %q, want empty", got)
