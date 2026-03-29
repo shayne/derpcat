@@ -1,6 +1,7 @@
 package main
 
 import (
+	"flag"
 	"fmt"
 	"io"
 	"strings"
@@ -14,6 +15,8 @@ type rootGlobalFlags struct {
 	Quiet   bool `flag:"quiet" short:"q" help:"Reduce relay status output"`
 	Silent  bool `flag:"silent" short:"s" help:"Suppress relay status output"`
 }
+
+const versionUsage = "usage: derpcat version"
 
 var rootRegistry = yargs.Registry{
 	Command: yargs.CommandInfo{
@@ -88,7 +91,7 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	case "send":
 		return runSend(resolved.Args, level, stdin, stdout, stderr)
 	case "version":
-		return runVersion(stdout)
+		return runVersion(resolved.Args, stdout, stderr)
 	default:
 		fmt.Fprintf(stderr, "unknown subcommand %q\n", resolved.Path[0])
 		return 2
@@ -126,7 +129,24 @@ func rootTelemetryLevel(flags rootGlobalFlags) telemetry.Level {
 	}
 }
 
-func runVersion(stdout io.Writer) int {
+func runVersion(args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("version", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	fs.Usage = func() {
+		fmt.Fprintln(stderr, versionUsage)
+	}
+
+	if err := fs.Parse(args); err != nil {
+		if err == flag.ErrHelp {
+			return 0
+		}
+		return 2
+	}
+	if fs.NArg() != 0 {
+		fs.Usage()
+		return 2
+	}
+
 	fmt.Fprintln(stdout, versionString())
 	return 0
 }

@@ -110,6 +110,38 @@ func TestRunRootVersionCommandSucceeds(t *testing.T) {
 	}
 }
 
+func TestRunVersionHelpShowsHelp(t *testing.T) {
+	for _, args := range [][]string{{"version", "--help"}, {"help", "version"}} {
+		t.Run(strings.Join(args, "_"), func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			code := run(args, nil, &stdout, &stderr)
+			if code != 0 {
+				t.Fatalf("run() = %d, want 0", code)
+			}
+			if got := stderr.String(); got != versionUsage+"\n" {
+				t.Fatalf("stderr = %q, want exact version usage", got)
+			}
+			if got := stdout.String(); got != "" {
+				t.Fatalf("stdout = %q, want empty", got)
+			}
+		})
+	}
+}
+
+func TestRunVersionRejectsExtraArgs(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"version", "garbage"}, nil, &stdout, &stderr)
+	if code != 2 {
+		t.Fatalf("run() = %d, want 2", code)
+	}
+	if got := stderr.String(); got != versionUsage+"\n" {
+		t.Fatalf("stderr = %q, want exact version usage", got)
+	}
+	if got := stdout.String(); got != "" {
+		t.Fatalf("stdout = %q, want empty", got)
+	}
+}
+
 func TestRunRootRejectsVersionFlag(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	code := run([]string{"--version"}, nil, &stdout, &stderr)
