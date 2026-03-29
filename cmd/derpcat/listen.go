@@ -11,11 +11,6 @@ import (
 )
 
 func runListen(args []string, stdout, stderr io.Writer) int {
-	if len(args) == 0 {
-		fmt.Fprintln(stderr, "listen not implemented")
-		return 2
-	}
-
 	fs := flag.NewFlagSet("listen", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 
