@@ -143,13 +143,6 @@ func isRootHelpToken(arg string) bool {
 }
 
 func parseRootGlobalArg(arg string, current telemetry.Level) (telemetry.Level, bool, error) {
-	apply := func(next telemetry.Level, ok bool) telemetry.Level {
-		if ok {
-			return next
-		}
-		return current
-	}
-
 	switch arg {
 	case "-v", "--verbose":
 		return telemetry.LevelVerbose, true, nil
@@ -176,7 +169,10 @@ func parseRootGlobalArg(arg string, current telemetry.Level) (telemetry.Level, b
 			if err != nil {
 				return current, true, fmt.Errorf("invalid boolean value %q for %s", value, strings.TrimSuffix(spec.prefix, "="))
 			}
-			return apply(spec.level, parsed), true, nil
+			if parsed {
+				return spec.level, true, nil
+			}
+			return telemetry.LevelDefault, true, nil
 		}
 	}
 

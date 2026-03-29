@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/shayne/derpcat/pkg/telemetry"
 	"github.com/shayne/yargs"
 )
 
@@ -158,6 +159,39 @@ func TestRunVersionHelpLLMSucceeds(t *testing.T) {
 	}
 }
 
+func TestParseRootArgsResetsVerbosityToDefaultOnFalseNegation(t *testing.T) {
+	tests := []struct {
+		name          string
+		args          []string
+		wantLevel     telemetry.Level
+		wantRemaining []string
+	}{
+		{name: "quiet", args: []string{"-q", "--quiet=false", "listen"}, wantLevel: telemetry.LevelDefault, wantRemaining: []string{"listen"}},
+		{name: "silent", args: []string{"-s", "--silent=false", "listen"}, wantLevel: telemetry.LevelDefault, wantRemaining: []string{"listen"}},
+		{name: "verbose", args: []string{"-v", "--verbose=false", "listen"}, wantLevel: telemetry.LevelDefault, wantRemaining: []string{"listen"}},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			gotLevel, gotRemaining, err := parseRootArgs(tc.args)
+			if err != nil {
+				t.Fatalf("parseRootArgs() error = %v", err)
+			}
+			if gotLevel != tc.wantLevel {
+				t.Fatalf("parseRootArgs() level = %v, want %v", gotLevel, tc.wantLevel)
+			}
+			if len(gotRemaining) != len(tc.wantRemaining) {
+				t.Fatalf("parseRootArgs() remaining = %v, want %v", gotRemaining, tc.wantRemaining)
+			}
+			for i := range tc.wantRemaining {
+				if gotRemaining[i] != tc.wantRemaining[i] {
+					t.Fatalf("parseRootArgs() remaining = %v, want %v", gotRemaining, tc.wantRemaining)
+				}
+			}
+		})
+	}
+}
+
 func TestRunVersionRejectsExtraArgs(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	code := run([]string{"version", "garbage"}, nil, &stdout, &stderr)
@@ -300,8 +334,10 @@ func TestRunVerbosityFlagsBeforeListen(t *testing.T) {
 	}{
 		{name: "quiet", args: []string{"-q", "listen"}, wantPrefix: ""},
 		{name: "quiet equals true", args: []string{"--quiet=true", "listen"}, wantPrefix: ""},
+		{name: "quiet equals false resets to default", args: []string{"-q", "--quiet=false", "listen"}, wantPrefix: "waiting-for-claim\n"},
 		{name: "silent", args: []string{"-s", "listen"}, wantPrefix: ""},
 		{name: "silent equals true", args: []string{"--silent=true", "listen"}, wantPrefix: ""},
+		{name: "silent equals false resets to default", args: []string{"-s", "--silent=false", "listen"}, wantPrefix: "waiting-for-claim\n"},
 		{name: "verbose", args: []string{"-v", "listen"}, wantPrefix: "waiting-for-claim\n"},
 		{name: "last verbose wins", args: []string{"-s", "-v", "listen"}, wantPrefix: "waiting-for-claim\n"},
 		{name: "last silent wins", args: []string{"-v", "-s", "listen"}, wantPrefix: ""},
