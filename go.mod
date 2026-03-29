@@ -3,6 +3,7 @@ module github.com/shayne/derpcat
 go 1.26.1
 
 require (
+	github.com/shayne/yargs v1.0.1
 	github.com/tailscale/wireguard-go v0.0.0-20250716170648-1d0488a3d7da
 	go4.org/mem v0.0.0-20240501181205-ae6ca9944745
 	golang.org/x/crypto v0.46.0

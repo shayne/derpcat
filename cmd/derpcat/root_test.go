@@ -13,8 +13,11 @@ func TestRunRejectsMissingSubcommand(t *testing.T) {
 	if code != 2 {
 		t.Fatalf("run() = %d, want 2", code)
 	}
-	if got := stderr.String(); got != "usage: derpcat <listen|send> [flags]\n" {
-		t.Fatalf("stderr = %q, want exact usage text", got)
+	got := stderr.String()
+	for _, want := range []string{"listen", "send", "version"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("stderr = %q, want help mentioning %q", got, want)
+		}
 	}
 	if got := stdout.String(); got != "" {
 		t.Fatalf("stdout = %q, want empty", got)
@@ -43,8 +46,11 @@ func TestRunRootHelpSucceeds(t *testing.T) {
 			if code != 0 {
 				t.Fatalf("run() = %d, want 0", code)
 			}
-			if got := stderr.String(); got != "usage: derpcat <listen|send> [flags]\n" {
-				t.Fatalf("stderr = %q, want exact root usage", got)
+			got := stderr.String()
+			for _, want := range []string{"listen", "send", "version"} {
+				if !strings.Contains(got, want) {
+					t.Fatalf("stderr = %q, want help mentioning %q", got, want)
+				}
 			}
 			if got := stdout.String(); got != "" {
 				t.Fatalf("stdout = %q, want empty", got)
@@ -53,7 +59,7 @@ func TestRunRootHelpSucceeds(t *testing.T) {
 	}
 }
 
-func TestRunRootVersionSucceeds(t *testing.T) {
+func TestRunRootVersionCommandSucceeds(t *testing.T) {
 	origVersion, origCommit, origBuildDate := version, commit, buildDate
 	t.Cleanup(func() {
 		version, commit, buildDate = origVersion, origCommit, origBuildDate
@@ -63,20 +69,30 @@ func TestRunRootVersionSucceeds(t *testing.T) {
 	commit = "abc1234"
 	buildDate = "2026-03-29T12:00:00Z"
 
-	for _, args := range [][]string{{"--version"}, {"-v", "--version"}} {
-		t.Run(strings.Join(args, "_"), func(t *testing.T) {
-			var stdout, stderr bytes.Buffer
-			code := run(args, nil, &stdout, &stderr)
-			if code != 0 {
-				t.Fatalf("run() = %d, want 0", code)
-			}
-			if got := stdout.String(); got != "v0.0.1\n" {
-				t.Fatalf("stdout = %q, want version output", got)
-			}
-			if got := stderr.String(); got != "" {
-				t.Fatalf("stderr = %q, want empty", got)
-			}
-		})
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"version"}, nil, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("run() = %d, want 0", code)
+	}
+	if got := stdout.String(); got != "v0.0.1\n" {
+		t.Fatalf("stdout = %q, want version output", got)
+	}
+	if got := stderr.String(); got != "" {
+		t.Fatalf("stderr = %q, want empty", got)
+	}
+}
+
+func TestRunRootRejectsVersionFlag(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"--version"}, nil, &stdout, &stderr)
+	if code != 2 {
+		t.Fatalf("run() = %d, want 2", code)
+	}
+	if got := stderr.String(); got == "" {
+		t.Fatal("stderr = empty, want usage or parse error")
+	}
+	if got := stdout.String(); got != "" {
+		t.Fatalf("stdout = %q, want empty", got)
 	}
 }
 

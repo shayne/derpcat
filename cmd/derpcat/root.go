@@ -3,50 +3,127 @@ package main
 import (
 	"fmt"
 	"io"
+	"strings"
 
 	"github.com/shayne/derpcat/pkg/telemetry"
+	"github.com/shayne/yargs"
 )
 
+type rootGlobalFlags struct {
+	Verbose bool `flag:"verbose" short:"v" help:"Show relay status updates"`
+	Quiet   bool `flag:"quiet" short:"q" help:"Reduce relay status output"`
+	Silent  bool `flag:"silent" short:"s" help:"Suppress relay status output"`
+}
+
+var rootRegistry = yargs.Registry{
+	Command: yargs.CommandInfo{
+		Name:        "derpcat",
+		Description: "Relay payloads through a public DERP server or a private listener.",
+		Examples: []string{
+			"derpcat listen",
+			"derpcat send <token>",
+			"derpcat version",
+		},
+	},
+	SubCommands: map[string]yargs.CommandSpec{
+		"listen": {
+			Info: yargs.SubCommandInfo{
+				Name:        "listen",
+				Description: "Listen for a claim token and stream payloads to stdout.",
+			},
+		},
+		"send": {
+			Info: yargs.SubCommandInfo{
+				Name:        "send",
+				Description: "Claim a token and stream stdin to a relay listener.",
+			},
+		},
+		"version": {
+			Info: yargs.SubCommandInfo{
+				Name:        "version",
+				Description: "Print the derpcat version.",
+			},
+		},
+	},
+}
+
+var rootHelpConfig = rootRegistry.HelpConfig()
+
 func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
+	parsed, err := yargs.ParseKnownFlags[rootGlobalFlags](args, yargs.KnownFlagsOptions{})
+	if err != nil {
+		fmt.Fprintln(stderr, err)
+		return 2
+	}
+
+	level := rootTelemetryLevel(args, parsed.Flags)
+
+	remaining := parsed.RemainingArgs
+	if len(remaining) == 0 {
+		fmt.Fprint(stderr, yargs.GenerateGlobalHelp(rootHelpConfig, rootGlobalFlags{}))
+		return 2
+	}
+	if isRootHelpRequest(remaining) {
+		fmt.Fprint(stderr, yargs.GenerateGlobalHelp(rootHelpConfig, rootGlobalFlags{}))
+		return 0
+	}
+
+	resolved, ok, err := yargs.ResolveCommandWithRegistry(remaining, rootRegistry)
+	if err != nil || !ok {
+		if len(remaining) > 0 && strings.HasPrefix(remaining[0], "-") {
+			fmt.Fprint(stderr, yargs.GenerateGlobalHelp(rootHelpConfig, rootGlobalFlags{}))
+			return 2
+		}
+		if len(remaining) > 0 {
+			fmt.Fprintf(stderr, "unknown subcommand %q\n", remaining[0])
+		} else {
+			fmt.Fprint(stderr, yargs.GenerateGlobalHelp(rootHelpConfig, rootGlobalFlags{}))
+		}
+		return 2
+	}
+
+	switch resolved.Path[0] {
+	case "listen":
+		return runListen(resolved.Args, level, stdout, stderr)
+	case "send":
+		return runSend(resolved.Args, level, stdin, stdout, stderr)
+	case "version":
+		return runVersion(stdout)
+	default:
+		fmt.Fprintf(stderr, "unknown subcommand %q\n", resolved.Path[0])
+		return 2
+	}
+}
+
+func isRootHelpRequest(args []string) bool {
+	if len(args) == 0 {
+		return false
+	}
+	return args[0] == "-h" || args[0] == "--help" || args[0] == "help"
+}
+
+func rootTelemetryLevel(args []string, flags rootGlobalFlags) telemetry.Level {
 	level := telemetry.LevelDefault
-	for len(args) > 0 {
-		switch args[0] {
+	for _, arg := range args {
+		switch arg {
 		case "-v", "--verbose":
-			level = telemetry.LevelVerbose
-			args = args[1:]
+			if flags.Verbose {
+				level = telemetry.LevelVerbose
+			}
 		case "-q", "--quiet":
-			level = telemetry.LevelQuiet
-			args = args[1:]
+			if flags.Quiet {
+				level = telemetry.LevelQuiet
+			}
 		case "-s", "--silent":
-			level = telemetry.LevelSilent
-			args = args[1:]
-		case "--version":
-			fmt.Fprintln(stdout, versionString())
-			return 0
-		case "-h", "--help":
-			fmt.Fprintln(stderr, "usage: derpcat <listen|send> [flags]")
-			return 0
-		default:
-			goto dispatch
+			if flags.Silent {
+				level = telemetry.LevelSilent
+			}
 		}
 	}
+	return level
+}
 
-	fmt.Fprintln(stderr, "usage: derpcat <listen|send> [flags]")
-	return 2
-
-dispatch:
-	if len(args) == 0 {
-		fmt.Fprintln(stderr, "usage: derpcat <listen|send> [flags]")
-		return 2
-	}
-
-	switch args[0] {
-	case "listen":
-		return runListen(args[1:], level, stdout, stderr)
-	case "send":
-		return runSend(args[1:], level, stdin, stdout, stderr)
-	default:
-		fmt.Fprintf(stderr, "unknown subcommand %q\n", args[0])
-		return 2
-	}
+func runVersion(stdout io.Writer) int {
+	fmt.Fprintln(stdout, versionString())
+	return 0
 }
