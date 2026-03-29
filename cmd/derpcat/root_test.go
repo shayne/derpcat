@@ -81,7 +81,7 @@ func TestRunHelpListenShowsListenHelp(t *testing.T) {
 	if got, want := stderr.String(), yargs.GenerateSubCommandHelp(
 		listenHelpConfig,
 		"listen",
-		listenGlobalFlags{},
+		struct{}{},
 		listenFlags{},
 		struct{}{},
 	); got != want {
@@ -468,7 +468,7 @@ func TestRunListenHelpSucceeds(t *testing.T) {
 			if got, want := stderr.String(), yargs.GenerateSubCommandHelp(
 				listenHelpConfig,
 				"listen",
-				listenGlobalFlags{},
+				struct{}{},
 				listenFlags{},
 				struct{}{},
 			); got != want {

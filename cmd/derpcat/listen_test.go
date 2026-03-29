@@ -147,17 +147,8 @@ func TestListenHelpTargetsCanonicalUsage(t *testing.T) {
 			if got, want := stderr.String(), yargs.GenerateSubCommandHelp(
 				testListenHelpConfig(),
 				"listen",
-				struct {
-					Verbose bool `flag:"verbose" short:"v" help:"Show relay status updates"`
-					Quiet   bool `flag:"quiet" short:"q" help:"Reduce relay status output"`
-					Silent  bool `flag:"silent" short:"s" help:"Suppress relay status output"`
-				}{},
-				struct {
-					PrintTokenOnly bool   `flag:"print-token-only" help:"Print only the session token"`
-					ForceRelay     bool   `flag:"force-relay" help:"Disable direct probing"`
-					TCPListen      string `flag:"tcp-listen" help:"Accept one local TCP connection and forward its bytes to the session sink"`
-					TCPConnect     string `flag:"tcp-connect" help:"Connect to a local TCP service and forward session bytes to it"`
-				}{},
+				struct{}{},
+				listenHelpFlags{},
 				struct{}{},
 			); got != want {
 				t.Fatalf("stderr = %q, want yargs help %q", got, want)
@@ -178,17 +169,8 @@ func TestListenHelpLLMTargetsCanonicalOutput(t *testing.T) {
 	if got, want := stderr.String(), yargs.GenerateSubCommandHelpLLM(
 		testListenHelpConfig(),
 		"listen",
-		struct {
-			Verbose bool `flag:"verbose" short:"v" help:"Show relay status updates"`
-			Quiet   bool `flag:"quiet" short:"q" help:"Reduce relay status output"`
-			Silent  bool `flag:"silent" short:"s" help:"Suppress relay status output"`
-		}{},
-		struct {
-			PrintTokenOnly bool   `flag:"print-token-only" help:"Print only the session token"`
-			ForceRelay     bool   `flag:"force-relay" help:"Disable direct probing"`
-			TCPListen      string `flag:"tcp-listen" help:"Accept one local TCP connection and forward its bytes to the session sink"`
-			TCPConnect     string `flag:"tcp-connect" help:"Connect to a local TCP service and forward session bytes to it"`
-		}{},
+		struct{}{},
+		listenHelpFlags{},
 		struct{}{},
 	); got != want {
 		t.Fatalf("stderr = %q, want yargs LLM help %q", got, want)
@@ -207,17 +189,28 @@ func TestListenRejectsStrayPositionalArgs(t *testing.T) {
 	if got, want := stderr.String(), yargs.GenerateSubCommandHelp(
 		testListenHelpConfig(),
 		"listen",
-		struct {
-			Verbose bool `flag:"verbose" short:"v" help:"Show relay status updates"`
-			Quiet   bool `flag:"quiet" short:"q" help:"Reduce relay status output"`
-			Silent  bool `flag:"silent" short:"s" help:"Suppress relay status output"`
-		}{},
-		struct {
-			PrintTokenOnly bool   `flag:"print-token-only" help:"Print only the session token"`
-			ForceRelay     bool   `flag:"force-relay" help:"Disable direct probing"`
-			TCPListen      string `flag:"tcp-listen" help:"Accept one local TCP connection and forward its bytes to the session sink"`
-			TCPConnect     string `flag:"tcp-connect" help:"Connect to a local TCP service and forward session bytes to it"`
-		}{},
+		struct{}{},
+		listenHelpFlags{},
+		struct{}{},
+	); got != want {
+		t.Fatalf("stderr = %q, want yargs help %q", got, want)
+	}
+	if got := stdout.String(); got != "" {
+		t.Fatalf("stdout = %q, want empty", got)
+	}
+}
+
+func TestListenRejectsStrayPositionalArgsEvenWithHelp(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := runListen([]string{"extra", "--help"}, telemetry.LevelDefault, &stdout, &stderr)
+	if code != 2 {
+		t.Fatalf("runListen() = %d, want 2", code)
+	}
+	if got, want := stderr.String(), yargs.GenerateSubCommandHelp(
+		testListenHelpConfig(),
+		"listen",
+		struct{}{},
+		listenHelpFlags{},
 		struct{}{},
 	); got != want {
 		t.Fatalf("stderr = %q, want yargs help %q", got, want)
@@ -292,4 +285,11 @@ func testListenHelpConfig() yargs.HelpConfig {
 			},
 		},
 	}
+}
+
+type listenHelpFlags struct {
+	PrintTokenOnly bool   `flag:"print-token-only" help:"Print only the session token"`
+	ForceRelay     bool   `flag:"force-relay" help:"Disable direct probing"`
+	TCPListen      string `flag:"tcp-listen" help:"Accept one local TCP connection and forward its bytes to the session sink"`
+	TCPConnect     string `flag:"tcp-connect" help:"Connect to a local TCP service and forward session bytes to it"`
 }

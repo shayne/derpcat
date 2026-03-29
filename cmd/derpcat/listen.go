@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"io"
 
@@ -18,10 +17,13 @@ type listenFlags struct {
 	TCPConnect     string `flag:"tcp-connect" help:"Connect to a local TCP service and forward session bytes to it"`
 }
 
-type listenGlobalFlags struct {
-	Verbose bool `flag:"verbose" short:"v" help:"Show relay status updates"`
-	Quiet   bool `flag:"quiet" short:"q" help:"Reduce relay status output"`
-	Silent  bool `flag:"silent" short:"s" help:"Suppress relay status output"`
+type listenParseFlags struct {
+	PrintTokenOnly bool   `flag:"print-token-only" help:"Print only the session token"`
+	ForceRelay     bool   `flag:"force-relay" help:"Disable direct probing"`
+	TCPListen      string `flag:"tcp-listen" help:"Accept one local TCP connection and forward its bytes to the session sink"`
+	TCPConnect     string `flag:"tcp-connect" help:"Connect to a local TCP service and forward session bytes to it"`
+	Help           bool   `flag:"help" short:"h" help:"Show this help message"`
+	HelpLLM        bool   `flag:"help-llm" help:"Show LLM-optimized help"`
 }
 
 var listenHelpConfig = yargs.HelpConfig{
@@ -48,44 +50,27 @@ var listenHelpConfig = yargs.HelpConfig{
 }
 
 func runListen(args []string, level telemetry.Level, stdout, stderr io.Writer) int {
-	commandArgs := append([]string{"listen"}, args...)
-	parsed, err := yargs.ParseWithCommandAndHelp[listenGlobalFlags, listenFlags, struct{}](commandArgs, listenHelpConfig)
-	if err != nil {
-		if errors.Is(err, yargs.ErrHelp) || errors.Is(err, yargs.ErrSubCommandHelp) || errors.Is(err, yargs.ErrHelpLLM) {
-			if parsed != nil {
-				fmt.Fprint(stderr, parsed.HelpText)
-			} else {
-				fmt.Fprint(stderr, yargs.GenerateSubCommandHelpLLM(
-					listenHelpConfig,
-					"listen",
-					listenGlobalFlags{},
-					listenFlags{},
-					struct{}{},
-				))
-			}
-			return 0
-		}
-		fmt.Fprintln(stderr, err)
-		return 2
-	}
-
-	known, err := yargs.ParseKnownFlags[listenFlags](args, yargs.KnownFlagsOptions{})
+	parsed, err := yargs.ParseFlags[listenParseFlags](args)
 	if err != nil {
 		fmt.Fprintln(stderr, err)
 		return 2
 	}
-	if len(known.RemainingArgs) != 0 {
-		fmt.Fprint(stderr, yargs.GenerateSubCommandHelp(
-			listenHelpConfig,
-			"listen",
-			listenGlobalFlags{},
-			listenFlags{},
-			struct{}{},
-		))
+
+	if len(parsed.Args) != 0 || len(parsed.RemainingArgs) != 0 {
+		fmt.Fprint(stderr, listenHelpText())
 		return 2
 	}
 
-	if known.Flags.TCPListen != "" && known.Flags.TCPConnect != "" {
+	if parsed.Flags.HelpLLM {
+		fmt.Fprint(stderr, listenHelpLLMText())
+		return 0
+	}
+	if parsed.Flags.Help {
+		fmt.Fprint(stderr, listenHelpText())
+		return 0
+	}
+
+	if parsed.Flags.TCPListen != "" && parsed.Flags.TCPConnect != "" {
 		fmt.Fprintln(stderr, "listen: --tcp-listen and --tcp-connect are mutually exclusive")
 		return 2
 	}
@@ -99,9 +84,9 @@ func runListen(args []string, level telemetry.Level, stdout, stderr io.Writer) i
 			TokenSink:     tokenSink,
 			StdioOut:      stdout,
 			Attachment:    nil,
-			TCPListen:     known.Flags.TCPListen,
-			TCPConnect:    known.Flags.TCPConnect,
-			ForceRelay:    known.Flags.ForceRelay,
+			TCPListen:     parsed.Flags.TCPListen,
+			TCPConnect:    parsed.Flags.TCPConnect,
+			ForceRelay:    parsed.Flags.ForceRelay,
 			UsePublicDERP: usePublicDERPTransport(),
 		})
 		done <- err
@@ -122,7 +107,7 @@ func runListen(args []string, level telemetry.Level, stdout, stderr io.Writer) i
 	}
 
 	tokenOut := stderr
-	if known.Flags.PrintTokenOnly {
+	if parsed.Flags.PrintTokenOnly {
 		tokenOut = stdout
 	}
 	fmt.Fprintln(tokenOut, tok)
@@ -132,4 +117,24 @@ func runListen(args []string, level telemetry.Level, stdout, stderr io.Writer) i
 		return 1
 	}
 	return 0
+}
+
+func listenHelpText() string {
+	return yargs.GenerateSubCommandHelp(
+		listenHelpConfig,
+		"listen",
+		struct{}{},
+		listenFlags{},
+		struct{}{},
+	)
+}
+
+func listenHelpLLMText() string {
+	return yargs.GenerateSubCommandHelpLLM(
+		listenHelpConfig,
+		"listen",
+		struct{}{},
+		listenFlags{},
+		struct{}{},
+	)
 }
