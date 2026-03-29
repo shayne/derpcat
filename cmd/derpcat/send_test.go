@@ -68,6 +68,18 @@ func TestSendPreservesIntentionalHelpEdgeCases(t *testing.T) {
 	}
 }
 
+func TestSendRejectsArgsAfterDoubleDash(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := runSend([]string{"token-value", "--", "extra"}, telemetry.LevelDefault, nil, &stdout, &stderr)
+	if code != 2 {
+		t.Fatalf("runSend() = %d, want 2", code)
+	}
+	assertSendHelpText(t, stderr.String())
+	if got := stdout.String(); got != "" {
+		t.Fatalf("stdout = %q, want empty", got)
+	}
+}
+
 func assertSendHelpText(t *testing.T, got string) {
 	t.Helper()
 	for _, want := range []string{

@@ -444,6 +444,7 @@ func TestRunHelpSendDelegatesNonRuntimeArgs(t *testing.T) {
 		{name: "unknown flag", args: []string{"help", "send", "--bogus"}, wantCode: 2, wantStderr: "unknown flag: --bogus\n"},
 		{name: "double dash before help", args: []string{"help", "send", "--", "--help"}, wantCode: 0},
 		{name: "unknown flag before double dash help", args: []string{"help", "send", "--bogus", "--", "--help"}, wantCode: 0},
+		{name: "token with trailing double dash args", args: []string{"help", "send", "token-value", "--", "extra"}, wantCode: 2},
 	}
 
 	for _, tc := range tests {

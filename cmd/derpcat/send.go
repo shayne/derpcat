@@ -62,7 +62,7 @@ func runSend(args []string, level telemetry.Level, stdin io.Reader, stdout, stde
 		}
 	}
 
-	if parsed.Args.Token == "" {
+	if parsed.Args.Token == "" || len(parsed.Parser.Args) > 1 || len(parsed.RemainingArgs) != 0 {
 		fmt.Fprint(stderr, yargs.GenerateSubCommandHelp(sendHelpConfig, "send", struct{}{}, sendFlags{}, sendArgs{}))
 		return 2
 	}
