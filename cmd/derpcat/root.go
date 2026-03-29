@@ -1,7 +1,6 @@
 package main
 
 import (
-	"flag"
 	"fmt"
 	"io"
 	"reflect"
@@ -263,6 +262,10 @@ func rewriteRootHelpArgs(args []string) ([]string, bool) {
 		return []string{"version", "--help-llm"}, false
 	}
 
+	if len(args) == 3 && args[1] == "version" && args[2] == "--help" {
+		return []string{"version", "--help"}, false
+	}
+
 	if len(args) > 2 {
 		return args, true
 	}
@@ -271,29 +274,18 @@ func rewriteRootHelpArgs(args []string) ([]string, bool) {
 }
 
 func runVersion(args []string, stdout, stderr io.Writer) int {
-	if len(args) > 0 && args[0] == "--help-llm" {
-		if len(args) != 1 {
-			fmt.Fprintln(stderr, versionUsage)
-			return 2
-		}
+	if len(args) == 1 && args[0] == "--help-llm" {
 		fmt.Fprint(stderr, yargs.GenerateSubCommandHelpLLMFromConfig(rootHelpConfig, "version", rootGlobalFlags{}))
 		return 0
 	}
 
-	fs := flag.NewFlagSet("version", flag.ContinueOnError)
-	fs.SetOutput(stderr)
-	fs.Usage = func() {
+	if len(args) == 1 && (args[0] == "-h" || args[0] == "--help") {
 		fmt.Fprintln(stderr, versionUsage)
+		return 0
 	}
 
-	if err := fs.Parse(args); err != nil {
-		if err == flag.ErrHelp {
-			return 0
-		}
-		return 2
-	}
-	if fs.NArg() != 0 {
-		fs.Usage()
+	if len(args) != 0 {
+		fmt.Fprintln(stderr, versionUsage)
 		return 2
 	}
 

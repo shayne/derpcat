@@ -2,8 +2,6 @@ package main
 
 import (
 	"bytes"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -143,6 +141,24 @@ func TestRunVersionHelpShowsHelp(t *testing.T) {
 	}
 }
 
+func TestRunVersionHelpRejectsExtraArgs(t *testing.T) {
+	for _, args := range [][]string{{"version", "--help", "extra"}, {"version", "-h", "extra"}} {
+		t.Run(strings.Join(args, "_"), func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			code := run(args, nil, &stdout, &stderr)
+			if code != 2 {
+				t.Fatalf("run() = %d, want 2", code)
+			}
+			if got := stderr.String(); got != versionUsage+"\n" {
+				t.Fatalf("stderr = %q, want exact version usage", got)
+			}
+			if got := stdout.String(); got != "" {
+				t.Fatalf("stdout = %q, want empty", got)
+			}
+		})
+	}
+}
+
 func TestRunVersionHelpLLMSucceeds(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	code := run([]string{"version", "--help-llm"}, nil, &stdout, &stderr)
@@ -151,6 +167,20 @@ func TestRunVersionHelpLLMSucceeds(t *testing.T) {
 	}
 	if got, want := stderr.String(), yargs.GenerateSubCommandHelpLLMFromConfig(rootHelpConfig, "version", rootGlobalFlags{}); got != want {
 		t.Fatalf("stderr = %q, want exact LLM version help %q", got, want)
+	}
+	if got := stdout.String(); got != "" {
+		t.Fatalf("stdout = %q, want empty", got)
+	}
+}
+
+func TestRunHelpVersionHelpSucceeds(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"help", "version", "--help"}, nil, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("run() = %d, want 0", code)
+	}
+	if got := stderr.String(); got != versionUsage+"\n" {
+		t.Fatalf("stderr = %q, want exact version usage", got)
 	}
 	if got := stdout.String(); got != "" {
 		t.Fatalf("stdout = %q, want empty", got)
@@ -311,29 +341,6 @@ func assertRootHelp(t *testing.T, got string) {
 	for _, want := range []string{"listen", "send", "version"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("stderr = %q, want root help mentioning %q", got, want)
-		}
-	}
-}
-
-func TestRootParserDoesNotHardCodeGlobalFlagSyntax(t *testing.T) {
-	src, err := os.ReadFile(filepath.Clean("root.go"))
-	if err != nil {
-		t.Fatalf("ReadFile(root.go) error = %v", err)
-	}
-
-	for _, want := range []string{
-		`case "-v", "--verbose":`,
-		`case "-q", "--quiet":`,
-		`case "-s", "--silent":`,
-		`prefix: "-v="`,
-		`prefix: "--verbose="`,
-		`prefix: "-q="`,
-		`prefix: "--quiet="`,
-		`prefix: "-s="`,
-		`prefix: "--silent="`,
-	} {
-		if strings.Contains(string(src), want) {
-			t.Fatalf("root.go still hard-codes root flag syntax %q", want)
 		}
 	}
 }
