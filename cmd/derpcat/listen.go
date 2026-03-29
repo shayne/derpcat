@@ -193,7 +193,7 @@ func listenPreScan(args []string) listenPreScanResult {
 		flagName := listenFlagName(arg)
 		kind, ok := listenFlagKinds[flagName]
 		if ok && kind != reflect.Bool && !strings.Contains(arg, "=") {
-			if i+1 < len(args) && args[i+1] != "--" {
+			if i+1 < len(args) {
 				result.parseArgs = append(result.parseArgs, arg+"="+args[i+1])
 				i++
 			} else {
