@@ -1,0 +1,11 @@
+[tools]
+go = "1.26.1"
+
+[tasks.test]
+run = "go test ./..."
+
+[tasks.build]
+run = "go build ./cmd/derpcat"
+
+[tasks.build-linux-amd64]
+run = "GOOS=linux GOARCH=amd64 go build -o dist/derpcat-linux-amd64 ./cmd/derpcat"
