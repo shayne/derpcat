@@ -1,0 +1,93 @@
+package rendezvous
+
+import (
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+)
+
+type Claim struct {
+	Version      uint8    `json:"version"`
+	SessionID    [16]byte `json:"session_id"`
+	BearerMAC    string   `json:"bearer_mac"`
+	DERPPublic   [32]byte `json:"derp_public"`
+	WGPublic     [32]byte `json:"wg_public"`
+	DiscoPublic  [32]byte `json:"disco_public"`
+	Candidates   []string `json:"candidates,omitempty"`
+	Capabilities uint32   `json:"capabilities"`
+}
+
+type AcceptInfo struct {
+	Version      uint8    `json:"version"`
+	SessionID    [16]byte `json:"session_id"`
+	Candidates   []string `json:"candidates,omitempty"`
+	Capabilities uint32   `json:"capabilities"`
+}
+
+type RejectCode string
+
+const (
+	RejectExpired         RejectCode = "expired"
+	RejectClaimed         RejectCode = "claimed"
+	RejectVersionMismatch RejectCode = "version_mismatch"
+	RejectSessionMismatch RejectCode = "session_mismatch"
+	RejectBadMAC          RejectCode = "bad_mac"
+)
+
+type RejectInfo struct {
+	Code   RejectCode `json:"code"`
+	Reason string     `json:"reason,omitempty"`
+}
+
+type Decision struct {
+	Accepted bool        `json:"accepted"`
+	Accept   *AcceptInfo `json:"accept,omitempty"`
+	Reject   *RejectInfo `json:"reject,omitempty"`
+}
+
+func ComputeBearerMAC(secret [32]byte, claim Claim) string {
+	payload, err := json.Marshal(struct {
+		Version      uint8    `json:"version"`
+		SessionID    [16]byte `json:"session_id"`
+		DERPPublic   [32]byte `json:"derp_public"`
+		WGPublic     [32]byte `json:"wg_public"`
+		DiscoPublic  [32]byte `json:"disco_public"`
+		Candidates   []string `json:"candidates,omitempty"`
+		Capabilities uint32   `json:"capabilities"`
+	}{
+		Version:      claim.Version,
+		SessionID:    claim.SessionID,
+		DERPPublic:   claim.DERPPublic,
+		WGPublic:     claim.WGPublic,
+		DiscoPublic:  claim.DiscoPublic,
+		Candidates:   claim.Candidates,
+		Capabilities: claim.Capabilities,
+	})
+	if err != nil {
+		return ""
+	}
+	mac := hmac.New(sha256.New, secret[:])
+	_, _ = mac.Write(payload)
+	return hex.EncodeToString(mac.Sum(nil))
+}
+
+func EncodeClaim(claim Claim) ([]byte, error) {
+	return json.Marshal(claim)
+}
+
+func DecodeClaim(raw []byte) (Claim, error) {
+	var claim Claim
+	err := json.Unmarshal(raw, &claim)
+	return claim, err
+}
+
+func EncodeDecision(decision Decision) ([]byte, error) {
+	return json.Marshal(decision)
+}
+
+func DecodeDecision(raw []byte) (Decision, error) {
+	var decision Decision
+	err := json.Unmarshal(raw, &decision)
+	return decision, err
+}

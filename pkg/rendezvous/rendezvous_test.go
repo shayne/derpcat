@@ -1,0 +1,208 @@
+package rendezvous
+
+import (
+	"errors"
+	"reflect"
+	"testing"
+	"time"
+
+	"github.com/shayne/derpcat/pkg/token"
+)
+
+func testToken(now time.Time) token.Token {
+	return token.Token{
+		Version:      token.SupportedVersion,
+		SessionID:    [16]byte{1, 2, 3, 4},
+		ExpiresUnix:  now.Add(time.Minute).Unix(),
+		BearerSecret: [32]byte{9, 8, 7, 6},
+	}
+}
+
+func testClaim(tok token.Token) Claim {
+	claim := Claim{
+		Version:      tok.Version,
+		SessionID:    tok.SessionID,
+		DERPPublic:   [32]byte{1, 2, 3, 4},
+		WGPublic:     [32]byte{5, 6, 7, 8},
+		DiscoPublic:  [32]byte{9, 10, 11, 12},
+		Candidates:   []string{"udp4:203.0.113.10:12345", "udp6:[2001:db8::10]:12345"},
+		Capabilities: 0x5,
+	}
+	claim.BearerMAC = ComputeBearerMAC(tok.BearerSecret, claim)
+	return claim
+}
+
+func TestGateAcceptsFirstValidClaim(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0).UTC()
+	tok := testToken(now)
+	gate := NewGate(tok)
+
+	claim := testClaim(tok)
+	decision, err := gate.Accept(now, claim)
+	if err != nil {
+		t.Fatalf("Accept() error = %v", err)
+	}
+	if !decision.Accepted {
+		t.Fatalf("Accepted = false, want true")
+	}
+	if decision.Accept == nil {
+		t.Fatalf("Accept = nil, want structured accept info")
+	}
+	if got, want := decision.Accept.SessionID, tok.SessionID; got != want {
+		t.Fatalf("Accept.SessionID = %x, want %x", got, want)
+	}
+}
+
+func TestGateRejectsExpiredToken(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0).UTC()
+	tok := testToken(now)
+	tok.ExpiresUnix = now.Add(-time.Second).Unix()
+	gate := NewGate(tok)
+
+	claim := testClaim(tok)
+	decision, err := gate.Accept(now, claim)
+	if !errors.Is(err, token.ErrExpired) {
+		t.Fatalf("Accept() error = %v, want token.ErrExpired", err)
+	}
+	if decision.Accepted {
+		t.Fatalf("Accepted = true, want false")
+	}
+	if decision.Reject == nil {
+		t.Fatalf("Reject = nil, want structured reject info")
+	}
+	if got, want := decision.Reject.Code, RejectExpired; got != want {
+		t.Fatalf("Reject.Code = %q, want %q", got, want)
+	}
+}
+
+func TestGateRejectsSecondClaim(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0).UTC()
+	tok := testToken(now)
+	gate := NewGate(tok)
+
+	claim := testClaim(tok)
+	if _, err := gate.Accept(now, claim); err != nil {
+		t.Fatalf("first Accept() error = %v", err)
+	}
+	decision, err := gate.Accept(now, claim)
+	if !errors.Is(err, ErrClaimed) {
+		t.Fatalf("second Accept() error = %v, want ErrClaimed", err)
+	}
+	if decision.Accepted {
+		t.Fatalf("Accepted = true, want false")
+	}
+	if decision.Reject == nil {
+		t.Fatalf("Reject = nil, want structured reject info")
+	}
+	if got, want := decision.Reject.Code, RejectClaimed; got != want {
+		t.Fatalf("Reject.Code = %q, want %q", got, want)
+	}
+}
+
+func TestGateRejectsMismatchedVersion(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0).UTC()
+	tok := testToken(now)
+	gate := NewGate(tok)
+
+	claim := testClaim(tok)
+	claim.Version++
+
+	decision, err := gate.Accept(now, claim)
+	if !errors.Is(err, ErrDenied) {
+		t.Fatalf("Accept() error = %v, want ErrDenied", err)
+	}
+	if decision.Reject == nil {
+		t.Fatalf("Reject = nil, want structured reject info")
+	}
+	if got, want := decision.Reject.Code, RejectVersionMismatch; got != want {
+		t.Fatalf("Reject.Code = %q, want %q", got, want)
+	}
+}
+
+func TestGateRejectsMismatchedSession(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0).UTC()
+	tok := testToken(now)
+	gate := NewGate(tok)
+
+	claim := testClaim(tok)
+	claim.SessionID[0]++
+
+	decision, err := gate.Accept(now, claim)
+	if !errors.Is(err, ErrDenied) {
+		t.Fatalf("Accept() error = %v, want ErrDenied", err)
+	}
+	if decision.Reject == nil {
+		t.Fatalf("Reject = nil, want structured reject info")
+	}
+	if got, want := decision.Reject.Code, RejectSessionMismatch; got != want {
+		t.Fatalf("Reject.Code = %q, want %q", got, want)
+	}
+}
+
+func TestGateRejectsBadMAC(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0).UTC()
+	tok := testToken(now)
+	gate := NewGate(tok)
+
+	claim := testClaim(tok)
+	claim.BearerMAC = "bad-mac"
+
+	decision, err := gate.Accept(now, claim)
+	if !errors.Is(err, ErrDenied) {
+		t.Fatalf("Accept() error = %v, want ErrDenied", err)
+	}
+	if decision.Reject == nil {
+		t.Fatalf("Reject = nil, want structured reject info")
+	}
+	if got, want := decision.Reject.Code, RejectBadMAC; got != want {
+		t.Fatalf("Reject.Code = %q, want %q", got, want)
+	}
+}
+
+func TestClaimAndDecisionSerializationRoundTrip(t *testing.T) {
+	claim := Claim{
+		Version:      token.SupportedVersion,
+		SessionID:    [16]byte{1, 2, 3, 4},
+		BearerMAC:    "mac",
+		DERPPublic:   [32]byte{5, 6, 7, 8},
+		WGPublic:     [32]byte{9, 10, 11, 12},
+		DiscoPublic:  [32]byte{13, 14, 15, 16},
+		Candidates:   []string{"udp4:127.0.0.1:1", "udp6:[::1]:2"},
+		Capabilities: 0x42,
+	}
+	encodedClaim, err := EncodeClaim(claim)
+	if err != nil {
+		t.Fatalf("EncodeClaim() error = %v", err)
+	}
+	decodedClaim, err := DecodeClaim(encodedClaim)
+	if err != nil {
+		t.Fatalf("DecodeClaim() error = %v", err)
+	}
+	if !reflect.DeepEqual(decodedClaim, claim) {
+		t.Fatalf("decoded claim = %+v, want %+v", decodedClaim, claim)
+	}
+
+	decision := Decision{
+		Accepted: true,
+		Accept: &AcceptInfo{
+			Version:      token.SupportedVersion,
+			SessionID:    claim.SessionID,
+			Candidates:   claim.Candidates,
+			Capabilities: claim.Capabilities,
+		},
+	}
+	encodedDecision, err := EncodeDecision(decision)
+	if err != nil {
+		t.Fatalf("EncodeDecision() error = %v", err)
+	}
+	decodedDecision, err := DecodeDecision(encodedDecision)
+	if err != nil {
+		t.Fatalf("DecodeDecision() error = %v", err)
+	}
+	if decodedDecision.Accept == nil || !decodedDecision.Accepted {
+		t.Fatalf("decoded decision = %+v, want accepted decision", decodedDecision)
+	}
+	if decodedDecision.Accept.SessionID != claim.SessionID {
+		t.Fatalf("decoded decision session = %x, want %x", decodedDecision.Accept.SessionID, claim.SessionID)
+	}
+}
