@@ -289,6 +289,8 @@ func TestRunVerbosityFlagsBeforeListen(t *testing.T) {
 		{name: "silent", args: []string{"-s", "listen"}, wantPrefix: ""},
 		{name: "silent equals true", args: []string{"--silent=true", "listen"}, wantPrefix: ""},
 		{name: "verbose", args: []string{"-v", "listen"}, wantPrefix: "waiting-for-claim\n"},
+		{name: "last verbose wins", args: []string{"-s", "-v", "listen"}, wantPrefix: "waiting-for-claim\n"},
+		{name: "last silent wins", args: []string{"-v", "-s", "listen"}, wantPrefix: ""},
 	}
 
 	for _, tc := range tests {
@@ -370,6 +372,30 @@ func TestRunVerbosityFlagsBeforeSend(t *testing.T) {
 				t.Fatalf("stdout = %q, want empty", stdout.String())
 			}
 		})
+	}
+}
+
+func TestRunRejectsUnknownRootFlagBeforeVersion(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"--bogus", "version"}, nil, &stdout, &stderr)
+	if code != 2 {
+		t.Fatalf("run() = %d, want 2", code)
+	}
+	assertRootHelp(t, stderr.String())
+	if got := stdout.String(); got != "" {
+		t.Fatalf("stdout = %q, want empty", got)
+	}
+}
+
+func TestRunRejectsUnknownRootFlagBeforeListen(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"--bogus", "listen"}, nil, &stdout, &stderr)
+	if code != 2 {
+		t.Fatalf("run() = %d, want 2", code)
+	}
+	assertRootHelp(t, stderr.String())
+	if got := stdout.String(); got != "" {
+		t.Fatalf("stdout = %q, want empty", got)
 	}
 }
 

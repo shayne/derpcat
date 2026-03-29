@@ -4,6 +4,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"strconv"
 	"strings"
 
 	"github.com/shayne/derpcat/pkg/telemetry"
@@ -53,14 +54,12 @@ var rootRegistry = yargs.Registry{
 var rootHelpConfig = rootRegistry.HelpConfig()
 
 func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
-	rootGlobalArgs, commandArgs := splitRootGlobalPrefix(args)
-	parsed, err := yargs.ParseKnownFlags[rootGlobalFlags](rootGlobalArgs, yargs.KnownFlagsOptions{})
+	level, commandArgs, err := parseRootArgs(args)
 	if err != nil {
 		fmt.Fprintln(stderr, err)
+		fmt.Fprint(stderr, yargs.GenerateGlobalHelp(rootHelpConfig, rootGlobalFlags{}))
 		return 2
 	}
-
-	level := rootTelemetryLevel(parsed.Flags)
 
 	remaining, malformedHelp := rewriteRootHelpArgs(commandArgs)
 	if len(remaining) == 0 {
@@ -118,28 +117,70 @@ func isRootHelpLLMRequest(args []string) bool {
 	return len(args) > 0 && args[0] == "--help-llm"
 }
 
-func splitRootGlobalPrefix(args []string) ([]string, []string) {
+func parseRootArgs(args []string) (telemetry.Level, []string, error) {
+	level := telemetry.LevelDefault
 	for i, arg := range args {
-		if !isRootGlobalArg(arg) {
-			return args[:i], args[i:]
+		if isRootHelpToken(arg) {
+			return level, args[i:], nil
+		}
+		if nextLevel, ok, err := parseRootGlobalArg(arg, level); ok {
+			if err != nil {
+				return telemetry.LevelDefault, nil, err
+			}
+			level = nextLevel
+			continue
+		} else if strings.HasPrefix(arg, "-") {
+			return telemetry.LevelDefault, nil, fmt.Errorf("flag provided but not defined: %s", arg)
+		} else {
+			return level, args[i:], nil
 		}
 	}
-	return args, nil
+	return level, nil, nil
 }
 
-func isRootGlobalArg(arg string) bool {
-	switch arg {
-	case "-v", "--verbose", "-q", "--quiet", "-s", "--silent":
-		return true
+func isRootHelpToken(arg string) bool {
+	return arg == "-h" || arg == "--help" || arg == "--help-llm" || arg == "help"
+}
+
+func parseRootGlobalArg(arg string, current telemetry.Level) (telemetry.Level, bool, error) {
+	apply := func(next telemetry.Level, ok bool) telemetry.Level {
+		if ok {
+			return next
+		}
+		return current
 	}
 
-	for _, prefix := range []string{"-v=", "--verbose=", "-q=", "--quiet=", "-s=", "--silent="} {
-		if strings.HasPrefix(arg, prefix) {
-			return true
+	switch arg {
+	case "-v", "--verbose":
+		return telemetry.LevelVerbose, true, nil
+	case "-q", "--quiet":
+		return telemetry.LevelQuiet, true, nil
+	case "-s", "--silent":
+		return telemetry.LevelSilent, true, nil
+	}
+
+	for _, spec := range []struct {
+		prefix string
+		level  telemetry.Level
+	}{
+		{prefix: "-v=", level: telemetry.LevelVerbose},
+		{prefix: "--verbose=", level: telemetry.LevelVerbose},
+		{prefix: "-q=", level: telemetry.LevelQuiet},
+		{prefix: "--quiet=", level: telemetry.LevelQuiet},
+		{prefix: "-s=", level: telemetry.LevelSilent},
+		{prefix: "--silent=", level: telemetry.LevelSilent},
+	} {
+		if strings.HasPrefix(arg, spec.prefix) {
+			value := strings.TrimPrefix(arg, spec.prefix)
+			parsed, err := strconv.ParseBool(value)
+			if err != nil {
+				return current, true, fmt.Errorf("invalid boolean value %q for %s", value, strings.TrimSuffix(spec.prefix, "="))
+			}
+			return apply(spec.level, parsed), true, nil
 		}
 	}
 
-	return false
+	return current, false, nil
 }
 
 func rewriteRootHelpArgs(args []string) ([]string, bool) {
@@ -152,19 +193,6 @@ func rewriteRootHelpArgs(args []string) ([]string, bool) {
 	}
 
 	return []string{args[1], "--help"}, false
-}
-
-func rootTelemetryLevel(flags rootGlobalFlags) telemetry.Level {
-	switch {
-	case flags.Silent:
-		return telemetry.LevelSilent
-	case flags.Quiet:
-		return telemetry.LevelQuiet
-	case flags.Verbose:
-		return telemetry.LevelVerbose
-	default:
-		return telemetry.LevelDefault
-	}
 }
 
 func runVersion(args []string, stdout, stderr io.Writer) int {
