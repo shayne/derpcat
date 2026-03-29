@@ -342,6 +342,40 @@ func TestListenTreatsHelpAfterDoubleDashAsPositional(t *testing.T) {
 	}
 }
 
+func TestListenUnknownFlagRemainsAuthoritativeBeforeLaterPositionalOrDoubleDash(t *testing.T) {
+	tests := []struct {
+		name string
+		args []string
+	}{
+		{name: "later positional", args: []string{"--bogus", "extra", "--help"}},
+		{name: "later double dash", args: []string{"--bogus", "--", "--help"}},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			code := runListen(tc.args, telemetry.LevelDefault, &stdout, &stderr)
+			if code != 2 {
+				t.Fatalf("runListen() = %d, want 2", code)
+			}
+			wantHelp := yargs.GenerateSubCommandHelp(
+				testListenHelpConfig(),
+				"listen",
+				struct{}{},
+				listenHelpFlags{},
+				struct{}{},
+			)
+			got := stderr.String()
+			if got != "unknown flag: --bogus\n"+wantHelp {
+				t.Fatalf("stderr = %q, want yargs parse error plus help %q", got, "unknown flag: --bogus\n"+wantHelp)
+			}
+			if got := stdout.String(); got != "" {
+				t.Fatalf("stdout = %q, want empty", got)
+			}
+		})
+	}
+}
+
 func TestListenTreatsBareHelpAfterDoubleDashAsPositional(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	code := runListen([]string{"--", "--help"}, telemetry.LevelDefault, &stdout, &stderr)

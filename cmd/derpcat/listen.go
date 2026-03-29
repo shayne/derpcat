@@ -47,6 +47,11 @@ var listenFlagKinds = deriveListenFlagKinds()
 
 func runListen(args []string, level telemetry.Level, stdout, stderr io.Writer) int {
 	preScan := listenPreScan(args)
+	if preScan.unknownFlagAfterLateBoundary {
+		fmt.Fprintln(stderr, "unknown flag:", preScan.unknownFlag)
+		fmt.Fprint(stderr, listenHelpText())
+		return 2
+	}
 	if preScan.positionalBeforeLateFlag {
 		fmt.Fprint(stderr, listenHelpText())
 		return 2
@@ -157,11 +162,13 @@ func listenHelpLLMText() string {
 }
 
 type listenPreScanResult struct {
-	help                      bool
-	helpLLM                   bool
-	positionalBeforeLateFlag  bool
-	positionalAfterDoubleDash bool
-	parseArgs                 []string
+	help                         bool
+	helpLLM                      bool
+	positionalBeforeLateFlag     bool
+	positionalAfterDoubleDash    bool
+	unknownFlagAfterLateBoundary bool
+	unknownFlag                  string
+	parseArgs                    []string
 }
 
 func listenPreScan(args []string) listenPreScanResult {
@@ -171,6 +178,11 @@ func listenPreScan(args []string) listenPreScanResult {
 	for i := 0; i < len(args); i++ {
 		arg := args[i]
 		if arg == "--" {
+			if sawUnknownFlag {
+				result.unknownFlagAfterLateBoundary = true
+				result.parseArgs = append(result.parseArgs, args[i+1:]...)
+				return result
+			}
 			result.parseArgs = append(result.parseArgs, arg)
 			for j := i + 1; j < len(args); j++ {
 				result.parseArgs = append(result.parseArgs, args[j])
@@ -181,11 +193,14 @@ func listenPreScan(args []string) listenPreScanResult {
 			return result
 		}
 		if !strings.HasPrefix(arg, "-") || arg == "-" {
+			if sawUnknownFlag {
+				result.unknownFlagAfterLateBoundary = true
+			}
 			sawPositional = true
 			result.parseArgs = append(result.parseArgs, arg)
 			continue
 		}
-		if sawPositional {
+		if sawPositional && !sawUnknownFlag {
 			result.positionalBeforeLateFlag = true
 			return result
 		}
@@ -220,6 +235,9 @@ func listenPreScan(args []string) listenPreScanResult {
 		}
 		if !ok {
 			sawUnknownFlag = true
+			if result.unknownFlag == "" {
+				result.unknownFlag = arg
+			}
 		}
 		result.parseArgs = append(result.parseArgs, arg)
 	}
