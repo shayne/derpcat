@@ -65,6 +65,35 @@ func TestRunListenDispatchesToListenBehavior(t *testing.T) {
 	}
 }
 
+func TestRunVerbosityFlagsBeforeListen(t *testing.T) {
+	tests := []struct {
+		name       string
+		args       []string
+		wantCode   int
+		wantStderr string
+	}{
+		{name: "quiet", args: []string{"-q", "listen"}, wantCode: 0, wantStderr: ""},
+		{name: "silent", args: []string{"-s", "listen"}, wantCode: 0, wantStderr: ""},
+		{name: "verbose", args: []string{"-v", "listen"}, wantCode: 0, wantStderr: "waiting-for-claim\n"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			code := run(tc.args, nil, &stdout, &stderr)
+			if code != tc.wantCode {
+				t.Fatalf("run() = %d, want %d", code, tc.wantCode)
+			}
+			if got := stderr.String(); got != tc.wantStderr {
+				t.Fatalf("stderr = %q, want %q", got, tc.wantStderr)
+			}
+			if stdout.String() == "" {
+				t.Fatal("stdout empty, want token")
+			}
+		})
+	}
+}
+
 func TestRunListenHelpSucceeds(t *testing.T) {
 	for _, args := range [][]string{{"listen", "-h"}, {"listen", "--help"}} {
 		t.Run(args[1], func(t *testing.T) {
@@ -78,6 +107,34 @@ func TestRunListenHelpSucceeds(t *testing.T) {
 			}
 			if got := stdout.String(); got != "" {
 				t.Fatalf("stdout = %q, want empty", got)
+			}
+		})
+	}
+}
+
+func TestRunVerbosityFlagsBeforeSend(t *testing.T) {
+	tests := []struct {
+		name       string
+		args       []string
+		wantCode   int
+		wantStderr string
+	}{
+		{name: "quiet usage", args: []string{"-q", "send"}, wantCode: 2, wantStderr: "usage: derpcat send <token> [flags...]\n"},
+		{name: "silent help", args: []string{"-s", "send", "token-value", "-h"}, wantCode: 0, wantStderr: "usage: derpcat send <token> [flags...]\n"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			code := run(tc.args, nil, &stdout, &stderr)
+			if code != tc.wantCode {
+				t.Fatalf("run() = %d, want %d", code, tc.wantCode)
+			}
+			if got := stderr.String(); got != tc.wantStderr {
+				t.Fatalf("stderr = %q, want %q", got, tc.wantStderr)
+			}
+			if tc.wantCode == 0 && stdout.String() != "" {
+				t.Fatalf("stdout = %q, want empty", stdout.String())
 			}
 		})
 	}

@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/shayne/derpcat/pkg/telemetry"
 	"github.com/shayne/derpcat/pkg/token"
 )
 
@@ -43,7 +44,7 @@ func TestListenHelpTargetsCanonicalUsage(t *testing.T) {
 
 func TestListenWithoutFlagsPrintsStatusAndToken(t *testing.T) {
 	var stdout, stderr bytes.Buffer
-	code := runListen([]string{}, &stdout, &stderr)
+	code := runListen([]string{}, telemetry.LevelDefault, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("runListen() = %d, want 0", code)
 	}
@@ -57,7 +58,7 @@ func TestListenWithoutFlagsPrintsStatusAndToken(t *testing.T) {
 
 func TestListenEmitsStructurallyValidToken(t *testing.T) {
 	var stdout, stderr bytes.Buffer
-	code := runListen([]string{}, &stdout, &stderr)
+	code := runListen([]string{}, telemetry.LevelDefault, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("runListen() = %d, want 0", code)
 	}
@@ -93,7 +94,7 @@ func TestListenEmitsDifferentTokensBackToBack(t *testing.T) {
 
 func TestListenRejectsStrayPositionalArgs(t *testing.T) {
 	var stdout, stderr bytes.Buffer
-	code := runListen([]string{"extra"}, &stdout, &stderr)
+	code := runListen([]string{"extra"}, telemetry.LevelDefault, &stdout, &stderr)
 	if code != 2 {
 		t.Fatalf("runListen() = %d, want 2", code)
 	}
@@ -109,7 +110,7 @@ func mustDecodeListenToken(t *testing.T) token.Token {
 	t.Helper()
 
 	var stdout, stderr bytes.Buffer
-	if code := runListen([]string{}, &stdout, &stderr); code != 0 {
+	if code := runListen([]string{}, telemetry.LevelDefault, &stdout, &stderr); code != 0 {
 		t.Fatalf("runListen() = %d, want 0", code)
 	}
 
@@ -118,4 +119,33 @@ func mustDecodeListenToken(t *testing.T) token.Token {
 		t.Fatalf("Decode() error = %v", err)
 	}
 	return decoded
+}
+
+func TestListenHonorsVerbosityLevel(t *testing.T) {
+	tests := []struct {
+		name       string
+		level      telemetry.Level
+		wantStderr string
+	}{
+		{name: "default", level: telemetry.LevelDefault, wantStderr: "waiting-for-claim\n"},
+		{name: "quiet", level: telemetry.LevelQuiet, wantStderr: ""},
+		{name: "silent", level: telemetry.LevelSilent, wantStderr: ""},
+		{name: "verbose", level: telemetry.LevelVerbose, wantStderr: "waiting-for-claim\n"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			code := runListen([]string{}, tc.level, &stdout, &stderr)
+			if code != 0 {
+				t.Fatalf("runListen() = %d, want 0", code)
+			}
+			if got := stderr.String(); got != tc.wantStderr {
+				t.Fatalf("stderr = %q, want %q", got, tc.wantStderr)
+			}
+			if stdout.String() == "" {
+				t.Fatal("stdout empty, want token")
+			}
+		})
+	}
 }

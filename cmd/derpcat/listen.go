@@ -13,7 +13,7 @@ import (
 
 const listenUsage = "usage: derpcat listen [--print-token-only]"
 
-func runListen(args []string, stdout, stderr io.Writer) int {
+func runListen(args []string, level telemetry.Level, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("listen", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	fs.Usage = func() {
@@ -64,7 +64,7 @@ func runListen(args []string, stdout, stderr io.Writer) int {
 		return 0
 	}
 
-	telemetry.New(stderr, telemetry.LevelDefault).Status("waiting-for-claim")
+	telemetry.New(stderr, level).Status("waiting-for-claim")
 	fmt.Fprintln(stdout, tok)
 	return 0
 }

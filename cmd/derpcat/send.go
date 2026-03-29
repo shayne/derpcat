@@ -4,11 +4,13 @@ import (
 	"flag"
 	"fmt"
 	"io"
+
+	"github.com/shayne/derpcat/pkg/telemetry"
 )
 
 const sendUsage = "usage: derpcat send <token> [flags...]"
 
-func runSend(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
+func runSend(args []string, level telemetry.Level, stdin io.Reader, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("send", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	fs.Usage = func() {
@@ -42,6 +44,7 @@ func runSend(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	}
 
 	_ = tokenArg
+	_ = level
 	_ = stdin
 	_ = stdout
 	return 0
