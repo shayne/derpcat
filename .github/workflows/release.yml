@@ -1,0 +1,294 @@
+name: Release
+
+on:
+  push:
+    branches:
+      - "main"
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+jobs:
+  meta:
+    name: Compute version metadata
+    runs-on: ubuntu-latest
+    outputs:
+      is_tag: ${{ steps.meta.outputs.is_tag }}
+      is_main: ${{ steps.meta.outputs.is_main }}
+      version: ${{ steps.meta.outputs.version }}
+    steps:
+      - name: Build version strings
+        id: meta
+        run: |
+          is_tag=false
+          is_main=false
+          if [ "${GITHUB_REF_TYPE:-}" = "tag" ]; then is_tag=true; fi
+          if [ "${GITHUB_REF_NAME:-}" = "main" ]; then is_main=true; fi
+          ts=$(date -u +%Y%m%d%H%M%S)
+          short_sha="${GITHUB_SHA::7}"
+          if [ "$is_tag" = true ]; then
+            version="${GITHUB_REF_NAME}"
+          else
+            version="0.0.0-dev.${ts}+${short_sha}"
+          fi
+          echo "is_tag=$is_tag" >> "$GITHUB_OUTPUT"
+          echo "is_main=$is_main" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+  check:
+    name: Build + test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+      - name: Setup mise
+        uses: jdx/mise-action@v3
+        with:
+          install: true
+          cache: true
+      - name: Build
+        run: mise run build
+      - name: Test
+        run: mise run test
+      - name: Vet
+        run: mise run vet
+
+  build-derpcat:
+    name: Build derpcat (${{ matrix.goos }}/${{ matrix.goarch }})
+    runs-on: ${{ matrix.runner }}
+    needs: [meta]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            goos: linux
+            goarch: amd64
+            asset: derpcat-linux-amd64
+          - runner: ubuntu-latest
+            goos: linux
+            goarch: arm64
+            asset: derpcat-linux-arm64
+          - runner: macos-latest
+            goos: darwin
+            goarch: amd64
+            asset: derpcat-darwin-amd64
+          - runner: macos-latest
+            goos: darwin
+            goarch: arm64
+            asset: derpcat-darwin-arm64
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+      - name: Setup mise
+        uses: jdx/mise-action@v3
+        with:
+          install: true
+          cache: true
+      - name: Build
+        run: |
+          mkdir -p dist
+          VERSION=${{ needs.meta.outputs.version }}
+          COMMIT=${{ github.sha }}
+          BUILD_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }} CGO_ENABLED=0 \
+            go build -trimpath \
+              -ldflags "-X main.version=${VERSION} -X main.commit=${COMMIT} -X main.buildDate=${BUILD_DATE}" \
+              -o dist/${{ matrix.asset }} \
+              ./cmd/derpcat
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset }}
+          path: dist/${{ matrix.asset }}
+          if-no-files-found: error
+
+  release-prod:
+    name: Publish release
+    runs-on: ubuntu-latest
+    needs: [meta, check, build-derpcat]
+    if: needs.meta.outputs.is_tag == 'true'
+    permissions:
+      contents: write
+    steps:
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist/raw
+          merge-multiple: true
+      - name: Verify binary version
+        run: |
+          chmod +x dist/raw/derpcat-linux-amd64
+          test "$(dist/raw/derpcat-linux-amd64 --version)" = "${{ needs.meta.outputs.version }}"
+      - name: Package tarballs + checksums
+        run: bash ./tools/packaging/build-release-assets.sh
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          files: |
+            dist/release/derpcat-linux-amd64.tar.gz
+            dist/release/derpcat-linux-amd64.tar.gz.sha256
+            dist/release/derpcat-linux-arm64.tar.gz
+            dist/release/derpcat-linux-arm64.tar.gz.sha256
+            dist/release/derpcat-darwin-amd64.tar.gz
+            dist/release/derpcat-darwin-amd64.tar.gz.sha256
+            dist/release/derpcat-darwin-arm64.tar.gz
+            dist/release/derpcat-darwin-arm64.tar.gz.sha256
+
+  release-dev:
+    name: Publish dev release
+    runs-on: ubuntu-latest
+    needs: [meta, check, build-derpcat]
+    if: needs.meta.outputs.is_main == 'true'
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist/raw
+          merge-multiple: true
+      - name: Verify binary version
+        run: |
+          chmod +x dist/raw/derpcat-linux-amd64
+          test "$(dist/raw/derpcat-linux-amd64 --version)" = "${{ needs.meta.outputs.version }}"
+      - name: Package tarballs + checksums
+        run: bash ./tools/packaging/build-release-assets.sh
+      - name: Update dev tag
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag -f dev "$GITHUB_SHA"
+          git push -f origin refs/tags/dev
+      - name: Publish dev release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: dev
+          name: Dev
+          prerelease: true
+          make_latest: false
+          overwrite_files: true
+          fail_on_unmatched_files: true
+          files: |
+            dist/release/derpcat-linux-amd64.tar.gz
+            dist/release/derpcat-linux-amd64.tar.gz.sha256
+            dist/release/derpcat-linux-arm64.tar.gz
+            dist/release/derpcat-linux-arm64.tar.gz.sha256
+            dist/release/derpcat-darwin-amd64.tar.gz
+            dist/release/derpcat-darwin-amd64.tar.gz.sha256
+            dist/release/derpcat-darwin-arm64.tar.gz
+            dist/release/derpcat-darwin-arm64.tar.gz.sha256
+
+  publish-packages-prod:
+    name: Build npm artifact (prod)
+    runs-on: ubuntu-latest
+    needs: [meta, release-prod]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+      - name: Setup mise
+        uses: jdx/mise-action@v3
+        with:
+          install: true
+          cache: true
+      - name: Build npm artifact
+        run: |
+          VERSION=${{ needs.meta.outputs.version }}
+          COMMIT=${{ github.sha }}
+          BUILD_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          export VERSION COMMIT BUILD_DATE
+          mise run release:build-all
+          tar -czf dist/npm.tgz -C dist npm
+      - name: Upload package artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: package-artifacts-prod
+          path: dist/npm.tgz
+          if-no-files-found: error
+
+  publish-packages-dev:
+    name: Build npm artifact (dev)
+    runs-on: ubuntu-latest
+    needs: [meta, release-dev]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+      - name: Setup mise
+        uses: jdx/mise-action@v3
+        with:
+          install: true
+          cache: true
+      - name: Build npm artifact
+        run: |
+          VERSION=${{ needs.meta.outputs.version }}
+          COMMIT=${{ github.sha }}
+          BUILD_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          export VERSION COMMIT BUILD_DATE
+          mise run release:build-all
+          tar -czf dist/npm.tgz -C dist npm
+      - name: Upload package artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: package-artifacts-dev
+          path: dist/npm.tgz
+          if-no-files-found: error
+
+  publish-npm-prod:
+    name: Publish npm package
+    runs-on: ubuntu-latest
+    needs: [publish-packages-prod]
+    permissions:
+      contents: read
+      id-token: write
+    environment:
+      name: npm
+      url: https://www.npmjs.com/package/derpcat
+    steps:
+      - name: Download package artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: package-artifacts-prod
+          path: dist
+      - name: Unpack npm artifact
+        run: tar -xzf dist/npm.tgz -C dist
+      - name: Setup Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+      - name: Publish npm package
+        run: npm publish ./dist/npm --access public
+
+  publish-npm-dev:
+    name: Publish npm package (dev tag)
+    runs-on: ubuntu-latest
+    needs: [publish-packages-dev]
+    permissions:
+      contents: read
+      id-token: write
+    environment:
+      name: npm
+      url: https://www.npmjs.com/package/derpcat
+    steps:
+      - name: Download package artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: package-artifacts-dev
+          path: dist
+      - name: Unpack npm artifact
+        run: tar -xzf dist/npm.tgz -C dist
+      - name: Setup Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+      - name: Publish npm package (dev tag)
+        run: npm publish ./dist/npm --access public --tag dev
