@@ -266,6 +266,10 @@ func rewriteRootHelpArgs(args []string) ([]string, bool) {
 		return []string{"version", "--help"}, false
 	}
 
+	if len(args) == 3 && (args[2] == "--help" || args[2] == "--help-llm") {
+		return []string{args[1], args[2]}, false
+	}
+
 	if len(args) > 2 {
 		return args, true
 	}

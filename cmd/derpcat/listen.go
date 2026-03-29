@@ -53,6 +53,7 @@ func runListen(args []string, level telemetry.Level, stdout, stderr io.Writer) i
 	parsed, err := yargs.ParseFlags[listenParseFlags](args)
 	if err != nil {
 		fmt.Fprintln(stderr, err)
+		fmt.Fprint(stderr, listenHelpText())
 		return 2
 	}
 

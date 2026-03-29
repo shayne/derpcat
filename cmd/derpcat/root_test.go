@@ -92,6 +92,40 @@ func TestRunHelpListenShowsListenHelp(t *testing.T) {
 	}
 }
 
+func TestRunHelpListenHelpShowsListenHelp(t *testing.T) {
+	for _, args := range [][]string{{"help", "listen", "--help"}, {"help", "listen", "--help-llm"}} {
+		t.Run(strings.Join(args, "_"), func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			code := run(args, nil, &stdout, &stderr)
+			if code != 0 {
+				t.Fatalf("run() = %d, want 0", code)
+			}
+			want := yargs.GenerateSubCommandHelp(
+				listenHelpConfig,
+				"listen",
+				struct{}{},
+				listenFlags{},
+				struct{}{},
+			)
+			if args[2] == "--help-llm" {
+				want = yargs.GenerateSubCommandHelpLLM(
+					listenHelpConfig,
+					"listen",
+					struct{}{},
+					listenFlags{},
+					struct{}{},
+				)
+			}
+			if got := stderr.String(); got != want {
+				t.Fatalf("stderr = %q, want exact listen help %q", got, want)
+			}
+			if got := stdout.String(); got != "" {
+				t.Fatalf("stdout = %q, want empty", got)
+			}
+		})
+	}
+}
+
 func TestRunHelpBogusRejected(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	code := run([]string{"help", "bogus"}, nil, &stdout, &stderr)

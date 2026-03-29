@@ -220,6 +220,24 @@ func TestListenRejectsStrayPositionalArgsEvenWithHelp(t *testing.T) {
 	}
 }
 
+func TestListenUnknownFlagShowsParseErrorAndHelp(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := runListen([]string{"--bogus"}, telemetry.LevelDefault, &stdout, &stderr)
+	if code != 2 {
+		t.Fatalf("runListen() = %d, want 2", code)
+	}
+	got := stderr.String()
+	if !strings.Contains(got, "unknown flag: --bogus") && !strings.Contains(got, "flag provided but not defined") {
+		t.Fatalf("stderr = %q, want parse error", got)
+	}
+	if !strings.Contains(got, "derpcat listen") || !strings.Contains(got, "--tcp-connect") {
+		t.Fatalf("stderr = %q, want listen help after parse error", got)
+	}
+	if got := stdout.String(); got != "" {
+		t.Fatalf("stdout = %q, want empty", got)
+	}
+}
+
 func TestListenRejectsMutuallyExclusiveTCPFlags(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	code := runListen([]string{"--tcp-listen", "127.0.0.1:7000", "--tcp-connect", "127.0.0.1:9000"}, telemetry.LevelDefault, &stdout, &stderr)
