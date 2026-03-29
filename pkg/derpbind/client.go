@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"time"
 
 	"tailscale.com/derp"
 	"tailscale.com/derp/derphttp"
@@ -25,9 +26,7 @@ type Client struct {
 	stopCh   chan struct{}
 	doneCh   chan struct{}
 
-	mu          sync.Mutex
-	terminalErr error
-	stopOnce    sync.Once
+	stopOnce sync.Once
 }
 
 func NewClient(ctx context.Context, node *tailcfg.DERPNode, serverURL string) (*Client, error) {
@@ -95,9 +94,6 @@ func (c *Client) Receive(ctx context.Context) (Packet, error) {
 			return pkt, nil
 		default:
 		}
-		if err := c.recvErr(); err != nil {
-			return Packet{}, err
-		}
 		return Packet{}, errors.New("derpbind client closed")
 	case <-ctx.Done():
 		return Packet{}, ctx.Err()
@@ -107,10 +103,25 @@ func (c *Client) Receive(ctx context.Context) (Packet, error) {
 func (c *Client) recvLoop() {
 	defer close(c.doneCh)
 	for {
+		select {
+		case <-c.stopCh:
+			return
+		default:
+		}
+
 		msg, err := c.dc.Recv()
 		if err != nil {
-			c.setRecvErr(err)
-			return
+			select {
+			case <-c.stopCh:
+				return
+			default:
+			}
+			select {
+			case <-time.After(10 * time.Millisecond):
+			case <-c.stopCh:
+				return
+			}
+			continue
 		}
 		pkt, ok := msg.(derp.ReceivedPacket)
 		if !ok {
@@ -126,16 +137,4 @@ func (c *Client) recvLoop() {
 			return
 		}
 	}
-}
-
-func (c *Client) setRecvErr(err error) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.terminalErr = err
-}
-
-func (c *Client) recvErr() error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return c.terminalErr
 }

@@ -134,3 +134,41 @@ func TestClientReceiveTimeoutDoesNotKillSession(t *testing.T) {
 		t.Fatalf("Receive().Payload = %q, want %q", got.Payload, payload)
 	}
 }
+
+func TestClientRecoversAfterTransientTransportDisconnect(t *testing.T) {
+	srv := newTestDERPServer(t)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	a, err := NewClient(ctx, srv.Map.Regions[1].Nodes[0], srv.DERPURL)
+	if err != nil {
+		t.Fatalf("NewClient(a) error = %v", err)
+	}
+	t.Cleanup(func() { _ = a.Close() })
+
+	b, err := NewClient(ctx, srv.Map.Regions[1].Nodes[0], srv.DERPURL)
+	if err != nil {
+		t.Fatalf("NewClient(b) error = %v", err)
+	}
+	t.Cleanup(func() { _ = b.Close() })
+
+	srv.http.CloseClientConnections()
+	time.Sleep(50 * time.Millisecond)
+
+	payload := []byte("reconnected packet")
+	if err := a.Send(ctx, b.PublicKey(), payload); err != nil {
+		t.Fatalf("Send() error = %v", err)
+	}
+
+	got, err := b.Receive(ctx)
+	if err != nil {
+		t.Fatalf("Receive() after reconnect error = %v", err)
+	}
+	if got.From != a.PublicKey() {
+		t.Fatalf("Receive().From = %v, want %v", got.From, a.PublicKey())
+	}
+	if string(got.Payload) != string(payload) {
+		t.Fatalf("Receive().Payload = %q, want %q", got.Payload, payload)
+	}
+}
