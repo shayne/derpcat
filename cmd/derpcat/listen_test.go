@@ -270,6 +270,12 @@ func TestListenHonorsVerbosityLevel(t *testing.T) {
 				func(stdout, stderr *lockedBuffer) *lockedBuffer { return stderr },
 				"payload",
 			)
+			if tc.wantStderr == "" {
+				if got, want := listenerStderr, issuedToken+"\n"; got != want {
+					t.Fatalf("listener stderr = %q, want token only on stderr %q", got, want)
+				}
+				return
+			}
 			if !strings.Contains(listenerStderr, issuedToken+"\n") {
 				t.Fatalf("listener stderr = %q, want token on stderr", listenerStderr)
 			}
