@@ -128,7 +128,7 @@ jobs:
       - name: Verify binary version
         run: |
           chmod +x dist/raw/derpcat-linux-amd64
-          test "$(dist/raw/derpcat-linux-amd64 --version)" = "${{ needs.meta.outputs.version }}"
+          test "$(dist/raw/derpcat-linux-amd64 version)" = "${{ needs.meta.outputs.version }}"
       - name: Package tarballs + checksums
         run: bash ./tools/packaging/build-release-assets.sh
       - name: Publish release
@@ -167,7 +167,7 @@ jobs:
       - name: Verify binary version
         run: |
           chmod +x dist/raw/derpcat-linux-amd64
-          test "$(dist/raw/derpcat-linux-amd64 --version)" = "${{ needs.meta.outputs.version }}"
+          test "$(dist/raw/derpcat-linux-amd64 version)" = "${{ needs.meta.outputs.version }}"
       - name: Package tarballs + checksums
         run: bash ./tools/packaging/build-release-assets.sh
       - name: Update dev tag
@@ -237,7 +237,7 @@ jobs:
           export VERSION
           bash ./tools/packaging/build-npm.sh
       - name: Smoke test packaged launcher
-        run: node ./dist/npm/bin/derpcat.js --version
+        run: node ./dist/npm/bin/derpcat.js version
       - name: Validate npm publish (dry-run)
         run: npm publish ./dist/npm --access public --dry-run
       - name: Package npm artifact
@@ -292,7 +292,7 @@ jobs:
           export VERSION
           bash ./tools/packaging/build-npm.sh
       - name: Smoke test packaged launcher
-        run: node ./dist/npm/bin/derpcat.js --version
+        run: node ./dist/npm/bin/derpcat.js version
       - name: Validate npm publish (dry-run)
         run: npm publish ./dist/npm --access public --dry-run --tag dev
       - name: Package npm artifact

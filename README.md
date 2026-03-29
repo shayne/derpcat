@@ -11,13 +11,13 @@ The install commands below are post-publish examples.
 ### Production install example
 
 ```bash
-npx derpcat --version
+npx derpcat version
 ```
 
 ### Dev channel install example
 
 ```bash
-npx derpcat@dev --version
+npx derpcat@dev version
 ```
 
 ## Build

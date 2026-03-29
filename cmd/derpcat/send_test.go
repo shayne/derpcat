@@ -22,38 +22,6 @@ func TestSendRejectsMissingTokenArgument(t *testing.T) {
 
 func TestSendHelpTargetsCanonicalUsage(t *testing.T) {
 	for _, args := range [][]string{{"-h"}, {"--help"}} {
-		t.Run(args[0], func(t *testing.T) {
-			var stdout, stderr bytes.Buffer
-			code := runSend(args, telemetry.LevelDefault, nil, &stdout, &stderr)
-			if code != 0 {
-				t.Fatalf("runSend() = %d, want 0", code)
-			}
-			assertSendHelpText(t, stderr.String())
-			if got := stdout.String(); got != "" {
-				t.Fatalf("stdout = %q, want empty", got)
-			}
-		})
-	}
-}
-
-func TestSendAllowsTokenBeforeFlags(t *testing.T) {
-	var stdout, stderr bytes.Buffer
-	code := runSend([]string{"token-value", "-h"}, telemetry.LevelDefault, nil, &stdout, &stderr)
-	if code != 0 {
-		t.Fatalf("runSend() = %d, want 0", code)
-	}
-	assertSendHelpText(t, stderr.String())
-	if got := stdout.String(); got != "" {
-		t.Fatalf("stdout = %q, want empty", got)
-	}
-}
-
-func TestSendPreservesIntentionalHelpEdgeCases(t *testing.T) {
-	for _, args := range [][]string{
-		{"--", "--help"},
-		{"token-value", "--help"},
-		{"--bogus", "--", "--help"},
-	} {
 		t.Run(strings.Join(args, "_"), func(t *testing.T) {
 			var stdout, stderr bytes.Buffer
 			code := runSend(args, telemetry.LevelDefault, nil, &stdout, &stderr)
@@ -68,15 +36,38 @@ func TestSendPreservesIntentionalHelpEdgeCases(t *testing.T) {
 	}
 }
 
-func TestSendRejectsArgsAfterDoubleDash(t *testing.T) {
+func TestSendAllowsTokenBeforeHelp(t *testing.T) {
 	var stdout, stderr bytes.Buffer
-	code := runSend([]string{"token-value", "--", "extra"}, telemetry.LevelDefault, nil, &stdout, &stderr)
+	code := runSend([]string{"token-value", "-h"}, telemetry.LevelDefault, nil, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("runSend() = %d, want 0", code)
+	}
+	assertSendHelpText(t, stderr.String())
+	if got := stdout.String(); got != "" {
+		t.Fatalf("stdout = %q, want empty", got)
+	}
+}
+
+func TestSendRejectsTrailingArgs(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := runSend([]string{"token-value", "extra"}, telemetry.LevelDefault, nil, &stdout, &stderr)
 	if code != 2 {
 		t.Fatalf("runSend() = %d, want 2", code)
 	}
 	assertSendHelpText(t, stderr.String())
 	if got := stdout.String(); got != "" {
 		t.Fatalf("stdout = %q, want empty", got)
+	}
+}
+
+func TestSendRejectsMutuallyExclusiveTCPFlags(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := runSend([]string{"token-value", "--tcp-listen", "127.0.0.1:7000", "--tcp-connect", "127.0.0.1:9000"}, telemetry.LevelDefault, nil, &stdout, &stderr)
+	if code != 2 {
+		t.Fatalf("runSend() = %d, want 2", code)
+	}
+	if got := stderr.String(); got != "send: --tcp-listen and --tcp-connect are mutually exclusive\n" {
+		t.Fatalf("stderr = %q, want mutual exclusion error", got)
 	}
 }
 

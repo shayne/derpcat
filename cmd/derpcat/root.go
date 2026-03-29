@@ -3,8 +3,6 @@ package main
 import (
 	"fmt"
 	"io"
-	"reflect"
-	"strconv"
 	"strings"
 
 	"github.com/shayne/derpcat/pkg/telemetry"
@@ -16,21 +14,6 @@ type rootGlobalFlags struct {
 	Quiet   bool `flag:"quiet" short:"q" help:"Reduce relay status output"`
 	Silent  bool `flag:"silent" short:"s" help:"Suppress relay status output"`
 }
-
-type rootFlagSpec struct {
-	name  string
-	short string
-	kind  reflect.Kind
-}
-
-type rootFlagActivation struct {
-	active bool
-	order  int
-}
-
-var rootGlobalFlagSpecs = deriveRootGlobalFlagSpecs()
-
-const versionUsage = "usage: derpcat version"
 
 var rootRegistry = yargs.Registry{
 	Command: yargs.CommandInfo{
@@ -67,252 +50,146 @@ var rootRegistry = yargs.Registry{
 var rootHelpConfig = rootRegistry.HelpConfig()
 
 func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
-	level, commandArgs, err := parseRootArgs(args)
+	parsed, err := yargs.ParseKnownFlags[rootGlobalFlags](args, yargs.KnownFlagsOptions{})
 	if err != nil {
 		fmt.Fprintln(stderr, err)
 		fmt.Fprint(stderr, yargs.GenerateGlobalHelp(rootHelpConfig, rootGlobalFlags{}))
 		return 2
 	}
 
-	remaining, malformedHelp := rewriteRootHelpArgs(commandArgs)
-	if len(remaining) == 0 {
-		fmt.Fprint(stderr, yargs.GenerateGlobalHelp(rootHelpConfig, rootGlobalFlags{}))
+	level, err := rootTelemetryLevel(parsed.Flags)
+	if err != nil {
+		fmt.Fprintln(stderr, err)
 		return 2
 	}
-	if malformedHelp {
+
+	remaining := yargs.ApplyAliases(parsed.RemainingArgs, rootHelpConfig)
+	if len(remaining) == 0 || isRootHelpRequest(remaining) {
 		fmt.Fprint(stderr, yargs.GenerateGlobalHelp(rootHelpConfig, rootGlobalFlags{}))
-		return 2
+		return 0
 	}
 	if isRootHelpLLMRequest(remaining) {
 		fmt.Fprint(stderr, yargs.GenerateGlobalHelpLLM(rootHelpConfig, rootGlobalFlags{}))
 		return 0
 	}
-	if isRootHelpRequest(remaining) {
+	if strings.HasPrefix(remaining[0], "-") {
+		fmt.Fprintf(stderr, "unknown flag: %s\n", remaining[0])
 		fmt.Fprint(stderr, yargs.GenerateGlobalHelp(rootHelpConfig, rootGlobalFlags{}))
-		return 0
-	}
-
-	resolved, ok, err := yargs.ResolveCommandWithRegistry(remaining, rootRegistry)
-	if err != nil || !ok {
-		if len(remaining) > 0 && strings.HasPrefix(remaining[0], "-") {
-			fmt.Fprint(stderr, yargs.GenerateGlobalHelp(rootHelpConfig, rootGlobalFlags{}))
-			return 2
-		}
-		if len(remaining) > 0 {
-			fmt.Fprintf(stderr, "unknown subcommand %q\n", remaining[0])
-		} else {
-			fmt.Fprint(stderr, yargs.GenerateGlobalHelp(rootHelpConfig, rootGlobalFlags{}))
-		}
 		return 2
 	}
+	if remaining[0] == "help" {
+		return runHelpCommand(remaining[1:], stderr)
+	}
 
-	switch resolved.Path[0] {
+	switch remaining[0] {
 	case "listen":
-		return runListen(resolved.Args, level, stdout, stderr)
+		return runListen(remaining[1:], level, stdout, stderr)
 	case "send":
-		return runSend(resolved.Args, level, stdin, stdout, stderr)
+		return runSend(remaining[1:], level, stdin, stdout, stderr)
 	case "version":
-		return runVersion(resolved.Args, stdout, stderr)
+		return runVersion(remaining[1:], stdout, stderr)
 	default:
-		fmt.Fprintf(stderr, "unknown subcommand %q\n", resolved.Path[0])
+		fmt.Fprintf(stderr, "unknown command: %s\nRun 'derpcat --help' for usage\n", remaining[0])
 		return 2
 	}
 }
 
 func isRootHelpRequest(args []string) bool {
-	if len(args) == 0 {
-		return false
-	}
-	return args[0] == "-h" || args[0] == "--help" || (args[0] == "help" && len(args) == 1)
+	return len(args) == 1 && (args[0] == "-h" || args[0] == "--help" || args[0] == "help")
 }
 
 func isRootHelpLLMRequest(args []string) bool {
-	return len(args) > 0 && args[0] == "--help-llm"
+	return len(args) == 1 && args[0] == "--help-llm"
 }
 
-func parseRootArgs(args []string) (telemetry.Level, []string, error) {
-	state := newRootVerbosityState()
-	for i, arg := range args {
-		if isRootHelpToken(arg) {
-			return state.level(), args[i:], nil
-		}
-		if ok, err := state.applyArg(arg, i); ok {
-			if err != nil {
-				return telemetry.LevelDefault, nil, err
-			}
-			continue
-		} else if strings.HasPrefix(arg, "-") {
-			return telemetry.LevelDefault, nil, fmt.Errorf("flag provided but not defined: %s", arg)
-		} else {
-			return state.level(), args[i:], nil
-		}
-	}
-	return state.level(), nil, nil
-}
-
-func isRootHelpToken(arg string) bool {
-	return arg == "-h" || arg == "--help" || arg == "--help-llm" || arg == "help"
-}
-
-type rootVerbosityState struct {
-	flags []rootFlagActivation
-}
-
-func newRootVerbosityState() rootVerbosityState {
-	return rootVerbosityState{flags: make([]rootFlagActivation, len(rootGlobalFlagSpecs))}
-}
-
-func (s *rootVerbosityState) applyArg(arg string, order int) (bool, error) {
-	for i, spec := range rootGlobalFlagSpecs {
-		matched, value, err := spec.matchBoolArg(arg)
-		if !matched {
-			continue
-		}
-		if err != nil {
-			return true, err
-		}
-		s.flags[i].active = value
-		s.flags[i].order = order
-		return true, nil
-	}
-
-	return false, nil
-}
-
-func (s rootVerbosityState) level() telemetry.Level {
+func rootTelemetryLevel(flags rootGlobalFlags) (telemetry.Level, error) {
+	count := 0
 	level := telemetry.LevelDefault
-	order := -1
 
-	for i, flag := range s.flags {
-		if !flag.active || flag.order < order {
-			continue
-		}
-		switch i {
-		case 0:
-			level = telemetry.LevelVerbose
-		case 1:
-			level = telemetry.LevelQuiet
-		case 2:
-			level = telemetry.LevelSilent
-		}
-		order = flag.order
+	if flags.Verbose {
+		count++
+		level = telemetry.LevelVerbose
 	}
-
-	return level
+	if flags.Quiet {
+		count++
+		level = telemetry.LevelQuiet
+	}
+	if flags.Silent {
+		count++
+		level = telemetry.LevelSilent
+	}
+	if count > 1 {
+		return telemetry.LevelDefault, fmt.Errorf("only one of --verbose, --quiet, or --silent may be set")
+	}
+	return level, nil
 }
 
-func deriveRootGlobalFlagSpecs() []rootFlagSpec {
-	t := reflect.TypeOf(rootGlobalFlags{})
-	specs := make([]rootFlagSpec, 0, t.NumField())
-	for i := 0; i < t.NumField(); i++ {
-		field := t.Field(i)
-		name := field.Tag.Get("flag")
-		if name == "" {
-			name = strings.ToLower(field.Name)
+func runHelpCommand(args []string, stderr io.Writer) int {
+	if len(args) == 0 {
+		fmt.Fprint(stderr, yargs.GenerateGlobalHelp(rootHelpConfig, rootGlobalFlags{}))
+		return 0
+	}
+	if len(args) > 2 || (len(args) == 2 && args[1] != "--help" && args[1] != "--help-llm") {
+		fmt.Fprint(stderr, yargs.GenerateGlobalHelp(rootHelpConfig, rootGlobalFlags{}))
+		return 2
+	}
+
+	llm := len(args) == 2 && args[1] == "--help-llm"
+	switch args[0] {
+	case "listen":
+		if llm {
+			fmt.Fprint(stderr, listenHelpLLMText())
+		} else {
+			fmt.Fprint(stderr, listenHelpText())
 		}
-		fieldType := field.Type
-		for fieldType.Kind() == reflect.Ptr {
-			fieldType = fieldType.Elem()
+		return 0
+	case "send":
+		if llm {
+			fmt.Fprint(stderr, sendHelpLLMText())
+		} else {
+			fmt.Fprint(stderr, sendHelpText())
 		}
-		specs = append(specs, rootFlagSpec{
-			name:  name,
-			short: field.Tag.Get("short"),
-			kind:  fieldType.Kind(),
-		})
-	}
-	return specs
-}
-
-func (spec rootFlagSpec) matchBoolArg(arg string) (matched bool, value bool, err error) {
-	if spec.kind != reflect.Bool {
-		return false, false, nil
-	}
-
-	for _, candidate := range spec.syntax() {
-		if arg == candidate {
-			return true, true, nil
+		return 0
+	case "version":
+		if llm {
+			fmt.Fprint(stderr, versionHelpLLMText())
+		} else {
+			fmt.Fprint(stderr, versionHelpText())
 		}
-		if strings.HasPrefix(arg, candidate+"=") {
-			raw := strings.TrimPrefix(arg, candidate+"=")
-			parsed, parseErr := strconv.ParseBool(raw)
-			if parseErr != nil {
-				return true, false, fmt.Errorf("invalid boolean value %q for %s", raw, candidate)
-			}
-			return true, parsed, nil
-		}
+		return 0
+	default:
+		fmt.Fprintf(stderr, "unknown command: %s\nRun 'derpcat --help' for usage\n", args[0])
+		return 2
 	}
-
-	return false, false, nil
-}
-
-func (spec rootFlagSpec) syntax() []string {
-	syntax := []string{"--" + spec.name}
-	if spec.short != "" {
-		syntax = append([]string{"-" + spec.short}, syntax...)
-	}
-	return syntax
-}
-
-func rewriteRootHelpArgs(args []string) ([]string, bool) {
-	if len(args) < 2 || args[0] != "help" {
-		return args, false
-	}
-
-	if args[1] == "listen" {
-		if len(args) == 2 {
-			return []string{"listen", "--help"}, false
-		}
-		if !listenWouldStartRuntime(args[2:]) {
-			return append([]string{"listen"}, args[2:]...), false
-		}
-		return args, true
-	}
-
-	if args[1] == "send" {
-		if len(args) == 2 {
-			return []string{"send", "--help"}, false
-		}
-		if !sendWouldStartRuntime(args[2:]) {
-			return append([]string{"send"}, args[2:]...), false
-		}
-		return args, true
-	}
-
-	if len(args) == 3 && args[1] == "version" && args[2] == "--help-llm" {
-		return []string{"version", "--help-llm"}, false
-	}
-
-	if len(args) == 3 && args[1] == "version" && args[2] == "--help" {
-		return []string{"version", "--help"}, false
-	}
-
-	if len(args) == 3 && (args[2] == "--help" || args[2] == "--help-llm") {
-		return []string{args[1], args[2]}, false
-	}
-
-	if len(args) > 2 {
-		return args, true
-	}
-
-	return []string{args[1], "--help"}, false
 }
 
 func runVersion(args []string, stdout, stderr io.Writer) int {
-	if len(args) == 1 && args[0] == "--help-llm" {
-		fmt.Fprint(stderr, yargs.GenerateSubCommandHelpLLMFromConfig(rootHelpConfig, "version", rootGlobalFlags{}))
-		return 0
+	parsed, err := yargs.ParseWithCommandAndHelp[rootGlobalFlags, struct{}, struct{}](append([]string{"version"}, args...), rootHelpConfig)
+	if err != nil {
+		switch {
+		case parsed != nil && (err == yargs.ErrHelp || err == yargs.ErrSubCommandHelp || err == yargs.ErrHelpLLM):
+			fmt.Fprint(stderr, parsed.HelpText)
+			return 0
+		default:
+			fmt.Fprintln(stderr, err)
+			fmt.Fprint(stderr, versionHelpText())
+			return 2
+		}
 	}
 
-	if len(args) == 1 && (args[0] == "-h" || args[0] == "--help") {
-		fmt.Fprintln(stderr, versionUsage)
-		return 0
-	}
-
-	if len(args) != 0 {
-		fmt.Fprintln(stderr, versionUsage)
+	if len(parsed.Parser.Args) != 0 || len(parsed.RemainingArgs) != 0 {
+		fmt.Fprint(stderr, versionHelpText())
 		return 2
 	}
 
 	fmt.Fprintln(stdout, versionString())
 	return 0
+}
+
+func versionHelpText() string {
+	return yargs.GenerateSubCommandHelp(rootHelpConfig, "version", rootGlobalFlags{}, struct{}{}, struct{}{})
+}
+
+func versionHelpLLMText() string {
+	return yargs.GenerateSubCommandHelpLLMFromConfig(rootHelpConfig, "version", rootGlobalFlags{})
 }

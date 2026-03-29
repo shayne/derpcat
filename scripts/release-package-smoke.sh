@@ -34,7 +34,7 @@ test -f "${ROOT_DIR}/dist/release/derpcat-darwin-arm64.tar.gz"
 test -f "${ROOT_DIR}/dist/release/derpcat-darwin-arm64.tar.gz.sha256"
 
 node -e "const fs=require('fs'); const pkg=JSON.parse(fs.readFileSync('${ROOT_DIR}/dist/npm/package.json','utf8')); if (pkg.version !== process.env.VERSION.replace(/^v/,'')) { process.exit(1); }"
-npm_launcher_version="$(node "${ROOT_DIR}/dist/npm/bin/derpcat.js" --version)"
+npm_launcher_version="$(node "${ROOT_DIR}/dist/npm/bin/derpcat.js" version)"
 if [ "${npm_launcher_version}" != "${VERSION}" ]; then
   echo "packaged launcher version mismatch: ${npm_launcher_version} != ${VERSION}" >&2
   exit 1
@@ -46,4 +46,10 @@ if [ "${package_name}" != "derpcat" ]; then
   exit 1
 fi
 
-npm publish "${ROOT_DIR}/dist/npm" --access public --dry-run
+pkg_version="$(node -e "const fs=require('fs'); const pkg=JSON.parse(fs.readFileSync('${ROOT_DIR}/dist/npm/package.json','utf8')); process.stdout.write(pkg.version)")"
+publish_args=("${ROOT_DIR}/dist/npm" --access public --dry-run)
+if [[ "${pkg_version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+-.+ ]]; then
+  publish_args+=(--tag dev)
+fi
+
+npm publish "${publish_args[@]}"

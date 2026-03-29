@@ -9,7 +9,6 @@ import (
 
 	"github.com/shayne/derpcat/pkg/telemetry"
 	"github.com/shayne/derpcat/pkg/token"
-	"github.com/shayne/yargs"
 )
 
 type lockedBuffer struct {
@@ -137,83 +136,14 @@ func TestListenWithoutFlagsUsesStderrForTokenAndStdoutForPayload(t *testing.T) {
 }
 
 func TestListenHelpTargetsCanonicalUsage(t *testing.T) {
-	for _, args := range [][]string{{"listen", "-h"}, {"listen", "--help"}} {
-		t.Run(args[1], func(t *testing.T) {
+	for _, args := range [][]string{{"-h"}, {"--help"}} {
+		t.Run(strings.Join(args, "_"), func(t *testing.T) {
 			var stdout, stderr bytes.Buffer
-			code := run(args, nil, &stdout, &stderr)
+			code := runListen(args, telemetry.LevelDefault, &stdout, &stderr)
 			if code != 0 {
-				t.Fatalf("run() = %d, want 0", code)
+				t.Fatalf("runListen() = %d, want 0", code)
 			}
-			if got, want := stderr.String(), yargs.GenerateSubCommandHelp(
-				testListenHelpConfig(),
-				"listen",
-				struct{}{},
-				listenHelpFlags{},
-				struct{}{},
-			); got != want {
-				t.Fatalf("stderr = %q, want yargs help %q", got, want)
-			}
-			if got := stdout.String(); got != "" {
-				t.Fatalf("stdout = %q, want empty", got)
-			}
-		})
-	}
-}
-
-func TestListenHelpTargetsLegacySpellings(t *testing.T) {
-	for _, args := range [][]string{
-		{"listen", "-help"},
-		{"listen", "-help=true"},
-		{"listen", "--help=true"},
-		{"listen", "--help=0"},
-	} {
-		t.Run(strings.Join(args[1:], "_"), func(t *testing.T) {
-			var stdout, stderr bytes.Buffer
-			code := run(args, nil, &stdout, &stderr)
-			if code != 0 {
-				t.Fatalf("run() = %d, want 0", code)
-			}
-			if got, want := stderr.String(), yargs.GenerateSubCommandHelp(
-				testListenHelpConfig(),
-				"listen",
-				struct{}{},
-				listenHelpFlags{},
-				struct{}{},
-			); got != want {
-				t.Fatalf("stderr = %q, want yargs help %q", got, want)
-			}
-			if got := stdout.String(); got != "" {
-				t.Fatalf("stdout = %q, want empty", got)
-			}
-		})
-	}
-}
-
-func TestListenHelpEqualsFalseTargetsCanonicalUsage(t *testing.T) {
-	for _, args := range [][]string{{"listen", "-h=false"}, {"listen", "--help=false"}} {
-		t.Run(args[1], func(t *testing.T) {
-			var stdout, stderr bytes.Buffer
-			done := make(chan int, 1)
-			go func() {
-				done <- run(args, nil, &stdout, &stderr)
-			}()
-
-			select {
-			case code := <-done:
-				if code != 0 {
-					t.Fatalf("run() = %d, want 0", code)
-				}
-			case <-time.After(200 * time.Millisecond):
-				t.Fatal("run() did not return help output for explicit false help flag")
-			}
-
-			if got, want := stderr.String(), yargs.GenerateSubCommandHelp(
-				testListenHelpConfig(),
-				"listen",
-				struct{}{},
-				listenHelpFlags{},
-				struct{}{},
-			); got != want {
+			if got, want := stderr.String(), listenHelpText(); got != want {
 				t.Fatalf("stderr = %q, want yargs help %q", got, want)
 			}
 			if got := stdout.String(); got != "" {
@@ -225,17 +155,11 @@ func TestListenHelpEqualsFalseTargetsCanonicalUsage(t *testing.T) {
 
 func TestListenHelpLLMTargetsCanonicalOutput(t *testing.T) {
 	var stdout, stderr bytes.Buffer
-	code := run([]string{"listen", "--help-llm"}, nil, &stdout, &stderr)
+	code := runListen([]string{"--help-llm"}, telemetry.LevelDefault, &stdout, &stderr)
 	if code != 0 {
-		t.Fatalf("run() = %d, want 0", code)
+		t.Fatalf("runListen() = %d, want 0", code)
 	}
-	if got, want := stderr.String(), yargs.GenerateSubCommandHelpLLM(
-		testListenHelpConfig(),
-		"listen",
-		struct{}{},
-		listenHelpFlags{},
-		struct{}{},
-	); got != want {
+	if got, want := stderr.String(), listenHelpLLMText(); got != want {
 		t.Fatalf("stderr = %q, want yargs LLM help %q", got, want)
 	}
 	if got := stdout.String(); got != "" {
@@ -249,57 +173,7 @@ func TestListenRejectsStrayPositionalArgs(t *testing.T) {
 	if code != 2 {
 		t.Fatalf("runListen() = %d, want 2", code)
 	}
-	if got, want := stderr.String(), yargs.GenerateSubCommandHelp(
-		testListenHelpConfig(),
-		"listen",
-		struct{}{},
-		listenHelpFlags{},
-		struct{}{},
-	); got != want {
-		t.Fatalf("stderr = %q, want yargs help %q", got, want)
-	}
-	if got := stdout.String(); got != "" {
-		t.Fatalf("stdout = %q, want empty", got)
-	}
-}
-
-func TestListenRejectsStrayPositionalArgsEvenWithHelp(t *testing.T) {
-	var stdout, stderr bytes.Buffer
-	code := runListen([]string{"extra", "--help"}, telemetry.LevelDefault, &stdout, &stderr)
-	if code != 2 {
-		t.Fatalf("runListen() = %d, want 2", code)
-	}
-	if got, want := stderr.String(), yargs.GenerateSubCommandHelp(
-		testListenHelpConfig(),
-		"listen",
-		struct{}{},
-		listenHelpFlags{},
-		struct{}{},
-	); got != want {
-		t.Fatalf("stderr = %q, want yargs help %q", got, want)
-	}
-	if got := stdout.String(); got != "" {
-		t.Fatalf("stdout = %q, want empty", got)
-	}
-}
-
-func TestListenRejectsStrayPositionalArgsBeforeLateFlag(t *testing.T) {
-	var stdout, stderr bytes.Buffer
-	code := runListen([]string{"extra", "--bogus"}, telemetry.LevelDefault, &stdout, &stderr)
-	if code != 2 {
-		t.Fatalf("runListen() = %d, want 2", code)
-	}
-	got := stderr.String()
-	if strings.Contains(got, "unknown flag: --bogus") || strings.Contains(got, "flag provided but not defined") {
-		t.Fatalf("stderr = %q, want stray positional handling rather than parse error", got)
-	}
-	if got, want := got, yargs.GenerateSubCommandHelp(
-		testListenHelpConfig(),
-		"listen",
-		struct{}{},
-		listenHelpFlags{},
-		struct{}{},
-	); got != want {
+	if got, want := stderr.String(), listenHelpText(); got != want {
 		t.Fatalf("stderr = %q, want yargs help %q", got, want)
 	}
 	if got := stdout.String(); got != "" {
@@ -313,164 +187,12 @@ func TestListenUnknownFlagShowsParseErrorAndHelp(t *testing.T) {
 	if code != 2 {
 		t.Fatalf("runListen() = %d, want 2", code)
 	}
-	wantHelp := yargs.GenerateSubCommandHelp(
-		testListenHelpConfig(),
-		"listen",
-		struct{}{},
-		listenHelpFlags{},
-		struct{}{},
-	)
 	got := stderr.String()
-	if got != "unknown flag: --bogus\n"+wantHelp {
-		t.Fatalf("stderr = %q, want yargs parse error plus help %q", got, "unknown flag: --bogus\n"+wantHelp)
+	if got != "unknown flag: --bogus\n"+listenHelpText() {
+		t.Fatalf("stderr = %q, want yargs parse error plus help %q", got, "unknown flag: --bogus\n"+listenHelpText())
 	}
 	if got := stdout.String(); got != "" {
 		t.Fatalf("stdout = %q, want empty", got)
-	}
-}
-
-func TestListenUnknownFlagBeforeHelpShowsParseErrorAndHelp(t *testing.T) {
-	var stdout, stderr bytes.Buffer
-	code := runListen([]string{"--bogus", "--help"}, telemetry.LevelDefault, &stdout, &stderr)
-	if code != 2 {
-		t.Fatalf("runListen() = %d, want 2", code)
-	}
-	wantHelp := yargs.GenerateSubCommandHelp(
-		testListenHelpConfig(),
-		"listen",
-		struct{}{},
-		listenHelpFlags{},
-		struct{}{},
-	)
-	got := stderr.String()
-	if got != "unknown flag: --bogus\n"+wantHelp {
-		t.Fatalf("stderr = %q, want yargs parse error plus help %q", got, "unknown flag: --bogus\n"+wantHelp)
-	}
-	if got := stdout.String(); got != "" {
-		t.Fatalf("stdout = %q, want empty", got)
-	}
-}
-
-func TestListenMalformedLongFlagStaysUnknownBeforeLaterHelp(t *testing.T) {
-	var stdout, stderr bytes.Buffer
-	code := runListen([]string{"---tcp-connect", "extra", "--help"}, telemetry.LevelDefault, &stdout, &stderr)
-	if code != 2 {
-		t.Fatalf("runListen() = %d, want 2", code)
-	}
-	wantHelp := yargs.GenerateSubCommandHelp(
-		testListenHelpConfig(),
-		"listen",
-		struct{}{},
-		listenHelpFlags{},
-		struct{}{},
-	)
-	got := stderr.String()
-	if got != "unknown flag: ---tcp-connect\n"+wantHelp {
-		t.Fatalf("stderr = %q, want parse error plus help %q", got, "unknown flag: ---tcp-connect\n"+wantHelp)
-	}
-	if got := stdout.String(); got != "" {
-		t.Fatalf("stdout = %q, want empty", got)
-	}
-}
-
-func TestListenTreatsHelpAfterDoubleDashAsPositional(t *testing.T) {
-	var stdout, stderr bytes.Buffer
-	code := runListen([]string{"--", "extra", "--help"}, telemetry.LevelDefault, &stdout, &stderr)
-	if code != 2 {
-		t.Fatalf("runListen() = %d, want 2", code)
-	}
-	if got, want := stderr.String(), yargs.GenerateSubCommandHelp(
-		testListenHelpConfig(),
-		"listen",
-		struct{}{},
-		listenHelpFlags{},
-		struct{}{},
-	); got != want {
-		t.Fatalf("stderr = %q, want yargs help %q", got, want)
-	}
-	if got := stdout.String(); got != "" {
-		t.Fatalf("stdout = %q, want empty", got)
-	}
-}
-
-func TestListenUnknownFlagRemainsAuthoritativeBeforeLaterPositionalOrDoubleDash(t *testing.T) {
-	tests := []struct {
-		name string
-		args []string
-	}{
-		{name: "later positional", args: []string{"--bogus", "extra", "--help"}},
-		{name: "later double dash", args: []string{"--bogus", "--", "--help"}},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			var stdout, stderr bytes.Buffer
-			code := runListen(tc.args, telemetry.LevelDefault, &stdout, &stderr)
-			if code != 2 {
-				t.Fatalf("runListen() = %d, want 2", code)
-			}
-			wantHelp := yargs.GenerateSubCommandHelp(
-				testListenHelpConfig(),
-				"listen",
-				struct{}{},
-				listenHelpFlags{},
-				struct{}{},
-			)
-			got := stderr.String()
-			if got != "unknown flag: --bogus\n"+wantHelp {
-				t.Fatalf("stderr = %q, want yargs parse error plus help %q", got, "unknown flag: --bogus\n"+wantHelp)
-			}
-			if got := stdout.String(); got != "" {
-				t.Fatalf("stdout = %q, want empty", got)
-			}
-		})
-	}
-}
-
-func TestListenTreatsBareHelpAfterDoubleDashAsPositional(t *testing.T) {
-	var stdout, stderr bytes.Buffer
-	code := runListen([]string{"--", "--help"}, telemetry.LevelDefault, &stdout, &stderr)
-	if code != 2 {
-		t.Fatalf("runListen() = %d, want 2", code)
-	}
-	if got, want := stderr.String(), yargs.GenerateSubCommandHelp(
-		testListenHelpConfig(),
-		"listen",
-		struct{}{},
-		listenHelpFlags{},
-		struct{}{},
-	); got != want {
-		t.Fatalf("stderr = %q, want yargs help %q", got, want)
-	}
-	if got := stdout.String(); got != "" {
-		t.Fatalf("stdout = %q, want empty", got)
-	}
-}
-
-func TestListenConsumesBareDoubleDashAsKnownStringFlagValueBeforeHelp(t *testing.T) {
-	var stdout, stderr bytes.Buffer
-	code := runListen([]string{"--tcp-connect", "--", "--help"}, telemetry.LevelDefault, &stdout, &stderr)
-	if code != 0 {
-		t.Fatalf("runListen() = %d, want 0", code)
-	}
-	if got, want := stderr.String(), yargs.GenerateSubCommandHelp(
-		testListenHelpConfig(),
-		"listen",
-		struct{}{},
-		listenHelpFlags{},
-		struct{}{},
-	); got != want {
-		t.Fatalf("stderr = %q, want yargs help %q", got, want)
-	}
-	if got := stdout.String(); got != "" {
-		t.Fatalf("stdout = %q, want empty", got)
-	}
-}
-
-func TestListenRequestedHelpIgnoresConsumedStringFlagValue(t *testing.T) {
-	helpLLM, help := listenRequestedHelp([]string{"--tcp-listen", "--help"})
-	if helpLLM || help {
-		t.Fatalf("listenRequestedHelp() = (%t, %t), want no help request when --help is consumed as a string flag value", helpLLM, help)
 	}
 }
 
@@ -520,36 +242,4 @@ func TestListenHonorsVerbosityLevel(t *testing.T) {
 			}
 		})
 	}
-}
-
-func testListenHelpConfig() yargs.HelpConfig {
-	return yargs.HelpConfig{
-		Command: yargs.CommandInfo{
-			Name:        "derpcat",
-			Description: "Move one byte stream between hosts over public DERP with direct UDP promotion when available.",
-			Examples: []string{
-				"derpcat listen",
-				"cat file | derpcat send <token>",
-				"derpcat version",
-			},
-		},
-		SubCommands: map[string]yargs.SubCommandInfo{
-			"listen": {
-				Name:        "listen",
-				Description: "Listen for one incoming derpcat session and receive data.",
-				Usage:       "[--print-token-only] [--tcp-listen addr | --tcp-connect addr] [--force-relay]",
-				Examples: []string{
-					"derpcat listen",
-					"derpcat listen --tcp-connect 127.0.0.1:9000",
-				},
-			},
-		},
-	}
-}
-
-type listenHelpFlags struct {
-	PrintTokenOnly bool   `flag:"print-token-only" help:"Print only the session token"`
-	ForceRelay     bool   `flag:"force-relay" help:"Disable direct probing"`
-	TCPListen      string `flag:"tcp-listen" help:"Accept one local TCP connection and forward its bytes to the session sink"`
-	TCPConnect     string `flag:"tcp-connect" help:"Connect to a local TCP service and forward session bytes to it"`
 }

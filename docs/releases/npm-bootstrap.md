@@ -15,13 +15,13 @@ This runbook covers the first npm publish before GitHub trusted publishing is co
 ```bash
 VERSION=v0.0.1 COMMIT=$(git rev-parse HEAD) BUILD_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ) mise run release:build-all
 VERSION=v0.0.1 mise run release:npm-dry-run
-node ./dist/npm/bin/derpcat.js --version
+node ./dist/npm/bin/derpcat.js version
 ```
 
 Expected output:
 
 - `npm publish --dry-run` succeeds
-- `node ./dist/npm/bin/derpcat.js --version` prints `v0.0.1`
+- `node ./dist/npm/bin/derpcat.js version` prints `v0.0.1`
 
 ## Publish
 

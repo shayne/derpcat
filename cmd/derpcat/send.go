@@ -52,18 +52,18 @@ func runSend(args []string, level telemetry.Level, stdin io.Reader, stdout, stde
 			if parsed != nil && parsed.HelpText != "" {
 				fmt.Fprint(stderr, parsed.HelpText)
 			} else {
-				fmt.Fprint(stderr, yargs.GenerateSubCommandHelp(sendHelpConfig, "send", struct{}{}, sendFlags{}, sendArgs{}))
+				fmt.Fprint(stderr, sendHelpText())
 			}
 			return 0
 		default:
 			fmt.Fprintln(stderr, err)
-			fmt.Fprint(stderr, yargs.GenerateSubCommandHelp(sendHelpConfig, "send", struct{}{}, sendFlags{}, sendArgs{}))
+			fmt.Fprint(stderr, sendHelpText())
 			return 2
 		}
 	}
 
 	if parsed.Args.Token == "" || len(parsed.Parser.Args) > 1 || len(parsed.RemainingArgs) != 0 {
-		fmt.Fprint(stderr, yargs.GenerateSubCommandHelp(sendHelpConfig, "send", struct{}{}, sendFlags{}, sendArgs{}))
+		fmt.Fprint(stderr, sendHelpText())
 		return 2
 	}
 	if parsed.SubCommandFlags.TCPListen != "" && parsed.SubCommandFlags.TCPConnect != "" {
@@ -89,19 +89,10 @@ func runSend(args []string, level telemetry.Level, stdin io.Reader, stdout, stde
 	return 0
 }
 
-func sendWouldStartRuntime(args []string) bool {
-	parsed, err := yargs.ParseWithCommandAndHelp[struct{}, sendFlags, sendArgs](append([]string{"send"}, args...), sendHelpConfig)
-	if err != nil {
-		return false
-	}
-	if parsed.Args.Token == "" {
-		return false
-	}
-	if len(parsed.Parser.Args) > 1 || len(parsed.RemainingArgs) != 0 {
-		return false
-	}
-	if parsed.SubCommandFlags.TCPListen != "" && parsed.SubCommandFlags.TCPConnect != "" {
-		return false
-	}
-	return true
+func sendHelpText() string {
+	return yargs.GenerateSubCommandHelp(sendHelpConfig, "send", struct{}{}, sendFlags{}, sendArgs{})
+}
+
+func sendHelpLLMText() string {
+	return yargs.GenerateSubCommandHelpLLM(sendHelpConfig, "send", struct{}{}, sendFlags{}, sendArgs{})
 }
