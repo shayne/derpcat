@@ -431,6 +431,39 @@ func TestRunHelpSendRejectsExtraArgs(t *testing.T) {
 	}
 }
 
+func TestRunHelpSendDelegatesNonRuntimeArgs(t *testing.T) {
+	tests := []struct {
+		name       string
+		args       []string
+		wantCode   int
+		wantStderr string
+	}{
+		{name: "plain help", args: []string{"help", "send"}, wantCode: 0},
+		{name: "legacy short help", args: []string{"help", "send", "-h"}, wantCode: 0},
+		{name: "token before help", args: []string{"help", "send", "token-value", "-h"}, wantCode: 0},
+		{name: "unknown flag", args: []string{"help", "send", "--bogus"}, wantCode: 2, wantStderr: "unknown flag: --bogus\n"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			code := run(tc.args, nil, &stdout, &stderr)
+			if code != tc.wantCode {
+				t.Fatalf("run() = %d, want %d", code, tc.wantCode)
+			}
+			if tc.wantStderr != "" {
+				if !strings.HasPrefix(stderr.String(), tc.wantStderr) {
+					t.Fatalf("stderr = %q, want prefix %q", stderr.String(), tc.wantStderr)
+				}
+			}
+			assertSendHelpText(t, stderr.String())
+			if got := stdout.String(); got != "" {
+				t.Fatalf("stdout = %q, want empty", got)
+			}
+		})
+	}
+}
+
 func TestRunHelpListenRejectsExtraArgs(t *testing.T) {
 	for _, args := range [][]string{
 		{"help", "listen", "--tcp-listen", "127.0.0.1:7000"},
