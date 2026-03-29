@@ -300,6 +300,55 @@ func TestListenUnknownFlagShowsParseErrorAndHelp(t *testing.T) {
 	}
 }
 
+func TestListenUnknownFlagBeforeHelpShowsParseErrorAndHelp(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := runListen([]string{"--bogus", "--help"}, telemetry.LevelDefault, &stdout, &stderr)
+	if code != 2 {
+		t.Fatalf("runListen() = %d, want 2", code)
+	}
+	wantHelp := yargs.GenerateSubCommandHelp(
+		testListenHelpConfig(),
+		"listen",
+		struct{}{},
+		listenHelpFlags{},
+		struct{}{},
+	)
+	got := stderr.String()
+	if got != "unknown flag: --bogus\n"+wantHelp {
+		t.Fatalf("stderr = %q, want yargs parse error plus help %q", got, "unknown flag: --bogus\n"+wantHelp)
+	}
+	if got := stdout.String(); got != "" {
+		t.Fatalf("stdout = %q, want empty", got)
+	}
+}
+
+func TestListenTreatsHelpAfterDoubleDashAsPositional(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := runListen([]string{"--", "extra", "--help"}, telemetry.LevelDefault, &stdout, &stderr)
+	if code != 2 {
+		t.Fatalf("runListen() = %d, want 2", code)
+	}
+	if got, want := stderr.String(), yargs.GenerateSubCommandHelp(
+		testListenHelpConfig(),
+		"listen",
+		struct{}{},
+		listenHelpFlags{},
+		struct{}{},
+	); got != want {
+		t.Fatalf("stderr = %q, want yargs help %q", got, want)
+	}
+	if got := stdout.String(); got != "" {
+		t.Fatalf("stdout = %q, want empty", got)
+	}
+}
+
+func TestListenRequestedHelpIgnoresConsumedStringFlagValue(t *testing.T) {
+	helpLLM, help := listenRequestedHelp([]string{"--tcp-listen", "--help"})
+	if helpLLM || help {
+		t.Fatalf("listenRequestedHelp() = (%t, %t), want no help request when --help is consumed as a string flag value", helpLLM, help)
+	}
+}
+
 func TestListenRejectsMutuallyExclusiveTCPFlags(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	code := runListen([]string{"--tcp-listen", "127.0.0.1:7000", "--tcp-connect", "127.0.0.1:9000"}, telemetry.LevelDefault, &stdout, &stderr)

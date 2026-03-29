@@ -46,13 +46,14 @@ var listenHelpConfig = yargs.HelpConfig{
 var listenFlagKinds = deriveListenFlagKinds()
 
 func runListen(args []string, level telemetry.Level, stdout, stderr io.Writer) int {
-	if listenHasPositionalBeforeLateFlag(args) {
+	preScan := listenPreScan(args)
+	if preScan.positionalBeforeLateFlag {
 		fmt.Fprint(stderr, listenHelpText())
 		return 2
 	}
 
-	if helpLLM, help := listenRequestedHelp(args); helpLLM || help {
-		if helpLLM {
+	if preScan.helpLLM || preScan.help {
+		if preScan.helpLLM {
 			fmt.Fprint(stderr, listenHelpLLMText())
 		} else {
 			fmt.Fprint(stderr, listenHelpText())
@@ -60,7 +61,7 @@ func runListen(args []string, level telemetry.Level, stdout, stderr io.Writer) i
 		return 0
 	}
 
-	parsed, err := yargs.ParseWithCommandAndHelp[struct{}, listenFlags, struct{}](append([]string{"listen"}, args...), listenHelpConfig)
+	parsed, err := yargs.ParseWithCommandAndHelp[struct{}, listenFlags, struct{}](append([]string{"listen"}, preScan.parseArgs...), listenHelpConfig)
 	if err != nil {
 		if errors.Is(err, yargs.ErrHelp) || errors.Is(err, yargs.ErrSubCommandHelp) || errors.Is(err, yargs.ErrHelpLLM) {
 			if parsed != nil && parsed.HelpText != "" {
@@ -151,39 +152,82 @@ func listenHelpLLMText() string {
 	)
 }
 
-func listenHasPositionalBeforeLateFlag(args []string) bool {
+type listenPreScanResult struct {
+	help                     bool
+	helpLLM                  bool
+	positionalBeforeLateFlag bool
+	parseArgs                []string
+}
+
+func listenPreScan(args []string) listenPreScanResult {
+	result := listenPreScanResult{parseArgs: make([]string, 0, len(args))}
 	sawPositional := false
+	sawUnknownFlag := false
 	for i := 0; i < len(args); i++ {
 		arg := args[i]
 		if arg == "--" {
-			return false
-		}
-		if strings.HasPrefix(arg, "-") {
-			if sawPositional {
-				return true
-			}
-			if kind, ok := listenFlagKinds[listenFlagName(arg)]; ok && kind != reflect.Bool && !strings.Contains(arg, "=") {
-				if i+1 < len(args) && !strings.HasPrefix(args[i+1], "-") {
-					i++
+			result.parseArgs = append(result.parseArgs, arg)
+			for j := i + 1; j < len(args); j++ {
+				if listenParserHelpToken(args[j]) {
+					continue
 				}
+				result.parseArgs = append(result.parseArgs, args[j])
+			}
+			return result
+		}
+		if !strings.HasPrefix(arg, "-") || arg == "-" {
+			sawPositional = true
+			result.parseArgs = append(result.parseArgs, arg)
+			continue
+		}
+		if sawPositional {
+			result.positionalBeforeLateFlag = true
+			return result
+		}
+
+		flagName := listenFlagName(arg)
+		kind, ok := listenFlagKinds[flagName]
+		if ok && kind != reflect.Bool && !strings.Contains(arg, "=") {
+			if i+1 < len(args) && args[i+1] != "--" {
+				result.parseArgs = append(result.parseArgs, arg+"="+args[i+1])
+				i++
+			} else {
+				result.parseArgs = append(result.parseArgs, arg)
 			}
 			continue
 		}
-		sawPositional = true
+
+		switch arg {
+		case "--help-llm":
+			if !sawUnknownFlag {
+				result.helpLLM = true
+				return result
+			}
+			continue
+		case "-h", "--help", "-h=false", "--help=false":
+			if !sawUnknownFlag {
+				result.help = true
+				return result
+			}
+			if listenParserHelpToken(arg) {
+				continue
+			}
+		}
+		if !ok {
+			sawUnknownFlag = true
+		}
+		result.parseArgs = append(result.parseArgs, arg)
 	}
-	return false
+	return result
 }
 
 func listenRequestedHelp(args []string) (helpLLM bool, help bool) {
-	for _, arg := range args {
-		switch arg {
-		case "--help-llm":
-			return true, false
-		case "-h", "--help", "-h=false", "--help=false":
-			help = true
-		}
-	}
-	return false, help
+	preScan := listenPreScan(args)
+	return preScan.helpLLM, preScan.help
+}
+
+func listenParserHelpToken(arg string) bool {
+	return arg == "-h" || arg == "--help" || arg == "--help-llm"
 }
 
 func deriveListenFlagKinds() map[string]reflect.Kind {
