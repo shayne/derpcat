@@ -198,7 +198,7 @@ jobs:
   publish-packages-prod:
     name: Build npm artifact (prod)
     runs-on: ubuntu-latest
-    needs: [meta, build-derpcat]
+    needs: [meta, check, build-derpcat]
     if: needs.meta.outputs.is_tag == 'true'
     steps:
       - name: Checkout
@@ -253,7 +253,7 @@ jobs:
   publish-packages-dev:
     name: Build npm artifact (dev)
     runs-on: ubuntu-latest
-    needs: [meta, build-derpcat]
+    needs: [meta, check, build-derpcat]
     if: needs.meta.outputs.is_main == 'true'
     steps:
       - name: Checkout
