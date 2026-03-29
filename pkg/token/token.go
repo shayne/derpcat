@@ -27,10 +27,12 @@ type Token struct {
 }
 
 var (
-	ErrExpired  = errors.New("token expired")
-	ErrChecksum = errors.New("token checksum mismatch")
+	ErrExpired            = errors.New("token expired")
+	ErrChecksum           = errors.New("token checksum mismatch")
+	ErrUnsupportedVersion = errors.New("token unsupported version")
 )
 
+const supportedVersion uint8 = 1
 const payloadSize = 1 + 16 + 8 + 2 + 32 + 32 + 32 + 32 + 4
 
 func Encode(tok Token) (string, error) {
@@ -79,7 +81,7 @@ func Decode(encoded string, now time.Time) (Token, error) {
 		return tok, err
 	}
 	if len(raw) != payloadSize+4 {
-		return tok, errors.New("token too short")
+		return tok, errors.New("invalid token length")
 	}
 
 	payload := raw[:payloadSize]
@@ -91,6 +93,9 @@ func Decode(encoded string, now time.Time) (Token, error) {
 	r := bytes.NewReader(payload)
 	if err := binary.Read(r, binary.BigEndian, &tok.Version); err != nil {
 		return tok, err
+	}
+	if tok.Version != supportedVersion {
+		return tok, ErrUnsupportedVersion
 	}
 	if _, err := r.Read(tok.SessionID[:]); err != nil {
 		return tok, err
