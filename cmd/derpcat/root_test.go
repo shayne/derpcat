@@ -2,6 +2,8 @@ package main
 
 import (
 	"bytes"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -50,11 +52,7 @@ func TestRunRootHelpSucceeds(t *testing.T) {
 				t.Fatalf("run() = %d, want 0", code)
 			}
 			got := stderr.String()
-			for _, want := range []string{"listen", "send", "version"} {
-				if !strings.Contains(got, want) {
-					t.Fatalf("stderr = %q, want help mentioning %q", got, want)
-				}
-			}
+			assertRootHelp(t, got)
 			if got := stdout.String(); got != "" {
 				t.Fatalf("stdout = %q, want empty", got)
 			}
@@ -272,9 +270,42 @@ func TestRunHelpListenRejectsExtraArgs(t *testing.T) {
 
 func assertRootHelp(t *testing.T, got string) {
 	t.Helper()
+	for _, want := range []string{
+		"GLOBAL OPTIONS:",
+		"-v, --verbose",
+		"-q, --quiet",
+		"-s, --silent",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("stderr = %q, want root help mentioning %q", got, want)
+		}
+	}
 	for _, want := range []string{"listen", "send", "version"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("stderr = %q, want root help mentioning %q", got, want)
+		}
+	}
+}
+
+func TestRootParserDoesNotHardCodeGlobalFlagSyntax(t *testing.T) {
+	src, err := os.ReadFile(filepath.Clean("root.go"))
+	if err != nil {
+		t.Fatalf("ReadFile(root.go) error = %v", err)
+	}
+
+	for _, want := range []string{
+		`case "-v", "--verbose":`,
+		`case "-q", "--quiet":`,
+		`case "-s", "--silent":`,
+		`prefix: "-v="`,
+		`prefix: "--verbose="`,
+		`prefix: "-q="`,
+		`prefix: "--quiet="`,
+		`prefix: "-s="`,
+		`prefix: "--silent="`,
+	} {
+		if strings.Contains(string(src), want) {
+			t.Fatalf("root.go still hard-codes root flag syntax %q", want)
 		}
 	}
 }

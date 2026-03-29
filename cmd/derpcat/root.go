@@ -4,6 +4,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"reflect"
 	"strconv"
 	"strings"
 
@@ -16,6 +17,19 @@ type rootGlobalFlags struct {
 	Quiet   bool `flag:"quiet" short:"q" help:"Reduce relay status output"`
 	Silent  bool `flag:"silent" short:"s" help:"Suppress relay status output"`
 }
+
+type rootFlagSpec struct {
+	name  string
+	short string
+	kind  reflect.Kind
+}
+
+type rootFlagActivation struct {
+	active bool
+	order  int
+}
+
+var rootGlobalFlagSpecs = deriveRootGlobalFlagSpecs()
 
 const versionUsage = "usage: derpcat version"
 
@@ -118,7 +132,7 @@ func isRootHelpLLMRequest(args []string) bool {
 }
 
 func parseRootArgs(args []string) (telemetry.Level, []string, error) {
-	state := rootVerbosityState{}
+	state := newRootVerbosityState()
 	for i, arg := range args {
 		if isRootHelpToken(arg) {
 			return state.level(), args[i:], nil
@@ -142,55 +156,25 @@ func isRootHelpToken(arg string) bool {
 }
 
 type rootVerbosityState struct {
-	verboseActive bool
-	verboseOrder  int
-	quietActive   bool
-	quietOrder    int
-	silentActive  bool
-	silentOrder   int
+	flags []rootFlagActivation
+}
+
+func newRootVerbosityState() rootVerbosityState {
+	return rootVerbosityState{flags: make([]rootFlagActivation, len(rootGlobalFlagSpecs))}
 }
 
 func (s *rootVerbosityState) applyArg(arg string, order int) (bool, error) {
-	switch arg {
-	case "-v", "--verbose":
-		s.verboseActive = true
-		s.verboseOrder = order
-		return true, nil
-	case "-q", "--quiet":
-		s.quietActive = true
-		s.quietOrder = order
-		return true, nil
-	case "-s", "--silent":
-		s.silentActive = true
-		s.silentOrder = order
-		return true, nil
-	}
-
-	for _, spec := range []struct {
-		prefix string
-		set    func()
-		clear  func()
-	}{
-		{prefix: "-v=", set: func() { s.verboseActive = true; s.verboseOrder = order }, clear: func() { s.verboseActive = false }},
-		{prefix: "--verbose=", set: func() { s.verboseActive = true; s.verboseOrder = order }, clear: func() { s.verboseActive = false }},
-		{prefix: "-q=", set: func() { s.quietActive = true; s.quietOrder = order }, clear: func() { s.quietActive = false }},
-		{prefix: "--quiet=", set: func() { s.quietActive = true; s.quietOrder = order }, clear: func() { s.quietActive = false }},
-		{prefix: "-s=", set: func() { s.silentActive = true; s.silentOrder = order }, clear: func() { s.silentActive = false }},
-		{prefix: "--silent=", set: func() { s.silentActive = true; s.silentOrder = order }, clear: func() { s.silentActive = false }},
-	} {
-		if strings.HasPrefix(arg, spec.prefix) {
-			value := strings.TrimPrefix(arg, spec.prefix)
-			parsed, err := strconv.ParseBool(value)
-			if err != nil {
-				return true, fmt.Errorf("invalid boolean value %q for %s", value, strings.TrimSuffix(spec.prefix, "="))
-			}
-			if parsed {
-				spec.set()
-			} else {
-				spec.clear()
-			}
-			return true, nil
+	for i, spec := range rootGlobalFlagSpecs {
+		matched, value, err := spec.matchBoolArg(arg)
+		if !matched {
+			continue
 		}
+		if err != nil {
+			return true, err
+		}
+		s.flags[i].active = value
+		s.flags[i].order = order
+		return true, nil
 	}
 
 	return false, nil
@@ -200,19 +184,74 @@ func (s rootVerbosityState) level() telemetry.Level {
 	level := telemetry.LevelDefault
 	order := -1
 
-	if s.verboseActive && s.verboseOrder >= order {
-		level = telemetry.LevelVerbose
-		order = s.verboseOrder
-	}
-	if s.quietActive && s.quietOrder >= order {
-		level = telemetry.LevelQuiet
-		order = s.quietOrder
-	}
-	if s.silentActive && s.silentOrder >= order {
-		level = telemetry.LevelSilent
+	for i, flag := range s.flags {
+		if !flag.active || flag.order < order {
+			continue
+		}
+		switch i {
+		case 0:
+			level = telemetry.LevelVerbose
+		case 1:
+			level = telemetry.LevelQuiet
+		case 2:
+			level = telemetry.LevelSilent
+		}
+		order = flag.order
 	}
 
 	return level
+}
+
+func deriveRootGlobalFlagSpecs() []rootFlagSpec {
+	t := reflect.TypeOf(rootGlobalFlags{})
+	specs := make([]rootFlagSpec, 0, t.NumField())
+	for i := 0; i < t.NumField(); i++ {
+		field := t.Field(i)
+		name := field.Tag.Get("flag")
+		if name == "" {
+			name = strings.ToLower(field.Name)
+		}
+		fieldType := field.Type
+		for fieldType.Kind() == reflect.Ptr {
+			fieldType = fieldType.Elem()
+		}
+		specs = append(specs, rootFlagSpec{
+			name:  name,
+			short: field.Tag.Get("short"),
+			kind:  fieldType.Kind(),
+		})
+	}
+	return specs
+}
+
+func (spec rootFlagSpec) matchBoolArg(arg string) (matched bool, value bool, err error) {
+	if spec.kind != reflect.Bool {
+		return false, false, nil
+	}
+
+	for _, candidate := range spec.syntax() {
+		if arg == candidate {
+			return true, true, nil
+		}
+		if strings.HasPrefix(arg, candidate+"=") {
+			raw := strings.TrimPrefix(arg, candidate+"=")
+			parsed, parseErr := strconv.ParseBool(raw)
+			if parseErr != nil {
+				return true, false, fmt.Errorf("invalid boolean value %q for %s", raw, candidate)
+			}
+			return true, parsed, nil
+		}
+	}
+
+	return false, false, nil
+}
+
+func (spec rootFlagSpec) syntax() []string {
+	syntax := []string{"--" + spec.name}
+	if spec.short != "" {
+		syntax = append([]string{"-" + spec.short}, syntax...)
+	}
+	return syntax
 }
 
 func rewriteRootHelpArgs(args []string) ([]string, bool) {
