@@ -48,7 +48,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v5
       - name: Setup mise
-        uses: jdx/mise-action@v3
+        uses: jdx/mise-action@v4
         with:
           install: true
           cache: true
@@ -87,7 +87,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v5
       - name: Setup mise
-        uses: jdx/mise-action@v3
+        uses: jdx/mise-action@v4
         with:
           install: true
           cache: true
@@ -103,7 +103,7 @@ jobs:
               -o dist/${{ matrix.asset }} \
               ./cmd/derpcat
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: ${{ matrix.asset }}
           path: dist/${{ matrix.asset }}
@@ -120,7 +120,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v5
       - name: Download build artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v5
         with:
           pattern: derpcat-*
           path: dist/raw
@@ -159,7 +159,7 @@ jobs:
         with:
           fetch-depth: 0
       - name: Download build artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v5
         with:
           pattern: derpcat-*
           path: dist/raw
@@ -204,12 +204,12 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v5
       - name: Setup mise
-        uses: jdx/mise-action@v3
+        uses: jdx/mise-action@v4
         with:
           install: true
           cache: true
       - name: Download raw build artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v5
         with:
           pattern: derpcat-*
           path: dist/raw
@@ -244,7 +244,7 @@ jobs:
         run: |
           tar -czf dist/npm.tgz -C dist npm
       - name: Upload package artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: package-artifacts-prod
           path: dist/npm.tgz
@@ -259,12 +259,12 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v5
       - name: Setup mise
-        uses: jdx/mise-action@v3
+        uses: jdx/mise-action@v4
         with:
           install: true
           cache: true
       - name: Download raw build artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v5
         with:
           pattern: derpcat-*
           path: dist/raw
@@ -299,7 +299,7 @@ jobs:
         run: |
           tar -czf dist/npm.tgz -C dist npm
       - name: Upload package artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: package-artifacts-dev
           path: dist/npm.tgz
@@ -318,7 +318,7 @@ jobs:
       url: https://www.npmjs.com/package/derpcat
     steps:
       - name: Download package artifact
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v5
         with:
           name: package-artifacts-prod
           path: dist
@@ -345,7 +345,7 @@ jobs:
       url: https://www.npmjs.com/package/derpcat
     steps:
       - name: Download package artifact
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v5
         with:
           name: package-artifacts-dev
           path: dist
