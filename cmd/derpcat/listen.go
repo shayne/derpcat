@@ -192,6 +192,14 @@ func listenPreScan(args []string) listenPreScanResult {
 			}
 			return result
 		}
+		if strings.HasPrefix(arg, "---") {
+			sawUnknownFlag = true
+			if result.unknownFlag == "" {
+				result.unknownFlag = arg
+			}
+			result.parseArgs = append(result.parseArgs, arg)
+			continue
+		}
 		if !strings.HasPrefix(arg, "-") || arg == "-" {
 			if sawUnknownFlag {
 				result.unknownFlagAfterLateBoundary = true

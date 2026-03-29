@@ -351,6 +351,28 @@ func TestListenUnknownFlagBeforeHelpShowsParseErrorAndHelp(t *testing.T) {
 	}
 }
 
+func TestListenMalformedLongFlagStaysUnknownBeforeLaterHelp(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := runListen([]string{"---tcp-connect", "extra", "--help"}, telemetry.LevelDefault, &stdout, &stderr)
+	if code != 2 {
+		t.Fatalf("runListen() = %d, want 2", code)
+	}
+	wantHelp := yargs.GenerateSubCommandHelp(
+		testListenHelpConfig(),
+		"listen",
+		struct{}{},
+		listenHelpFlags{},
+		struct{}{},
+	)
+	got := stderr.String()
+	if got != "unknown flag: ---tcp-connect\n"+wantHelp {
+		t.Fatalf("stderr = %q, want parse error plus help %q", got, "unknown flag: ---tcp-connect\n"+wantHelp)
+	}
+	if got := stdout.String(); got != "" {
+		t.Fatalf("stdout = %q, want empty", got)
+	}
+}
+
 func TestListenTreatsHelpAfterDoubleDashAsPositional(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	code := runListen([]string{"--", "extra", "--help"}, telemetry.LevelDefault, &stdout, &stderr)
