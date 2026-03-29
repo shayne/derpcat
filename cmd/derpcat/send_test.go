@@ -13,7 +13,7 @@ func TestSendRejectsMissingTokenArgument(t *testing.T) {
 	if code != 2 {
 		t.Fatalf("runSend() = %d, want 2", code)
 	}
-	if got := stderr.String(); got != "usage: derpcat send <token> [flags...]\n" {
+	if got := stderr.String(); got != sendUsage+"\n" {
 		t.Fatalf("stderr = %q, want usage text", got)
 	}
 	if got := stdout.String(); got != "" {
@@ -29,7 +29,7 @@ func TestSendHelpTargetsCanonicalUsage(t *testing.T) {
 			if code != 0 {
 				t.Fatalf("runSend() = %d, want 0", code)
 			}
-			if got := stderr.String(); got != "usage: derpcat send <token> [flags...]\n" {
+			if got := stderr.String(); got != sendUsage+"\n" {
 				t.Fatalf("stderr = %q, want exact send usage", got)
 			}
 			if got := stdout.String(); got != "" {
@@ -45,7 +45,7 @@ func TestSendAllowsTokenBeforeFlags(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("runSend() = %d, want 0", code)
 	}
-	if got := stderr.String(); got != "usage: derpcat send <token> [flags...]\n" {
+	if got := stderr.String(); got != sendUsage+"\n" {
 		t.Fatalf("stderr = %q, want exact send usage", got)
 	}
 	if got := stdout.String(); got != "" {

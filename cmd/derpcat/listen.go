@@ -10,7 +10,7 @@ import (
 	"github.com/shayne/derpcat/pkg/telemetry"
 )
 
-const listenUsage = "usage: derpcat listen [--print-token-only]"
+const listenUsage = "usage: derpcat listen [--print-token-only] [--tcp-listen addr | --tcp-connect addr] [--force-relay]"
 
 func runListen(args []string, level telemetry.Level, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("listen", flag.ContinueOnError)
@@ -21,6 +21,8 @@ func runListen(args []string, level telemetry.Level, stdout, stderr io.Writer) i
 
 	printTokenOnly := fs.Bool("print-token-only", false, "print only the session token")
 	forceRelay := fs.Bool("force-relay", false, "disable direct probing")
+	tcpListen := fs.String("tcp-listen", "", "accept one local TCP connection and forward its bytes to the session sink")
+	tcpConnect := fs.String("tcp-connect", "", "connect to a local TCP service and forward session bytes to it")
 	if len(args) == 1 && (args[0] == "-h" || args[0] == "--help") {
 		fs.Usage()
 		return 0
@@ -35,17 +37,24 @@ func runListen(args []string, level telemetry.Level, stdout, stderr io.Writer) i
 		fs.Usage()
 		return 2
 	}
+	if *tcpListen != "" && *tcpConnect != "" {
+		fmt.Fprintln(stderr, "listen: --tcp-listen and --tcp-connect are mutually exclusive")
+		return 2
+	}
 
 	emitter := telemetry.New(stderr, level)
 	tokenSink := make(chan string, 1)
 	done := make(chan error, 1)
 	go func() {
 		_, err := session.Listen(context.Background(), session.ListenConfig{
-			Emitter:    emitter,
-			TokenSink:  tokenSink,
-			StdioOut:   stdout,
-			Attachment: nil,
-			ForceRelay: *forceRelay,
+			Emitter:       emitter,
+			TokenSink:     tokenSink,
+			StdioOut:      stdout,
+			Attachment:    nil,
+			TCPListen:     *tcpListen,
+			TCPConnect:    *tcpConnect,
+			ForceRelay:    *forceRelay,
+			UsePublicDERP: usePublicDERPTransport(),
 		})
 		done <- err
 	}()

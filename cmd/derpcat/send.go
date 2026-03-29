@@ -10,7 +10,7 @@ import (
 	"github.com/shayne/derpcat/pkg/telemetry"
 )
 
-const sendUsage = "usage: derpcat send <token> [flags...]"
+const sendUsage = "usage: derpcat send <token> [--tcp-listen addr | --tcp-connect addr] [--force-relay]"
 
 func runSend(args []string, level telemetry.Level, stdin io.Reader, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("send", flag.ContinueOnError)
@@ -30,6 +30,8 @@ func runSend(args []string, level telemetry.Level, stdin io.Reader, stdout, stde
 
 	tokenArg := args[0]
 	forceRelay := fs.Bool("force-relay", false, "disable direct probing")
+	tcpListen := fs.String("tcp-listen", "", "accept one local TCP connection and use it as the send source")
+	tcpConnect := fs.String("tcp-connect", "", "connect to a local TCP service and use it as the send source")
 	if err := fs.Parse(args[1:]); err != nil {
 		if err == flag.ErrHelp {
 			return 0
@@ -45,13 +47,20 @@ func runSend(args []string, level telemetry.Level, stdin io.Reader, stdout, stde
 		fs.Usage()
 		return 2
 	}
+	if *tcpListen != "" && *tcpConnect != "" {
+		fmt.Fprintln(stderr, "send: --tcp-listen and --tcp-connect are mutually exclusive")
+		return 2
+	}
 
 	if err := session.Send(context.Background(), session.SendConfig{
-		Token:      tokenArg,
-		Emitter:    telemetry.New(stderr, level),
-		StdioIn:    stdin,
-		Attachment: nil,
-		ForceRelay: *forceRelay,
+		Token:         tokenArg,
+		Emitter:       telemetry.New(stderr, level),
+		StdioIn:       stdin,
+		Attachment:    nil,
+		TCPListen:     *tcpListen,
+		TCPConnect:    *tcpConnect,
+		ForceRelay:    *forceRelay,
+		UsePublicDERP: usePublicDERPTransport(),
 	}); err != nil {
 		fmt.Fprintln(stderr, err)
 		return 1

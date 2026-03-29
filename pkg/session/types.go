@@ -7,19 +7,25 @@ import (
 )
 
 type ListenConfig struct {
-	Emitter    *telemetry.Emitter
-	TokenSink  chan<- string
-	StdioOut   io.Writer
-	Attachment io.ReadWriter
-	ForceRelay bool
+	Emitter       *telemetry.Emitter
+	TokenSink     chan<- string
+	StdioOut      io.Writer
+	Attachment    io.ReadWriter
+	TCPListen     string
+	TCPConnect    string
+	ForceRelay    bool
+	UsePublicDERP bool
 }
 
 type SendConfig struct {
-	Token      string
-	Emitter    *telemetry.Emitter
-	StdioIn    io.Reader
-	Attachment io.ReadWriter
-	ForceRelay bool
+	Token         string
+	Emitter       *telemetry.Emitter
+	StdioIn       io.Reader
+	Attachment    io.ReadWriter
+	TCPListen     string
+	TCPConnect    string
+	ForceRelay    bool
+	UsePublicDERP bool
 }
 
 type State string

@@ -3,12 +3,14 @@ package session
 import (
 	"context"
 	"crypto/rand"
-	"io"
 	"net"
 	"sync"
 	"time"
 
+	"github.com/shayne/derpcat/pkg/derpbind"
+	"github.com/shayne/derpcat/pkg/rendezvous"
 	"github.com/shayne/derpcat/pkg/token"
+	"tailscale.com/tailcfg"
 )
 
 var (
@@ -25,9 +27,14 @@ type relayMessage struct {
 type relaySession struct {
 	mailbox   chan relayMessage
 	probeConn net.PacketConn
+	derp      *derpbind.Client
+	token     token.Token
+	gate      *rendezvous.Gate
+	derpMap   *tailcfg.DERPMap
+	wgPrivate [32]byte
 }
 
-func issueToken() (string, *relaySession, error) {
+func issueLocalToken() (string, *relaySession, error) {
 	var sessionID [16]byte
 	if _, err := rand.Read(sessionID[:]); err != nil {
 		return "", nil, err
@@ -77,18 +84,12 @@ func deleteRelayMailbox(tok string, session *relaySession) {
 	}
 }
 
-func listenOutput(cfg ListenConfig) io.Writer {
-	if cfg.Attachment != nil {
-		return cfg.Attachment
-	}
-	if cfg.StdioOut != nil {
-		return cfg.StdioOut
-	}
-	return io.Discard
-}
-
 func Listen(ctx context.Context, cfg ListenConfig) (string, error) {
-	tok, session, err := issueToken()
+	if cfg.UsePublicDERP {
+		return listenExternal(ctx, cfg)
+	}
+
+	tok, session, err := issueLocalToken()
 	if err != nil {
 		return "", err
 	}
@@ -110,7 +111,14 @@ func Listen(ctx context.Context, cfg ListenConfig) (string, error) {
 			path = StateRelay
 		}
 		emitStatus(cfg.Emitter, path)
-		_, err := listenOutput(cfg).Write(msg.payload)
+		dst, err := openListenSink(ctx, cfg)
+		if err == nil {
+			_, err = dst.Write(msg.payload)
+			closeErr := dst.Close()
+			if err == nil {
+				err = closeErr
+			}
+		}
 		msg.ack <- err
 		if err != nil {
 			return tok, err

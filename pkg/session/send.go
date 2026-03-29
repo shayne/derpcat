@@ -1,7 +1,6 @@
 package session
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"io"
@@ -19,27 +18,26 @@ func relayMailbox(tok string) (*relaySession, bool) {
 	return session, ok
 }
 
-func sendInput(cfg SendConfig) io.Reader {
-	if cfg.Attachment != nil {
-		return cfg.Attachment
-	}
-	if cfg.StdioIn != nil {
-		return cfg.StdioIn
-	}
-	return bytes.NewReader(nil)
-}
-
 func Send(ctx context.Context, cfg SendConfig) error {
+	session, ok := relayMailbox(cfg.Token)
+	if !ok {
+		if cfg.UsePublicDERP {
+			return sendExternal(ctx, cfg)
+		}
+		return ErrUnknownSession
+	}
+
 	emitStatus(cfg.Emitter, StateProbing)
 
-	payload, err := io.ReadAll(sendInput(cfg))
+	src, err := openSendSource(ctx, cfg)
 	if err != nil {
 		return err
 	}
+	defer src.Close()
 
-	session, ok := relayMailbox(cfg.Token)
-	if !ok {
-		return ErrUnknownSession
+	payload, err := io.ReadAll(src)
+	if err != nil {
+		return err
 	}
 
 	path := detectPath(ctx, cfg.ForceRelay, session.probeConn)

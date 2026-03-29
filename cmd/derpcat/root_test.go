@@ -144,7 +144,7 @@ func TestRunListenHelpSucceeds(t *testing.T) {
 			if code != 0 {
 				t.Fatalf("run() = %d, want 0", code)
 			}
-			if got := stderr.String(); got != "usage: derpcat listen [--print-token-only]\n" {
+			if got := stderr.String(); got != listenUsage+"\n" {
 				t.Fatalf("stderr = %q, want exact listen usage", got)
 			}
 			if got := stdout.String(); got != "" {
@@ -161,8 +161,8 @@ func TestRunVerbosityFlagsBeforeSend(t *testing.T) {
 		wantCode   int
 		wantStderr string
 	}{
-		{name: "quiet usage", args: []string{"-q", "send"}, wantCode: 2, wantStderr: "usage: derpcat send <token> [flags...]\n"},
-		{name: "silent help", args: []string{"-s", "send", "token-value", "-h"}, wantCode: 0, wantStderr: "usage: derpcat send <token> [flags...]\n"},
+		{name: "quiet usage", args: []string{"-q", "send"}, wantCode: 2, wantStderr: sendUsage + "\n"},
+		{name: "silent help", args: []string{"-s", "send", "token-value", "-h"}, wantCode: 0, wantStderr: sendUsage + "\n"},
 	}
 
 	for _, tc := range tests {
@@ -188,7 +188,7 @@ func TestRunSendDispatchesToSendUsageError(t *testing.T) {
 	if code != 2 {
 		t.Fatalf("run() = %d, want 2", code)
 	}
-	if got := stderr.String(); got != "usage: derpcat send <token> [flags...]\n" {
+	if got := stderr.String(); got != sendUsage+"\n" {
 		t.Fatalf("stderr = %q, want usage text", got)
 	}
 	if got := stdout.String(); got != "" {
@@ -202,10 +202,21 @@ func TestRunSendGrammarAllowsTokenBeforeFlags(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("run() = %d, want 0", code)
 	}
-	if got := stderr.String(); got != "usage: derpcat send <token> [flags...]\n" {
+	if got := stderr.String(); got != sendUsage+"\n" {
 		t.Fatalf("stderr = %q, want exact send usage", got)
 	}
 	if got := stdout.String(); got != "" {
 		t.Fatalf("stdout = %q, want empty", got)
+	}
+}
+
+func TestRunSendRejectsMutuallyExclusiveTCPFlags(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"send", "token-value", "--tcp-listen", "127.0.0.1:7000", "--tcp-connect", "127.0.0.1:9000"}, nil, &stdout, &stderr)
+	if code != 2 {
+		t.Fatalf("run() = %d, want 2", code)
+	}
+	if got := stderr.String(); got != "send: --tcp-listen and --tcp-connect are mutually exclusive\n" {
+		t.Fatalf("stderr = %q, want mutual exclusion error", got)
 	}
 }
