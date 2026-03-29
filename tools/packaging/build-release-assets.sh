@@ -8,6 +8,12 @@ OUT_DIR="${ROOT_DIR}/dist/release"
 rm -rf "${OUT_DIR}"
 mkdir -p "${OUT_DIR}"
 
+if command -v sha256sum >/dev/null 2>&1; then
+  checksum_cmd=(sha256sum)
+else
+  checksum_cmd=(shasum -a 256)
+fi
+
 for asset in \
   derpcat-linux-amd64 \
   derpcat-linux-arm64 \
@@ -21,5 +27,5 @@ do
   fi
   chmod +x "${RAW_DIR}/${asset}"
   tar -czf "${OUT_DIR}/${asset}.tar.gz" -C "${RAW_DIR}" "${asset}"
-  (cd "${OUT_DIR}" && shasum -a 256 "${asset}.tar.gz" > "${asset}.tar.gz.sha256")
+  (cd "${OUT_DIR}" && "${checksum_cmd[@]}" "${asset}.tar.gz" > "${asset}.tar.gz.sha256")
 done

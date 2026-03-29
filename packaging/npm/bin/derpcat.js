@@ -11,8 +11,6 @@ const __dirname = path.dirname(__filename);
 const triples = new Map([
   ["linux:x64", "x86_64-unknown-linux-musl"],
   ["linux:arm64", "aarch64-unknown-linux-musl"],
-  ["android:x64", "x86_64-unknown-linux-musl"],
-  ["android:arm64", "aarch64-unknown-linux-musl"],
   ["darwin:x64", "x86_64-apple-darwin"],
   ["darwin:arm64", "aarch64-apple-darwin"],
 ]);

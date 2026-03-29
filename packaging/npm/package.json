@@ -6,6 +6,14 @@
     "derpcat": "bin/derpcat.js"
   },
   "type": "module",
+  "os": [
+    "linux",
+    "darwin"
+  ],
+  "cpu": [
+    "x64",
+    "arm64"
+  ],
   "engines": {
     "node": ">=16"
   },
