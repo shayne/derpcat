@@ -605,8 +605,8 @@ func TestRunVerbosityFlagsBeforeSend(t *testing.T) {
 		wantCode   int
 		wantStderr string
 	}{
-		{name: "quiet usage", args: []string{"-q", "send"}, wantCode: 2, wantStderr: sendUsage + "\n"},
-		{name: "silent help", args: []string{"-s", "send", "token-value", "-h"}, wantCode: 0, wantStderr: sendUsage + "\n"},
+		{name: "quiet usage", args: []string{"-q", "send"}, wantCode: 2},
+		{name: "silent help", args: []string{"-s", "send", "token-value", "-h"}, wantCode: 0},
 	}
 
 	for _, tc := range tests {
@@ -616,9 +616,7 @@ func TestRunVerbosityFlagsBeforeSend(t *testing.T) {
 			if code != tc.wantCode {
 				t.Fatalf("run() = %d, want %d", code, tc.wantCode)
 			}
-			if got := stderr.String(); got != tc.wantStderr {
-				t.Fatalf("stderr = %q, want %q", got, tc.wantStderr)
-			}
+			assertSendHelpText(t, stderr.String())
 			if tc.wantCode == 0 && stdout.String() != "" {
 				t.Fatalf("stdout = %q, want empty", stdout.String())
 			}
@@ -656,9 +654,7 @@ func TestRunSendDispatchesToSendUsageError(t *testing.T) {
 	if code != 2 {
 		t.Fatalf("run() = %d, want 2", code)
 	}
-	if got := stderr.String(); got != sendUsage+"\n" {
-		t.Fatalf("stderr = %q, want usage text", got)
-	}
+	assertSendHelpText(t, stderr.String())
 	if got := stdout.String(); got != "" {
 		t.Fatalf("stdout = %q, want empty", got)
 	}
@@ -670,9 +666,7 @@ func TestRunSendGrammarAllowsTokenBeforeFlags(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("run() = %d, want 0", code)
 	}
-	if got := stderr.String(); got != sendUsage+"\n" {
-		t.Fatalf("stderr = %q, want exact send usage", got)
-	}
+	assertSendHelpText(t, stderr.String())
 	if got := stdout.String(); got != "" {
 		t.Fatalf("stdout = %q, want empty", got)
 	}

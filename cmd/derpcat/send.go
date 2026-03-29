@@ -2,64 +2,87 @@ package main
 
 import (
 	"context"
-	"flag"
+	"errors"
 	"fmt"
 	"io"
 
 	"github.com/shayne/derpcat/pkg/session"
 	"github.com/shayne/derpcat/pkg/telemetry"
+	"github.com/shayne/yargs"
 )
 
-const sendUsage = "usage: derpcat send <token> [--tcp-listen addr | --tcp-connect addr] [--force-relay]"
+type sendFlags struct {
+	ForceRelay bool   `flag:"force-relay" help:"Disable direct probing"`
+	TCPListen  string `flag:"tcp-listen" help:"Accept one local TCP connection and use it as the send source"`
+	TCPConnect string `flag:"tcp-connect" help:"Connect to a local TCP service and use it as the send source"`
+}
+
+type sendArgs struct {
+	Token string `pos:"0" help:"Token from the listener"`
+}
+
+var sendHelpConfig = yargs.HelpConfig{
+	Command: yargs.CommandInfo{
+		Name:        "derpcat",
+		Description: "Move one byte stream between hosts over public DERP with direct UDP promotion when available.",
+		Examples: []string{
+			"derpcat listen",
+			"cat file | derpcat send <token>",
+			"derpcat version",
+		},
+	},
+	SubCommands: map[string]yargs.SubCommandInfo{
+		"send": {
+			Name:        "send",
+			Description: "Send data to a derpcat listener using its token.",
+			Usage:       "[--tcp-listen addr | --tcp-connect addr] [--force-relay]",
+			Examples: []string{
+				"cat file | derpcat send <token>",
+				"derpcat send <token> --tcp-listen 127.0.0.1:7000",
+			},
+		},
+	},
+}
 
 func runSend(args []string, level telemetry.Level, stdin io.Reader, stdout, stderr io.Writer) int {
-	fs := flag.NewFlagSet("send", flag.ContinueOnError)
-	fs.SetOutput(stderr)
-	fs.Usage = func() {
-		fmt.Fprintln(stderr, sendUsage)
-	}
-
-	if len(args) == 0 {
-		fs.Usage()
-		return 2
-	}
-	if args[0] == "-h" || args[0] == "--help" {
-		fs.Usage()
-		return 0
-	}
-
-	tokenArg := args[0]
-	forceRelay := fs.Bool("force-relay", false, "disable direct probing")
-	tcpListen := fs.String("tcp-listen", "", "accept one local TCP connection and use it as the send source")
-	tcpConnect := fs.String("tcp-connect", "", "connect to a local TCP service and use it as the send source")
-	if err := fs.Parse(args[1:]); err != nil {
-		if err == flag.ErrHelp {
+	parsed, err := yargs.ParseWithCommandAndHelp[struct{}, sendFlags, sendArgs](append([]string{"send"}, args...), sendHelpConfig)
+	if err != nil {
+		switch {
+		case errors.Is(err, yargs.ErrHelp), errors.Is(err, yargs.ErrSubCommandHelp), errors.Is(err, yargs.ErrHelpLLM):
+			if parsed != nil && parsed.HelpText != "" {
+				fmt.Fprint(stderr, parsed.HelpText)
+			} else {
+				fmt.Fprint(stderr, yargs.GenerateSubCommandHelp(sendHelpConfig, "send", struct{}{}, sendFlags{}, sendArgs{}))
+			}
 			return 0
+		default:
+			var invalidArgs *yargs.InvalidArgsError
+			if errors.As(err, &invalidArgs) {
+				fmt.Fprint(stderr, yargs.GenerateSubCommandHelp(sendHelpConfig, "send", struct{}{}, sendFlags{}, sendArgs{}))
+				return 2
+			}
+			fmt.Fprintln(stderr, err)
+			return 2
 		}
-		return 2
 	}
 
-	if tokenArg == "" {
-		fs.Usage()
+	if parsed.Args.Token == "" {
+		fmt.Fprint(stderr, yargs.GenerateSubCommandHelp(sendHelpConfig, "send", struct{}{}, sendFlags{}, sendArgs{}))
 		return 2
 	}
-	if fs.NArg() != 0 {
-		fs.Usage()
-		return 2
-	}
-	if *tcpListen != "" && *tcpConnect != "" {
+	if parsed.SubCommandFlags.TCPListen != "" && parsed.SubCommandFlags.TCPConnect != "" {
 		fmt.Fprintln(stderr, "send: --tcp-listen and --tcp-connect are mutually exclusive")
 		return 2
 	}
 
 	if err := session.Send(context.Background(), session.SendConfig{
-		Token:         tokenArg,
+		Token:         parsed.Args.Token,
 		Emitter:       telemetry.New(stderr, level),
 		StdioIn:       stdin,
 		Attachment:    nil,
-		TCPListen:     *tcpListen,
-		TCPConnect:    *tcpConnect,
-		ForceRelay:    *forceRelay,
+		TCPListen:     parsed.SubCommandFlags.TCPListen,
+		TCPConnect:    parsed.SubCommandFlags.TCPConnect,
+		ForceRelay:    parsed.SubCommandFlags.ForceRelay,
 		UsePublicDERP: usePublicDERPTransport(),
 	}); err != nil {
 		fmt.Fprintln(stderr, err)

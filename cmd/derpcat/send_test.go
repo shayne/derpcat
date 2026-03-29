@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"strings"
 	"testing"
 
 	"github.com/shayne/derpcat/pkg/telemetry"
@@ -13,9 +14,7 @@ func TestSendRejectsMissingTokenArgument(t *testing.T) {
 	if code != 2 {
 		t.Fatalf("runSend() = %d, want 2", code)
 	}
-	if got := stderr.String(); got != sendUsage+"\n" {
-		t.Fatalf("stderr = %q, want usage text", got)
-	}
+	assertSendHelpText(t, stderr.String())
 	if got := stdout.String(); got != "" {
 		t.Fatalf("stdout = %q, want empty", got)
 	}
@@ -29,9 +28,7 @@ func TestSendHelpTargetsCanonicalUsage(t *testing.T) {
 			if code != 0 {
 				t.Fatalf("runSend() = %d, want 0", code)
 			}
-			if got := stderr.String(); got != sendUsage+"\n" {
-				t.Fatalf("stderr = %q, want exact send usage", got)
-			}
+			assertSendHelpText(t, stderr.String())
 			if got := stdout.String(); got != "" {
 				t.Fatalf("stdout = %q, want empty", got)
 			}
@@ -45,10 +42,27 @@ func TestSendAllowsTokenBeforeFlags(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("runSend() = %d, want 0", code)
 	}
-	if got := stderr.String(); got != sendUsage+"\n" {
-		t.Fatalf("stderr = %q, want exact send usage", got)
-	}
+	assertSendHelpText(t, stderr.String())
 	if got := stdout.String(); got != "" {
 		t.Fatalf("stdout = %q, want empty", got)
+	}
+}
+
+func assertSendHelpText(t *testing.T, got string) {
+	t.Helper()
+	for _, want := range []string{
+		"Send data to a derpcat listener using its token.",
+		"USAGE:",
+		"ARGUMENTS:",
+		"TOKEN",
+		"--force-relay",
+		"--tcp-listen",
+		"--tcp-connect",
+		"cat file | derpcat send <token>",
+		"derpcat send <token> --tcp-listen 127.0.0.1:7000",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("stderr = %q, want help mentioning %q", got, want)
+		}
 	}
 }
