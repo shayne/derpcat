@@ -12,6 +12,10 @@ func TestEncodeDecodeRoundTrip(t *testing.T) {
 		SessionID:       [16]byte{1, 2, 3, 4},
 		ExpiresUnix:     time.Now().Add(5 * time.Minute).Unix(),
 		BootstrapRegion: 12,
+		DERPPublic:      [32]byte{5, 6, 7, 8},
+		WGPublic:        [32]byte{9, 10, 11, 12},
+		DiscoPublic:     [32]byte{13, 14, 15, 16},
+		BearerSecret:    [32]byte{17, 18, 19, 20},
 		Capabilities:    CapabilityStdio | CapabilityTCP,
 	}
 	encoded, err := Encode(tok)
@@ -22,8 +26,8 @@ func TestEncodeDecodeRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Decode() error = %v", err)
 	}
-	if decoded.SessionID != tok.SessionID {
-		t.Fatalf("SessionID = %x, want %x", decoded.SessionID, tok.SessionID)
+	if decoded != tok {
+		t.Fatalf("decoded token = %+v, want %+v", decoded, tok)
 	}
 }
 
@@ -33,8 +37,8 @@ func TestDecodeRejectsExpiredToken(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Encode() error = %v", err)
 	}
-	if _, err := Decode(encoded, time.Now()); err == nil {
-		t.Fatal("Decode() error = nil, want expiry failure")
+	if _, err := Decode(encoded, time.Now()); err != ErrExpired {
+		t.Fatalf("Decode() error = %v, want ErrExpired", err)
 	}
 }
 
@@ -45,7 +49,7 @@ func TestDecodeRejectsCorruptedChecksum(t *testing.T) {
 		t.Fatalf("Encode() error = %v", err)
 	}
 	encoded = encoded[:len(encoded)-1] + strings.Repeat("A", 1)
-	if _, err := Decode(encoded, time.Now()); err == nil {
-		t.Fatal("Decode() error = nil, want checksum failure")
+	if _, err := Decode(encoded, time.Now()); err != ErrChecksum {
+		t.Fatalf("Decode() error = %v, want ErrChecksum", err)
 	}
 }

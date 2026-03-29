@@ -117,7 +117,7 @@ func Decode(encoded string, now time.Time) (Token, error) {
 		return tok, err
 	}
 
-	if now.Unix() > tok.ExpiresUnix {
+	if now.Unix() >= tok.ExpiresUnix {
 		return tok, ErrExpired
 	}
 
