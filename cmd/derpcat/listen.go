@@ -141,6 +141,25 @@ func runListen(args []string, level telemetry.Level, stdout, stderr io.Writer) i
 	return 0
 }
 
+func listenWouldStartRuntime(args []string) bool {
+	preScan := listenPreScan(args)
+	if preScan.unknownFlagAfterLateBoundary || preScan.positionalBeforeLateFlag || preScan.positionalAfterDoubleDash || preScan.helpLLM || preScan.help {
+		return false
+	}
+
+	parsed, err := yargs.ParseWithCommandAndHelp[struct{}, listenFlags, struct{}](append([]string{"listen"}, preScan.parseArgs...), listenHelpConfig)
+	if err != nil {
+		return false
+	}
+	if len(parsed.Parser.Args) != 0 || len(parsed.RemainingArgs) != 0 {
+		return false
+	}
+	if parsed.SubCommandFlags.TCPListen != "" && parsed.SubCommandFlags.TCPConnect != "" {
+		return false
+	}
+	return true
+}
+
 func listenHelpText() string {
 	return yargs.GenerateSubCommandHelp(
 		listenHelpConfig,

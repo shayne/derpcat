@@ -262,8 +262,7 @@ func rewriteRootHelpArgs(args []string) ([]string, bool) {
 		if len(args) == 2 {
 			return []string{"listen", "--help"}, false
 		}
-		helpLLM, help := listenRequestedHelp(args[2:])
-		if helpLLM || help {
+		if !listenWouldStartRuntime(args[2:]) {
 			return append([]string{"listen"}, args[2:]...), false
 		}
 		return args, true

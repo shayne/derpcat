@@ -155,6 +155,61 @@ func TestRunHelpListenPreservesLegacyHelpSpellings(t *testing.T) {
 	}
 }
 
+func TestRunHelpListenDelegatesNonRuntimeFailures(t *testing.T) {
+	tests := []struct {
+		name       string
+		args       []string
+		wantCode   int
+		wantStderr string
+	}{
+		{
+			name:       "double dash positional",
+			args:       []string{"help", "listen", "--", "--help"},
+			wantCode:   2,
+			wantStderr: yargs.GenerateSubCommandHelp(listenHelpConfig, "listen", struct{}{}, listenFlags{}, struct{}{}),
+		},
+		{
+			name:       "unknown flag remains authoritative",
+			args:       []string{"help", "listen", "--bogus", "--", "--help"},
+			wantCode:   2,
+			wantStderr: "unknown flag: --bogus\n" + yargs.GenerateSubCommandHelp(listenHelpConfig, "listen", struct{}{}, listenFlags{}, struct{}{}),
+		},
+		{
+			name:       "positional before help",
+			args:       []string{"help", "listen", "extra", "--help"},
+			wantCode:   2,
+			wantStderr: yargs.GenerateSubCommandHelp(listenHelpConfig, "listen", struct{}{}, listenFlags{}, struct{}{}),
+		},
+		{
+			name:       "unknown flag",
+			args:       []string{"help", "listen", "--bogus"},
+			wantCode:   2,
+			wantStderr: "unknown flag: --bogus\n" + yargs.GenerateSubCommandHelp(listenHelpConfig, "listen", struct{}{}, listenFlags{}, struct{}{}),
+		},
+		{
+			name:       "stray positional",
+			args:       []string{"help", "listen", "extra"},
+			wantCode:   2,
+			wantStderr: yargs.GenerateSubCommandHelp(listenHelpConfig, "listen", struct{}{}, listenFlags{}, struct{}{}),
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			code := run(tc.args, nil, &stdout, &stderr)
+			if code != tc.wantCode {
+				t.Fatalf("run() = %d, want %d", code, tc.wantCode)
+			}
+			if got := stderr.String(); got != tc.wantStderr {
+				t.Fatalf("stderr = %q, want %q", got, tc.wantStderr)
+			}
+			if got := stdout.String(); got != "" {
+				t.Fatalf("stdout = %q, want empty", got)
+			}
+		})
+	}
+}
+
 func TestRunHelpBogusRejected(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	code := run([]string{"help", "bogus"}, nil, &stdout, &stderr)
@@ -379,7 +434,6 @@ func TestRunHelpSendRejectsExtraArgs(t *testing.T) {
 func TestRunHelpListenRejectsExtraArgs(t *testing.T) {
 	for _, args := range [][]string{
 		{"help", "listen", "--tcp-listen", "127.0.0.1:7000"},
-		{"help", "listen", "-v"},
 	} {
 		t.Run(strings.Join(args, "_"), func(t *testing.T) {
 			var stdout, stderr bytes.Buffer
