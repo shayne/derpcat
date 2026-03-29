@@ -1,0 +1,31 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
+cd "$repo_root"
+
+gofmt_targets=()
+while IFS= read -r file; do
+  [[ -n "$file" ]] || continue
+  gofmt_targets+=("$file")
+done < <(git diff --cached --name-only --diff-filter=ACMRT -- '*.go')
+
+if ((${#gofmt_targets[@]} == 0)); then
+  while IFS= read -r file; do
+    [[ -n "$file" ]] || continue
+    gofmt_targets+=("$file")
+  done < <(git ls-files '*.go')
+fi
+
+if ((${#gofmt_targets[@]} == 0)); then
+  exit 0
+fi
+
+gofmt -w "${gofmt_targets[@]}"
+
+if ! git diff --exit-code -- "${gofmt_targets[@]}" >/dev/null; then
+  echo "" >&2
+  echo "gofmt changed files; please stage the updates and retry." >&2
+  exit 1
+fi

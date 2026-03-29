@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
+cd "$repo_root"
+
+go mod tidy
+
+if ! git diff --exit-code -- go.mod go.sum >/dev/null; then
+  echo "" >&2
+  echo "go.mod or go.sum changed; please stage the updates and retry." >&2
+  exit 1
+fi
