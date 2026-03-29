@@ -2,8 +2,6 @@ package token
 
 import (
 	"encoding/base64"
-	"encoding/binary"
-	"hash/crc32"
 	"strings"
 	"testing"
 	"time"
@@ -67,8 +65,7 @@ func TestDecodeRejectsUnsupportedVersion(t *testing.T) {
 		t.Fatalf("DecodeString() error = %v", err)
 	}
 	raw[0] = SupportedVersion + 1
-	sum := crc32.ChecksumIEEE(raw[:len(raw)-4])
-	binary.BigEndian.PutUint32(raw[len(raw)-4:], sum)
+	raw = raw[:len(raw)-1]
 	encoded = base64.RawURLEncoding.EncodeToString(raw)
 	if _, err := Decode(encoded, time.Now()); err != ErrUnsupportedVersion {
 		t.Fatalf("Decode() error = %v, want ErrUnsupportedVersion", err)
@@ -172,7 +169,25 @@ func TestDecodeRejectsMalformedLength(t *testing.T) {
 	}
 	raw = raw[:len(raw)-1]
 	encoded = base64.RawURLEncoding.EncodeToString(raw)
-	if _, err := Decode(encoded, time.Now()); err == nil || err.Error() != "invalid token length" {
-		t.Fatalf("Decode() error = %v, want invalid token length", err)
+	if _, err := Decode(encoded, time.Now()); err != ErrInvalidLength {
+		t.Fatalf("Decode() error = %v, want ErrInvalidLength", err)
+	}
+}
+
+func TestDecodeRejectsUnsupportedVersionWithWrongLength(t *testing.T) {
+	tok := Token{Version: SupportedVersion, ExpiresUnix: time.Now().Add(time.Minute).Unix()}
+	encoded, err := Encode(tok)
+	if err != nil {
+		t.Fatalf("Encode() error = %v", err)
+	}
+	raw, err := base64.RawURLEncoding.DecodeString(encoded)
+	if err != nil {
+		t.Fatalf("DecodeString() error = %v", err)
+	}
+	raw[0] = SupportedVersion + 1
+	raw = raw[:len(raw)-1]
+	encoded = base64.RawURLEncoding.EncodeToString(raw)
+	if _, err := Decode(encoded, time.Now()); err != ErrUnsupportedVersion {
+		t.Fatalf("Decode() error = %v, want ErrUnsupportedVersion", err)
 	}
 }

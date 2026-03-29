@@ -30,6 +30,7 @@ var (
 	ErrExpired            = errors.New("token expired")
 	ErrChecksum           = errors.New("token checksum mismatch")
 	ErrUnsupportedVersion = errors.New("token unsupported version")
+	ErrInvalidLength      = errors.New("token invalid length")
 )
 
 const SupportedVersion uint8 = 1
@@ -86,8 +87,16 @@ func Decode(encoded string, now time.Time) (Token, error) {
 	if err != nil {
 		return tok, err
 	}
+	if len(raw) < 1 {
+		return tok, ErrInvalidLength
+	}
+
+	tok.Version = raw[0]
+	if tok.Version != SupportedVersion {
+		return tok, ErrUnsupportedVersion
+	}
 	if len(raw) != payloadSize+4 {
-		return tok, errors.New("invalid token length")
+		return tok, ErrInvalidLength
 	}
 
 	payload := raw[:payloadSize]
@@ -96,13 +105,7 @@ func Decode(encoded string, now time.Time) (Token, error) {
 		return tok, ErrChecksum
 	}
 
-	r := bytes.NewReader(payload)
-	if err := binary.Read(r, binary.BigEndian, &tok.Version); err != nil {
-		return tok, err
-	}
-	if tok.Version != SupportedVersion {
-		return tok, ErrUnsupportedVersion
-	}
+	r := bytes.NewReader(payload[1:])
 	if _, err := r.Read(tok.SessionID[:]); err != nil {
 		return tok, err
 	}
