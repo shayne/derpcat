@@ -2,9 +2,11 @@ package main
 
 import (
 	"context"
-	"flag"
+	"errors"
 	"fmt"
 	"io"
+	"reflect"
+	"strings"
 
 	"github.com/shayne/derpcat/pkg/session"
 	"github.com/shayne/derpcat/pkg/telemetry"
@@ -41,53 +43,46 @@ var listenHelpConfig = yargs.HelpConfig{
 	},
 }
 
+var listenFlagKinds = deriveListenFlagKinds()
+
 func runListen(args []string, level telemetry.Level, stdout, stderr io.Writer) int {
-	fs := flag.NewFlagSet("listen", flag.ContinueOnError)
-	fs.SetOutput(io.Discard)
-	fs.Usage = func() {
+	if listenHasPositionalBeforeLateFlag(args) {
 		fmt.Fprint(stderr, listenHelpText())
-	}
-
-	fs.Bool("h", false, "Show this help message")
-	fs.Bool("help", false, "Show this help message")
-	fs.Bool("help-llm", false, "Show LLM-optimized help")
-	printTokenOnly := fs.Bool("print-token-only", false, "Print only the session token")
-	forceRelay := fs.Bool("force-relay", false, "Disable direct probing")
-	tcpListen := fs.String("tcp-listen", "", "Accept one local TCP connection and forward its bytes to the session sink")
-	tcpConnect := fs.String("tcp-connect", "", "Connect to a local TCP service and forward session bytes to it")
-
-	if err := fs.Parse(args); err != nil {
-		fmt.Fprintln(stderr, err)
-		fs.Usage()
 		return 2
 	}
 
-	if len(fs.Args()) != 0 {
-		fs.Usage()
-		return 2
-	}
-
-	helpRequested := false
-	helpLLMRequested := false
-	fs.Visit(func(f *flag.Flag) {
-		switch f.Name {
-		case "h", "help":
-			helpRequested = true
-		case "help-llm":
-			helpLLMRequested = true
+	if helpLLM, help := listenRequestedHelp(args); helpLLM || help {
+		if helpLLM {
+			fmt.Fprint(stderr, listenHelpLLMText())
+		} else {
+			fmt.Fprint(stderr, listenHelpText())
 		}
-	})
-
-	if helpLLMRequested {
-		fmt.Fprint(stderr, listenHelpLLMText())
 		return 0
 	}
-	if helpRequested {
+
+	parsed, err := yargs.ParseWithCommandAndHelp[struct{}, listenFlags, struct{}](append([]string{"listen"}, args...), listenHelpConfig)
+	if err != nil {
+		if errors.Is(err, yargs.ErrHelp) || errors.Is(err, yargs.ErrSubCommandHelp) || errors.Is(err, yargs.ErrHelpLLM) {
+			if parsed != nil && parsed.HelpText != "" {
+				fmt.Fprint(stderr, parsed.HelpText)
+			} else if errors.Is(err, yargs.ErrHelpLLM) {
+				fmt.Fprint(stderr, listenHelpLLMText())
+			} else {
+				fmt.Fprint(stderr, listenHelpText())
+			}
+			return 0
+		}
+		fmt.Fprintln(stderr, err)
 		fmt.Fprint(stderr, listenHelpText())
-		return 0
+		return 2
 	}
 
-	if *tcpListen != "" && *tcpConnect != "" {
+	if len(parsed.Parser.Args) != 0 || len(parsed.RemainingArgs) != 0 {
+		fmt.Fprint(stderr, listenHelpText())
+		return 2
+	}
+
+	if parsed.SubCommandFlags.TCPListen != "" && parsed.SubCommandFlags.TCPConnect != "" {
 		fmt.Fprintln(stderr, "listen: --tcp-listen and --tcp-connect are mutually exclusive")
 		return 2
 	}
@@ -101,9 +96,9 @@ func runListen(args []string, level telemetry.Level, stdout, stderr io.Writer) i
 			TokenSink:     tokenSink,
 			StdioOut:      stdout,
 			Attachment:    nil,
-			TCPListen:     *tcpListen,
-			TCPConnect:    *tcpConnect,
-			ForceRelay:    *forceRelay,
+			TCPListen:     parsed.SubCommandFlags.TCPListen,
+			TCPConnect:    parsed.SubCommandFlags.TCPConnect,
+			ForceRelay:    parsed.SubCommandFlags.ForceRelay,
 			UsePublicDERP: usePublicDERPTransport(),
 		})
 		done <- err
@@ -124,7 +119,7 @@ func runListen(args []string, level telemetry.Level, stdout, stderr io.Writer) i
 	}
 
 	tokenOut := stderr
-	if *printTokenOnly {
+	if parsed.SubCommandFlags.PrintTokenOnly {
 		tokenOut = stdout
 	}
 	fmt.Fprintln(tokenOut, tok)
@@ -154,4 +149,68 @@ func listenHelpLLMText() string {
 		listenFlags{},
 		struct{}{},
 	)
+}
+
+func listenHasPositionalBeforeLateFlag(args []string) bool {
+	sawPositional := false
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		if arg == "--" {
+			return false
+		}
+		if strings.HasPrefix(arg, "-") {
+			if sawPositional {
+				return true
+			}
+			if kind, ok := listenFlagKinds[listenFlagName(arg)]; ok && kind != reflect.Bool && !strings.Contains(arg, "=") {
+				if i+1 < len(args) && !strings.HasPrefix(args[i+1], "-") {
+					i++
+				}
+			}
+			continue
+		}
+		sawPositional = true
+	}
+	return false
+}
+
+func listenRequestedHelp(args []string) (helpLLM bool, help bool) {
+	for _, arg := range args {
+		switch arg {
+		case "--help-llm":
+			return true, false
+		case "-h", "--help", "-h=false", "--help=false":
+			help = true
+		}
+	}
+	return false, help
+}
+
+func deriveListenFlagKinds() map[string]reflect.Kind {
+	t := reflect.TypeOf(listenFlags{})
+	kinds := make(map[string]reflect.Kind, t.NumField()+2)
+	for i := 0; i < t.NumField(); i++ {
+		field := t.Field(i)
+		flagName := field.Tag.Get("flag")
+		if flagName == "" {
+			flagName = strings.ToLower(field.Name)
+		}
+		fieldType := field.Type
+		for fieldType.Kind() == reflect.Ptr {
+			fieldType = fieldType.Elem()
+		}
+		kinds[flagName] = fieldType.Kind()
+	}
+	kinds["h"] = reflect.Bool
+	kinds["help"] = reflect.Bool
+	kinds["help-llm"] = reflect.Bool
+	return kinds
+}
+
+func listenFlagName(arg string) string {
+	flagName := strings.TrimLeft(arg, "-")
+	if idx := strings.Index(flagName, "="); idx > 0 {
+		return flagName[:idx]
+	}
+	return flagName
 }

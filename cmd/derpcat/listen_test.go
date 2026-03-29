@@ -284,12 +284,16 @@ func TestListenUnknownFlagShowsParseErrorAndHelp(t *testing.T) {
 	if code != 2 {
 		t.Fatalf("runListen() = %d, want 2", code)
 	}
+	wantHelp := yargs.GenerateSubCommandHelp(
+		testListenHelpConfig(),
+		"listen",
+		struct{}{},
+		listenHelpFlags{},
+		struct{}{},
+	)
 	got := stderr.String()
-	if !strings.Contains(got, "unknown flag: --bogus") && !strings.Contains(got, "flag provided but not defined") {
-		t.Fatalf("stderr = %q, want parse error", got)
-	}
-	if !strings.Contains(got, "derpcat listen") || !strings.Contains(got, "--tcp-connect") {
-		t.Fatalf("stderr = %q, want listen help after parse error", got)
+	if got != "unknown flag: --bogus\n"+wantHelp {
+		t.Fatalf("stderr = %q, want yargs parse error plus help %q", got, "unknown flag: --bogus\n"+wantHelp)
 	}
 	if got := stdout.String(); got != "" {
 		t.Fatalf("stdout = %q, want empty", got)
