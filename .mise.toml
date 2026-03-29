@@ -1,12 +1,35 @@
 [tools]
 go = "1.26.1"
 node = "24"
+pre-commit = "latest"
+staticcheck = "latest"
 
 [tasks.test]
 run = "go test ./..."
 
 [tasks.vet]
 run = "go vet ./..."
+
+[tasks."check:hooks"]
+run = "pre-commit run --all-files"
+
+[tasks.check]
+shell = "bash -c"
+run = """
+set -euo pipefail
+mise run check:hooks
+mise run build
+mise run test
+"""
+
+[tasks.install-githooks]
+description = "Install git hooks via pre-commit"
+shell = "bash -c"
+run = """
+set -euo pipefail
+git config --local --unset core.hooksPath || true
+pre-commit install --install-hooks --hook-type pre-commit --hook-type prepare-commit-msg
+"""
 
 [tasks.build]
 run = "mkdir -p dist && go build -o dist/derpcat ./cmd/derpcat"
