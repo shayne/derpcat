@@ -308,7 +308,7 @@ jobs:
   publish-npm-prod:
     name: Publish npm package
     runs-on: ubuntu-latest
-    needs: [publish-packages-prod]
+    needs: [check, publish-packages-prod]
     if: needs.publish-packages-prod.result == 'success'
     permissions:
       contents: read
@@ -335,7 +335,7 @@ jobs:
   publish-npm-dev:
     name: Publish npm package (dev tag)
     runs-on: ubuntu-latest
-    needs: [publish-packages-dev]
+    needs: [check, publish-packages-dev]
     if: needs.publish-packages-dev.result == 'success'
     permissions:
       contents: read
