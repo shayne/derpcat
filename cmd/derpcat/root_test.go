@@ -33,22 +33,30 @@ func TestRunRejectsUnknownSubcommand(t *testing.T) {
 	}
 }
 
-func TestRunPlaceholderSubcommandsReturnRuntimeFailure(t *testing.T) {
-	cases := []string{"listen", "send"}
+func TestRunListenDispatchesToListenBehavior(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"listen"}, nil, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("run() = %d, want 0", code)
+	}
+	if stdout.String() == "" {
+		t.Fatal("stdout empty, want token")
+	}
+	if got := stderr.String(); got != "waiting-for-claim\n" {
+		t.Fatalf("stderr = %q, want status text", got)
+	}
+}
 
-	for _, subcommand := range cases {
-		t.Run(subcommand, func(t *testing.T) {
-			var stdout, stderr bytes.Buffer
-			code := run([]string{subcommand}, nil, &stdout, &stderr)
-			if code != 2 {
-				t.Fatalf("run() = %d, want 2", code)
-			}
-			if got := stderr.String(); got != subcommand+" not implemented\n" {
-				t.Fatalf("stderr = %q, want exact placeholder message", got)
-			}
-			if got := stdout.String(); got != "" {
-				t.Fatalf("stdout = %q, want empty", got)
-			}
-		})
+func TestRunSendDispatchesToSendUsageError(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"send"}, nil, &stdout, &stderr)
+	if code != 2 {
+		t.Fatalf("run() = %d, want 2", code)
+	}
+	if got := stderr.String(); got != "usage: derpcat send <token>\n" {
+		t.Fatalf("stderr = %q, want usage text", got)
+	}
+	if got := stdout.String(); got != "" {
+		t.Fatalf("stdout = %q, want empty", got)
 	}
 }
