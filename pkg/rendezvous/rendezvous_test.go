@@ -75,6 +75,37 @@ func TestGateRejectsExpiredToken(t *testing.T) {
 	}
 }
 
+func TestGateAcceptsAtExpiryBoundaryAndRejectsAfter(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0).UTC()
+	tok := testToken(now)
+	tok.ExpiresUnix = now.Unix()
+	claim := testClaim(tok)
+
+	boundaryGate := NewGate(tok)
+	decision, err := boundaryGate.Accept(now, claim)
+	if err != nil {
+		t.Fatalf("boundary Accept() error = %v", err)
+	}
+	if !decision.Accepted {
+		t.Fatalf("boundary Accepted = false, want true")
+	}
+
+	expiredGate := NewGate(tok)
+	decision, err = expiredGate.Accept(now.Add(time.Second), claim)
+	if !errors.Is(err, token.ErrExpired) {
+		t.Fatalf("expired Accept() error = %v, want token.ErrExpired", err)
+	}
+	if decision.Accepted {
+		t.Fatalf("expired Accepted = true, want false")
+	}
+	if decision.Reject == nil {
+		t.Fatalf("expired Reject = nil, want structured reject info")
+	}
+	if got, want := decision.Reject.Code, RejectExpired; got != want {
+		t.Fatalf("expired Reject.Code = %q, want %q", got, want)
+	}
+}
+
 func TestGateRejectsSecondClaim(t *testing.T) {
 	now := time.Unix(1_700_000_000, 0).UTC()
 	tok := testToken(now)

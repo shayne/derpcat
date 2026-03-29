@@ -29,7 +29,7 @@ func (g *Gate) Accept(now time.Time, claim Claim) (Decision, error) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 
-	if now.Unix() >= g.token.ExpiresUnix {
+	if now.Unix() > g.token.ExpiresUnix {
 		return Decision{
 			Accepted: false,
 			Reject:   &RejectInfo{Code: RejectExpired, Reason: "token expired"},
