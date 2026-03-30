@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"net"
+	"net/netip"
 	"time"
 )
 
@@ -104,9 +105,14 @@ func parseCandidateAddrs(raw []string) []net.Addr {
 		if candidate == "" {
 			continue
 		}
-		addr, err := net.ResolveUDPAddr("udp", candidate)
+		addrPort, err := netip.ParseAddrPort(candidate)
 		if err != nil {
 			continue
+		}
+		addr := &net.UDPAddr{
+			IP:   append(net.IP(nil), addrPort.Addr().AsSlice()...),
+			Port: int(addrPort.Port()),
+			Zone: addrPort.Addr().Zone(),
 		}
 		addrs = append(addrs, addr)
 	}

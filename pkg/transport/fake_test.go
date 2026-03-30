@@ -191,7 +191,8 @@ func waitForNotify(timeout time.Duration, snapshot func() (bool, <-chan struct{}
 		return ok
 	}
 
-	deadline := time.After(timeout)
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
 	for {
 		ok, waitCh := snapshot()
 		if ok {
@@ -199,7 +200,7 @@ func waitForNotify(timeout time.Duration, snapshot func() (bool, <-chan struct{}
 		}
 		select {
 		case <-waitCh:
-		case <-deadline:
+		case <-timer.C:
 			ok, _ = snapshot()
 			return ok
 		}
@@ -259,6 +260,17 @@ func (c *fakePacketConn) waitForWritePayloadTo(addr net.Addr, payload []byte, ti
 		c.mu.Unlock()
 		return false, waitCh
 	})
+}
+
+func (c *fakePacketConn) hasWritePayloadTo(addr net.Addr, payload []byte) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for _, pkt := range c.writes {
+		if pkt.addr.String() == addr.String() && string(pkt.payload) == string(payload) {
+			return true
+		}
+	}
+	return false
 }
 
 func (c *fakePacketConn) clearWrites() {
@@ -409,7 +421,7 @@ func (p *fakeControlPipe) receive(ctx context.Context) (ControlMessage, error) {
 	}
 }
 
-func (p *fakeControlPipe) deliver(msg ControlMessage, timeout time.Duration) bool {
+func (p *fakeControlPipe) deliver(msg ControlMessage, _ time.Duration) bool {
 	wire, err := json.Marshal(msg)
 	if err != nil {
 		return false
@@ -418,7 +430,7 @@ func (p *fakeControlPipe) deliver(msg ControlMessage, timeout time.Duration) boo
 	select {
 	case p.inbound <- wire:
 		return true
-	case <-time.After(timeout):
+	default:
 		return false
 	}
 }
@@ -437,7 +449,7 @@ func (p *fakeControlPipe) enablePeerCandidateAfter(clock *fakeClock, d time.Dura
 
 func (p *fakeControlPipe) deliverAfter(clock *fakeClock, d time.Duration, msg ControlMessage) {
 	clock.AfterFunc(d, func() {
-		_ = p.deliver(msg, 50*time.Millisecond)
+		_ = p.deliver(msg, 0)
 	})
 }
 
@@ -504,6 +516,12 @@ func (p *fakeControlPipe) waitForSendAttempts(typ ControlType, n int, timeout ti
 		p.mu.Unlock()
 		return false, waitCh
 	})
+}
+
+func (p *fakeControlPipe) sendAttemptsCount(typ ControlType) int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.sendAttempts[typ]
 }
 
 func (p *fakeControlPipe) waitForReceiveCount(n int, timeout time.Duration) bool {

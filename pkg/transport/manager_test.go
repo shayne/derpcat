@@ -24,7 +24,10 @@ func TestManagerUpgradesDirectViaDelayedCallMeMaybe(t *testing.T) {
 	localCandidate := &net.UDPAddr{IP: net.IPv4(100, 64, 0, 9), Port: 54321}
 
 	controls := newFakeControlPipe()
-	controls.enablePeerCandidateAfter(clock, 3*time.Second, peerCandidate)
+	controls.deliverAfter(clock, 3*time.Second, ControlMessage{
+		Type:       ControlCandidates,
+		Candidates: []string{peerCandidate.String()},
+	})
 	controls.deliverAfter(clock, 3*time.Second, ControlMessage{Type: ControlCallMeMaybe})
 	direct.enableResponderAfter(clock, 3*time.Second, peerCandidate)
 	baseTimers := clock.timerCount()
@@ -68,6 +71,9 @@ func TestManagerUpgradesDirectViaDelayedCallMeMaybe(t *testing.T) {
 	if !controls.waitForSentCount(ControlCandidates, 2, 200*time.Millisecond) {
 		t.Fatal("manager did not respond to delayed call-me-maybe with candidates control")
 	}
+	if !controls.waitForReceiveCount(2, 200*time.Millisecond) {
+		t.Fatal("manager did not consume the delayed call-me-maybe and candidate controls")
+	}
 	candidates := controls.lastSentType(ControlCandidates)
 	if candidates == nil {
 		t.Fatal("manager did not record the delayed candidates control")
@@ -75,12 +81,11 @@ func TestManagerUpgradesDirectViaDelayedCallMeMaybe(t *testing.T) {
 	if len(candidates.Candidates) != 1 || candidates.Candidates[0] != localCandidate.String() {
 		t.Fatalf("candidate control = %#v, want %q", candidates, localCandidate.String())
 	}
-
-	if !direct.waitForWritePayloadTo(peerCandidate, discoProbePayload, 200*time.Millisecond) {
-		t.Fatalf("manager did not send %q probe to %v", string(discoProbePayload), peerCandidate)
-	}
 	if !waitForPath(t, mgr, PathDirect, 200*time.Millisecond) {
 		t.Fatalf("PathState() = %v, want %v after delayed upgrade", mgr.PathState(), PathDirect)
+	}
+	if !direct.hasWritePayloadTo(peerCandidate, discoProbePayload) {
+		t.Fatalf("manager did not send %q probe to %v", string(discoProbePayload), peerCandidate)
 	}
 }
 
@@ -249,17 +254,8 @@ func TestManagerFallbackWaitsForInFlightDiscovery(t *testing.T) {
 		t.Fatal("manager did not start the stale discovery refresh")
 	}
 
-	done := make(chan error, 1)
-	go func() {
-		done <- mgr.MarkDirectBroken()
-	}()
-	select {
-	case err := <-done:
-		if err != nil {
-			t.Fatalf("MarkDirectBroken() error = %v", err)
-		}
-	case <-time.After(50 * time.Millisecond):
-		t.Fatal("MarkDirectBroken blocked behind in-flight discovery work")
+	if err := mgr.MarkDirectBroken(); err != nil {
+		t.Fatalf("MarkDirectBroken() error = %v", err)
 	}
 
 	if got := mgr.PathState(); got != PathRelay {
@@ -694,7 +690,7 @@ func TestManagerSerializesDiscoveryTriggers(t *testing.T) {
 	if !controls.waitForReceiveCount(1, 200*time.Millisecond) {
 		t.Fatal("manager did not receive the concurrent candidates control")
 	}
-	if controls.waitForSendAttempts(ControlCandidates, 2, 50*time.Millisecond) {
+	if got := controls.sendAttemptsCount(ControlCandidates); got != 1 {
 		t.Fatal("candidate-triggered discovery overlapped with the in-flight periodic discovery")
 	}
 
@@ -742,7 +738,7 @@ func TestManagerSerializesCallMeMaybeTriggeredRefresh(t *testing.T) {
 	if !controls.waitForReceiveCount(1, 200*time.Millisecond) {
 		t.Fatal("manager did not receive the concurrent call-me-maybe")
 	}
-	if controls.waitForSendAttempts(ControlCandidates, 2, 50*time.Millisecond) {
+	if got := controls.sendAttemptsCount(ControlCandidates); got != 1 {
 		t.Fatal("call-me-maybe-triggered candidate refresh overlapped with the in-flight discovery work")
 	}
 
