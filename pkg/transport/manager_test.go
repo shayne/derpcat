@@ -190,6 +190,140 @@ func TestManagerFallsBackToRelayAndRetriesDiscovery(t *testing.T) {
 	}
 }
 
+func TestManagerKeepsRefreshingLocallyAfterPeerCandidatesArrive(t *testing.T) {
+	t.Helper()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	clock := newFakeClock(time.Unix(1700000025, 0))
+	relay := newFakePacketConn(&net.IPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	direct := newFakePacketConn(&net.IPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	relay.useClock(clock)
+	direct.useClock(clock)
+
+	peerCandidate := &net.UDPAddr{IP: net.IPv4(100, 64, 0, 5), Port: 45678}
+	controls := newFakeControlPipe()
+	controls.enablePeerCandidate(peerCandidate)
+
+	mgr := NewManager(ManagerConfig{
+		RelayConn:               relay,
+		DirectConn:              direct,
+		SendControl:             controls.send,
+		ReceiveControl:          controls.receive,
+		Clock:                   clock,
+		DiscoveryInterval:       1 * time.Second,
+		EndpointRefreshInterval: 2 * time.Second,
+		DirectStaleTimeout:      4 * time.Second,
+	})
+
+	if err := mgr.Start(ctx); err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+	if !controls.waitForSentCount(ControlCallMeMaybe, 1, 200*time.Millisecond) {
+		t.Fatal("manager did not send initial call-me-maybe")
+	}
+
+	if !controls.deliver(ControlMessage{
+		Type:       ControlCandidates,
+		Candidates: []string{peerCandidate.String()},
+	}, 200*time.Millisecond) {
+		t.Fatal("failed to deliver peer candidates")
+	}
+
+	clock.Advance(2 * time.Second)
+	if !controls.waitForSentCount(ControlCallMeMaybe, 2, 200*time.Millisecond) {
+		t.Fatal("peer candidate arrival suppressed local refresh/call-me-maybe retry")
+	}
+}
+
+func TestManagerRefreshRetryAfterControlSendFailure(t *testing.T) {
+	t.Helper()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	clock := newFakeClock(time.Unix(1700000027, 0))
+	relay := newFakePacketConn(&net.IPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	direct := newFakePacketConn(&net.IPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	relay.useClock(clock)
+	direct.useClock(clock)
+	controls := newFakeControlPipe()
+	controls.failNextSend(ControlCandidates)
+
+	mgr := NewManager(ManagerConfig{
+		RelayConn:               relay,
+		DirectConn:              direct,
+		SendControl:             controls.send,
+		ReceiveControl:          controls.receive,
+		Clock:                   clock,
+		DiscoveryInterval:       1 * time.Second,
+		EndpointRefreshInterval: 3 * time.Second,
+		DirectStaleTimeout:      4 * time.Second,
+	})
+
+	if err := mgr.Start(ctx); err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+
+	if !controls.waitForSendAttempts(ControlCandidates, 1, 200*time.Millisecond) {
+		t.Fatal("manager did not attempt initial candidates refresh")
+	}
+
+	clock.Advance(1 * time.Second)
+	if !controls.waitForSendAttempts(ControlCandidates, 2, 200*time.Millisecond) {
+		t.Fatal("manager did not retry candidates refresh after send failure")
+	}
+}
+
+func TestManagerIgnoresAckWithoutOutstandingProbe(t *testing.T) {
+	t.Helper()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	clock := newFakeClock(time.Unix(1700000029, 0))
+	direct := newFakePacketConn(&net.IPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	direct.useClock(clock)
+	controls := newFakeControlPipe()
+	peerCandidate := &net.UDPAddr{IP: net.IPv4(100, 64, 0, 6), Port: 56789}
+	direct.failNextWriteTo(peerCandidate)
+
+	mgr := NewManager(ManagerConfig{
+		DirectConn:              direct,
+		SendControl:             controls.send,
+		ReceiveControl:          controls.receive,
+		Clock:                   clock,
+		DiscoveryInterval:       1 * time.Second,
+		EndpointRefreshInterval: 2 * time.Second,
+		DirectStaleTimeout:      4 * time.Second,
+	})
+
+	if err := mgr.Start(ctx); err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+	if !controls.deliver(ControlMessage{
+		Type:       ControlCandidates,
+		Candidates: []string{peerCandidate.String()},
+	}, 200*time.Millisecond) {
+		t.Fatal("failed to deliver peer candidates")
+	}
+
+	if !direct.waitForWritePayloadTo(peerCandidate, discoProbePayload, 200*time.Millisecond) {
+		t.Fatal("manager did not send initial probe")
+	}
+	if !waitForPath(t, mgr, PathUnknown, 100*time.Millisecond) {
+		t.Fatalf("PathState() before unsolicited ack = %v, want %v", mgr.PathState(), PathUnknown)
+	}
+
+	direct.enqueueRead([]byte("derpcat-ack"), peerCandidate)
+	time.Sleep(20 * time.Millisecond)
+
+	if got := mgr.PathState(); got != PathUnknown {
+		t.Fatalf("PathState() after unsolicited ack = %v, want %v", got, PathUnknown)
+	}
+}
+
 func TestManagerIgnoresUnexpectedDirectNoise(t *testing.T) {
 	t.Helper()
 

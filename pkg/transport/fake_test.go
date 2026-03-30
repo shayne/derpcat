@@ -20,6 +20,7 @@ type fakePacketConn struct {
 	reads              []packet
 	writes             []packet
 	responderEndpoints map[string]net.Addr
+	failWritesTo       map[string]int
 	notify             chan struct{}
 	closed             bool
 	deadline           time.Time
@@ -31,6 +32,7 @@ func newFakePacketConn(local net.Addr) *fakePacketConn {
 	return &fakePacketConn{
 		local:              local,
 		responderEndpoints: make(map[string]net.Addr),
+		failWritesTo:       make(map[string]int),
 		notify:             make(chan struct{}),
 		clock:              realClock{},
 	}
@@ -77,6 +79,11 @@ func (c *fakePacketConn) WriteTo(b []byte, addr net.Addr) (int, error) {
 		payload: payload,
 		addr:    addr,
 	})
+	if c.failWritesTo[addr.String()] > 0 {
+		c.failWritesTo[addr.String()]--
+		c.signalLocked()
+		return 0, net.ErrClosed
+	}
 	if string(payload) == string(discoProbePayload) {
 		if responder, ok := c.responderEndpoints[addr.String()]; ok {
 			c.reads = append(c.reads, packet{
@@ -256,18 +263,34 @@ func (c *fakePacketConn) waitForWritePayloadTo(addr net.Addr, payload []byte, ti
 	}
 }
 
+func (c *fakePacketConn) clearWrites() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.writes = nil
+}
+
+func (c *fakePacketConn) failNextWriteTo(addr net.Addr) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.failWritesTo[addr.String()]++
+}
+
 type fakeControlPipe struct {
 	mu             sync.Mutex
 	inbound        chan []byte
 	sent           []ControlMessage
+	sendAttempts   map[ControlType]int
+	failNextByType map[ControlType]int
 	peerCandidates []string
 	notify         chan struct{}
 }
 
 func newFakeControlPipe() *fakeControlPipe {
 	return &fakeControlPipe{
-		inbound: make(chan []byte, 16),
-		notify:  make(chan struct{}),
+		inbound:        make(chan []byte, 16),
+		sendAttempts:   make(map[ControlType]int),
+		failNextByType: make(map[ControlType]int),
+		notify:         make(chan struct{}),
 	}
 }
 
@@ -283,6 +306,13 @@ func (p *fakeControlPipe) send(ctx context.Context, msg ControlMessage) error {
 	}
 
 	p.mu.Lock()
+	p.sendAttempts[decoded.Type]++
+	if p.failNextByType[decoded.Type] > 0 {
+		p.failNextByType[decoded.Type]--
+		p.signalLocked()
+		p.mu.Unlock()
+		return context.DeadlineExceeded
+	}
 	p.sent = append(p.sent, decoded)
 	peerCandidates := append([]string(nil), p.peerCandidates...)
 	p.signalLocked()
@@ -372,6 +402,42 @@ func (p *fakeControlPipe) sentCount(typ ControlType) int {
 		}
 	}
 	return count
+}
+
+func (p *fakeControlPipe) failNextSend(typ ControlType) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.failNextByType[typ]++
+}
+
+func (p *fakeControlPipe) waitForSendAttempts(typ ControlType, n int, timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	for {
+		p.mu.Lock()
+		count := p.sendAttempts[typ]
+		if count >= n {
+			p.mu.Unlock()
+			return true
+		}
+		waitCh := p.notify
+		p.mu.Unlock()
+
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			return false
+		}
+		timer := time.NewTimer(remaining)
+		select {
+		case <-waitCh:
+		case <-timer.C:
+		}
+		if !timer.Stop() {
+			select {
+			case <-timer.C:
+			default:
+			}
+		}
+	}
 }
 
 func (p *fakeControlPipe) waitForSentCount(typ ControlType, n int, timeout time.Duration) bool {

@@ -15,16 +15,19 @@ const (
 )
 
 type pathState struct {
-	current          Path
-	relayConfigured  bool
-	directConfigured bool
-	endpoints        map[string]net.Addr
-	bestEndpoint     string
-	lastRelayAt      time.Time
-	lastDirectAt     time.Time
-	lastEndpointsAt  time.Time
-	upgrades         int
-	fallbacks        int
+	current             Path
+	relayConfigured     bool
+	directConfigured    bool
+	endpoints           map[string]net.Addr
+	bestEndpoint        string
+	lastRelayAt         time.Time
+	lastDirectAt        time.Time
+	lastPeerEndpointsAt time.Time
+	lastRefreshAt       time.Time
+	lastCallMeMaybeAt   time.Time
+	pendingProbes       map[string]time.Time
+	upgrades            int
+	fallbacks           int
 }
 
 type discoveryPlan struct {
@@ -47,6 +50,7 @@ func newPathState(now time.Time, hasRelay, hasDirect bool) pathState {
 		relayConfigured:  hasRelay,
 		directConfigured: hasDirect,
 		endpoints:        make(map[string]net.Addr),
+		pendingProbes:    make(map[string]time.Time),
 		lastRelayAt:      lastRelayAt,
 	}
 }
@@ -78,10 +82,11 @@ func (s pathState) discoveryPlan(now time.Time, refreshInterval, staleAfter time
 		targets = append(targets, cloneAddr(endpoint))
 	}
 
-	needRefresh := s.lastEndpointsAt.IsZero() || now.Sub(s.lastEndpointsAt) >= refreshInterval
+	needRefresh := s.lastRefreshAt.IsZero() || now.Sub(s.lastRefreshAt) >= refreshInterval
+	sendCallMe := s.relayConfigured && (s.lastCallMeMaybeAt.IsZero() || now.Sub(s.lastCallMeMaybeAt) >= refreshInterval)
 	return discoveryPlan{
 		needRefresh:   needRefresh,
-		sendCallMe:    s.relayConfigured && needRefresh,
+		sendCallMe:    sendCallMe,
 		probeTargets:  targets,
 		shouldAttempt: true,
 	}
@@ -97,8 +102,12 @@ func (s pathState) directIsStale(now time.Time, staleAfter time.Duration) bool {
 	return !now.Before(s.lastDirectAt.Add(staleAfter))
 }
 
-func (s *pathState) noteEndpointRefresh(now time.Time) {
-	s.lastEndpointsAt = now
+func (s *pathState) noteRefreshSuccess(now time.Time) {
+	s.lastRefreshAt = now
+}
+
+func (s *pathState) noteCallMeMaybeSuccess(now time.Time) {
+	s.lastCallMeMaybeAt = now
 }
 
 func (s *pathState) noteCandidates(now time.Time, candidates []net.Addr) bool {
@@ -121,12 +130,17 @@ func (s *pathState) noteCandidates(now time.Time, candidates []net.Addr) bool {
 	}
 
 	s.endpoints = next
+	for key := range s.pendingProbes {
+		if _, ok := s.endpoints[key]; !ok {
+			delete(s.pendingProbes, key)
+		}
+	}
 	if s.bestEndpoint != "" {
 		if _, ok := s.endpoints[s.bestEndpoint]; !ok {
 			s.bestEndpoint = ""
 		}
 	}
-	s.lastEndpointsAt = now
+	s.lastPeerEndpointsAt = now
 	return changed
 }
 
@@ -163,8 +177,30 @@ func (s *pathState) noteRelay(now time.Time) bool {
 	if next == PathRelay {
 		s.lastRelayAt = now
 	}
-	s.lastEndpointsAt = time.Time{}
+	s.lastRefreshAt = time.Time{}
+	s.lastCallMeMaybeAt = time.Time{}
+	clear(s.pendingProbes)
 	return changed
+}
+
+func (s *pathState) noteProbeSent(now time.Time, addr net.Addr) {
+	if addr == nil {
+		return
+	}
+	s.pendingProbes[addr.String()] = now
+}
+
+func (s *pathState) consumeProbe(addr net.Addr, maxAge time.Duration, now time.Time) bool {
+	if addr == nil {
+		return false
+	}
+	key := addr.String()
+	sentAt, ok := s.pendingProbes[key]
+	if !ok {
+		return false
+	}
+	delete(s.pendingProbes, key)
+	return !sentAt.Add(maxAge).Before(now)
 }
 
 func cloneAddr(addr net.Addr) net.Addr {

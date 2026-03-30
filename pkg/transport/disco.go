@@ -55,7 +55,9 @@ func (m *Manager) discoveryTick(ctx context.Context) {
 		if target == nil {
 			continue
 		}
-		_, _ = m.cfg.DirectConn.WriteTo(discoProbePayload, target)
+		if _, err := m.cfg.DirectConn.WriteTo(discoProbePayload, target); err == nil {
+			m.noteProbeSent(m.now(), target)
+		}
 	}
 }
 
@@ -82,7 +84,7 @@ func (m *Manager) directReadLoop(ctx context.Context) {
 		if !bytes.Equal(buf[:n], discoAckPayload) {
 			continue
 		}
-		m.noteValidatedDirect(m.now(), addr)
+		m.tryPromoteDirect(m.now(), addr)
 	}
 }
 

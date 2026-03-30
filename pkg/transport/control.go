@@ -59,7 +59,11 @@ func (m *Manager) sendCallMeMaybe(ctx context.Context) error {
 	if m.cfg.SendControl == nil {
 		return nil
 	}
-	return m.cfg.SendControl(ctx, ControlMessage{Type: ControlCallMeMaybe})
+	if err := m.cfg.SendControl(ctx, ControlMessage{Type: ControlCallMeMaybe}); err != nil {
+		return err
+	}
+	m.noteCallMeMaybeSuccess(m.now())
+	return nil
 }
 
 func (m *Manager) sendCandidateUpdate(ctx context.Context) error {
@@ -71,11 +75,14 @@ func (m *Manager) sendCandidateUpdate(ctx context.Context) error {
 	if m.cfg.CandidateSource != nil {
 		candidates = stringifyCandidates(m.cfg.CandidateSource(ctx))
 	}
-	m.noteEndpointRefresh(m.now())
-	return m.cfg.SendControl(ctx, ControlMessage{
+	if err := m.cfg.SendControl(ctx, ControlMessage{
 		Type:       ControlCandidates,
 		Candidates: candidates,
-	})
+	}); err != nil {
+		return err
+	}
+	m.noteEndpointRefresh(m.now())
+	return nil
 }
 
 func (m *Manager) applyRemoteCandidates(now time.Time, candidates []net.Addr) {

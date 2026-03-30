@@ -97,7 +97,13 @@ func (m *Manager) noteRelayOnly(now time.Time) {
 func (m *Manager) noteEndpointRefresh(now time.Time) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.state.noteEndpointRefresh(now)
+	m.state.noteRefreshSuccess(now)
+}
+
+func (m *Manager) noteCallMeMaybeSuccess(now time.Time) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.state.noteCallMeMaybeSuccess(now)
 }
 
 func (m *Manager) snapshotDiscoveryPlan() discoveryPlan {
@@ -105,6 +111,21 @@ func (m *Manager) snapshotDiscoveryPlan() discoveryPlan {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return m.state.discoveryPlan(now, m.endpointRefreshInterval(), m.directStaleTimeout())
+}
+
+func (m *Manager) noteProbeSent(now time.Time, addr net.Addr) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.state.noteProbeSent(now, addr)
+}
+
+func (m *Manager) tryPromoteDirect(now time.Time, addr net.Addr) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if !m.state.consumeProbe(addr, m.discoveryInterval(), now) {
+		return false
+	}
+	return m.state.noteDirect(now, addr)
 }
 
 func (m *Manager) discoveryInterval() time.Duration {
