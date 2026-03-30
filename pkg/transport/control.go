@@ -19,8 +19,10 @@ type ControlMessage struct {
 }
 
 func (m *Manager) MarkDirectBroken() error {
-	m.noteRelayOnly(m.now())
-	return nil
+	return m.withDiscoveryLock(func() error {
+		m.noteRelayOnly(m.now())
+		return nil
+	})
 }
 
 func (m *Manager) receiveControlLoop(ctx context.Context) {

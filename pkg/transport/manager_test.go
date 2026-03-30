@@ -203,6 +203,90 @@ func TestManagerFallsBackToRelayAndRetriesDiscovery(t *testing.T) {
 	}
 }
 
+func TestManagerFallbackWaitsForInFlightDiscovery(t *testing.T) {
+	t.Helper()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	clock := newFakeClock(time.Unix(1700000021, 0))
+	relay := newFakePacketConn(&net.IPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	direct := newFakePacketConn(&net.IPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	relay.useClock(clock)
+	direct.useClock(clock)
+
+	peerCandidate := &net.UDPAddr{IP: net.IPv4(100, 64, 0, 41), Port: 44567}
+	controls := newFakeControlPipe()
+	controls.enablePeerCandidate(peerCandidate)
+	direct.enableResponder(peerCandidate)
+	baseTimers := clock.timerCount()
+
+	mgr := NewManager(ManagerConfig{
+		RelayConn:               relay,
+		DirectConn:              direct,
+		SendControl:             controls.send,
+		ReceiveControl:          controls.receive,
+		Clock:                   clock,
+		DiscoveryInterval:       1 * time.Second,
+		EndpointRefreshInterval: 2 * time.Second,
+		DirectStaleTimeout:      3 * time.Second,
+	})
+
+	if err := mgr.Start(ctx); err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+	waitForManagerTimers(t, clock, baseTimers, 2)
+
+	clock.Advance(1 * time.Second)
+	if !waitForPath(t, mgr, PathDirect, 200*time.Millisecond) {
+		t.Fatalf("PathState() = %v, want %v before stale rediscovery", mgr.PathState(), PathDirect)
+	}
+
+	callMeMaybeCount := controls.sentCount(ControlCallMeMaybe)
+	probeCount := direct.writeCountTo(peerCandidate)
+	controls.blockSend(ControlCandidates)
+
+	clock.Advance(3 * time.Second)
+	if !controls.waitForSendAttempts(ControlCandidates, 2, 200*time.Millisecond) {
+		t.Fatal("manager did not start the stale discovery refresh")
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		done <- mgr.MarkDirectBroken()
+	}()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("MarkDirectBroken() error = %v", err)
+		}
+		t.Fatal("MarkDirectBroken returned before the in-flight discovery round finished")
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	controls.unblockSend(ControlCandidates)
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("MarkDirectBroken() error = %v", err)
+		}
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("MarkDirectBroken did not finish after the blocked discovery round completed")
+	}
+
+	if got := mgr.PathState(); got != PathRelay {
+		t.Fatalf("PathState() after fallback = %v, want %v", got, PathRelay)
+	}
+
+	clock.Advance(1 * time.Second)
+	if !controls.waitForSentCount(ControlCallMeMaybe, callMeMaybeCount+1, 200*time.Millisecond) {
+		t.Fatal("manager did not send a fresh call-me-maybe immediately after fallback")
+	}
+	if !direct.waitForWriteCountTo(peerCandidate, probeCount+1, 200*time.Millisecond) {
+		t.Fatal("manager did not retry direct probes immediately after fallback")
+	}
+}
+
 func TestManagerKeepsRefreshingLocallyAfterPeerCandidatesArrive(t *testing.T) {
 	t.Helper()
 

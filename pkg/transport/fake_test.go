@@ -541,14 +541,16 @@ func (p *fakeControlPipe) signalLocked() {
 }
 
 type fakeClock struct {
-	mu     sync.Mutex
-	now    time.Time
-	timers []*fakeTimer
-	notify chan struct{}
+	mu      sync.Mutex
+	now     time.Time
+	timers  []*fakeTimer
+	notify  chan struct{}
+	nextSeq int
 }
 
 type fakeTimer struct {
 	at      time.Time
+	seq     int
 	ch      chan time.Time
 	fn      func()
 	stopped bool
@@ -576,9 +578,11 @@ func (c *fakeClock) After(d time.Duration) <-chan time.Time {
 	defer c.mu.Unlock()
 
 	timer := &fakeTimer{
-		at: c.now.Add(d),
-		ch: make(chan time.Time, 1),
+		at:  c.now.Add(d),
+		seq: c.nextSeq,
+		ch:  make(chan time.Time, 1),
 	}
+	c.nextSeq++
 	c.timers = append(c.timers, timer)
 	c.signalLocked()
 	return timer.ch
@@ -589,9 +593,11 @@ func (c *fakeClock) AfterFunc(d time.Duration, fn func()) Timer {
 	defer c.mu.Unlock()
 
 	timer := &fakeTimer{
-		at: c.now.Add(d),
-		fn: fn,
+		at:  c.now.Add(d),
+		seq: c.nextSeq,
+		fn:  fn,
 	}
+	c.nextSeq++
 	c.timers = append(c.timers, timer)
 	c.signalLocked()
 	return timer
@@ -619,6 +625,10 @@ func (c *fakeClock) Advance(d time.Duration) {
 		case a.at.Before(b.at):
 			return -1
 		case a.at.After(b.at):
+			return 1
+		case a.seq < b.seq:
+			return -1
+		case a.seq > b.seq:
 			return 1
 		default:
 			return 0
