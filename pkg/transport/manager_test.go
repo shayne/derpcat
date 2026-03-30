@@ -145,6 +145,70 @@ func TestManagerRestartsDiscoveryWhenDirectBecomesStale(t *testing.T) {
 	}
 }
 
+func TestManagerDemotesAndRediscoversWhenActiveDirectCandidateIsReplaced(t *testing.T) {
+	t.Helper()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	clock := newFakeClock(time.Unix(1700000015, 0))
+	relay := newFakePacketConn(&net.IPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	direct := newFakePacketConn(&net.IPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	relay.useClock(clock)
+	direct.useClock(clock)
+
+	oldCandidate := &net.UDPAddr{IP: net.IPv4(100, 64, 0, 31), Port: 23111}
+	newCandidate := &net.UDPAddr{IP: net.IPv4(100, 64, 0, 32), Port: 23222}
+	controls := newFakeControlPipe()
+	direct.enableResponder(oldCandidate)
+	baseTimers := clock.timerCount()
+
+	mgr := NewManager(ManagerConfig{
+		RelayConn:               relay,
+		DirectConn:              direct,
+		SendControl:             controls.send,
+		ReceiveControl:          controls.receive,
+		Clock:                   clock,
+		DiscoveryInterval:       1 * time.Second,
+		EndpointRefreshInterval: 2 * time.Second,
+		DirectStaleTimeout:      4 * time.Second,
+	})
+
+	if err := mgr.Start(ctx); err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+	waitForManagerTimers(t, clock, baseTimers, 2)
+	if !controls.deliver(ControlMessage{
+		Type:       ControlCandidates,
+		Candidates: []string{oldCandidate.String()},
+	}, 200*time.Millisecond) {
+		t.Fatal("failed to deliver initial direct candidate")
+	}
+	clock.Advance(1 * time.Second)
+	if !waitForPath(t, mgr, PathDirect, 200*time.Millisecond) {
+		t.Fatalf("PathState() = %v, want %v after initial direct promotion", mgr.PathState(), PathDirect)
+	}
+
+	direct.clearWrites()
+	if !controls.deliver(ControlMessage{
+		Type:       ControlCandidates,
+		Candidates: []string{newCandidate.String()},
+	}, 200*time.Millisecond) {
+		t.Fatal("failed to deliver replacement direct candidate")
+	}
+	if !waitForPath(t, mgr, PathRelay, 200*time.Millisecond) {
+		t.Fatalf("PathState() after candidate replacement = %v, want %v before rediscovery", mgr.PathState(), PathRelay)
+	}
+	if !direct.waitForWritePayloadTo(newCandidate, discoProbePayload, 200*time.Millisecond) {
+		t.Fatalf("manager did not probe replacement direct candidate %v", newCandidate)
+	}
+
+	direct.enqueueRead(discoAckPayload, newCandidate)
+	if !waitForPath(t, mgr, PathDirect, 200*time.Millisecond) {
+		t.Fatalf("PathState() after candidate replacement recovery = %v, want %v", mgr.PathState(), PathDirect)
+	}
+}
+
 func TestManagerFallsBackToRelayAndRetriesDiscovery(t *testing.T) {
 	t.Helper()
 

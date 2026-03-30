@@ -136,9 +136,15 @@ func (s *pathState) noteCandidates(now time.Time, candidates []net.Addr) bool {
 			delete(s.pendingProbes, key)
 		}
 	}
+	lostActiveDirect := s.current == PathDirect && s.bestEndpoint != ""
 	if s.bestEndpoint != "" {
 		if _, ok := s.endpoints[s.bestEndpoint]; !ok {
 			s.bestEndpoint = ""
+		}
+	}
+	if lostActiveDirect && s.bestEndpoint == "" {
+		if s.noteRelay(now) {
+			changed = true
 		}
 	}
 	s.lastPeerEndpointsAt = now
