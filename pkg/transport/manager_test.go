@@ -74,8 +74,10 @@ func TestManagerUpgradesDirectViaDelayedCallMeMaybe(t *testing.T) {
 	if len(candidates.Candidates) != 1 || candidates.Candidates[0] != localCandidate.String() {
 		t.Fatalf("candidate control = %#v, want %q", candidates, localCandidate.String())
 	}
+	if !controls.waitForReceiveCount(2, 200*time.Millisecond) {
+		t.Fatal("manager did not consume the delayed call-me-maybe and candidate controls")
+	}
 
-	clock.Advance(1 * time.Second)
 	if !direct.waitForWritePayloadTo(peerCandidate, discoProbePayload, 200*time.Millisecond) {
 		t.Fatalf("manager did not send %q probe to %v", string(discoProbePayload), peerCandidate)
 	}
@@ -519,6 +521,54 @@ func TestManagerSerializesDiscoveryTriggers(t *testing.T) {
 	controls.unblockSend(ControlCandidates)
 }
 
+func TestManagerSerializesCallMeMaybeTriggeredRefresh(t *testing.T) {
+	t.Helper()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	clock := newFakeClock(time.Unix(1700000038, 0))
+	relay := newFakePacketConn(&net.IPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	direct := newFakePacketConn(&net.IPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	relay.useClock(clock)
+	direct.useClock(clock)
+	controls := newFakeControlPipe()
+	controls.blockSend(ControlCandidates)
+	baseTimers := clock.timerCount()
+
+	mgr := NewManager(ManagerConfig{
+		RelayConn:               relay,
+		DirectConn:              direct,
+		SendControl:             controls.send,
+		ReceiveControl:          controls.receive,
+		Clock:                   clock,
+		DiscoveryInterval:       1 * time.Second,
+		EndpointRefreshInterval: 5 * time.Second,
+		DirectStaleTimeout:      4 * time.Second,
+	})
+
+	if err := mgr.Start(ctx); err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+	waitForManagerTimers(t, clock, baseTimers, 2)
+
+	clock.Advance(1 * time.Second)
+	if !controls.waitForSendAttempts(ControlCandidates, 1, 200*time.Millisecond) {
+		t.Fatal("manager did not start the scheduled discovery refresh")
+	}
+	if !controls.deliver(ControlMessage{Type: ControlCallMeMaybe}, 200*time.Millisecond) {
+		t.Fatal("failed to deliver concurrent call-me-maybe")
+	}
+	if !controls.waitForReceiveCount(1, 200*time.Millisecond) {
+		t.Fatal("manager did not receive the concurrent call-me-maybe")
+	}
+	if controls.waitForSendAttempts(ControlCandidates, 2, 50*time.Millisecond) {
+		t.Fatal("call-me-maybe-triggered candidate refresh overlapped with the in-flight discovery work")
+	}
+
+	controls.unblockSend(ControlCandidates)
+}
+
 func TestManagerRelayOnlyStartKeepsRelay(t *testing.T) {
 	t.Helper()
 
@@ -591,12 +641,10 @@ func waitForManagerTimers(t *testing.T, clock *fakeClock, base, added int) {
 func waitForPath(t *testing.T, mgr *Manager, want Path, timeout time.Duration) bool {
 	t.Helper()
 
-	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) {
+	return waitForNotify(timeout, func() (bool, <-chan struct{}) {
 		if mgr.PathState() == want {
-			return true
+			return true, nil
 		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	return mgr.PathState() == want
+		return false, mgr.stateChanged()
+	})
 }

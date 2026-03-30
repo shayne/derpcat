@@ -32,36 +32,36 @@ func (m *Manager) discoveryLoop(ctx context.Context) {
 }
 
 func (m *Manager) discoveryTick(ctx context.Context) {
-	m.discoveryMu.Lock()
-	defer m.discoveryMu.Unlock()
-
-	if ctx.Err() != nil {
-		return
-	}
-
-	plan := m.snapshotDiscoveryPlan()
-	if !plan.shouldAttempt {
-		return
-	}
-
-	if plan.needRefresh {
-		_ = m.sendCandidateUpdate(ctx)
-	}
-	if plan.sendCallMe {
-		_ = m.sendCallMeMaybe(ctx)
-	}
-	if m.cfg.DirectConn == nil {
-		return
-	}
-
-	for _, target := range plan.probeTargets {
-		if target == nil {
-			continue
+	_ = m.withDiscoveryLock(func() error {
+		if ctx.Err() != nil {
+			return nil
 		}
-		if _, err := m.cfg.DirectConn.WriteTo(discoProbePayload, target); err == nil {
-			m.noteProbeSent(m.now(), target)
+
+		plan := m.snapshotDiscoveryPlan()
+		if !plan.shouldAttempt {
+			return nil
 		}
-	}
+
+		if plan.needRefresh {
+			_ = m.sendCandidateUpdate(ctx)
+		}
+		if plan.sendCallMe {
+			_ = m.sendCallMeMaybe(ctx)
+		}
+		if m.cfg.DirectConn == nil {
+			return nil
+		}
+
+		for _, target := range plan.probeTargets {
+			if target == nil {
+				continue
+			}
+			if _, err := m.cfg.DirectConn.WriteTo(discoProbePayload, target); err == nil {
+				m.noteProbeSent(m.now(), target)
+			}
+		}
+		return nil
+	})
 }
 
 func (m *Manager) directReadLoop(ctx context.Context) {

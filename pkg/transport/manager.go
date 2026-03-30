@@ -42,14 +42,16 @@ type Manager struct {
 	discoveryMu sync.Mutex
 	cfg         ManagerConfig
 	state       pathState
+	stateNotify chan struct{}
 	started     bool
 }
 
 func NewManager(cfg ManagerConfig) *Manager {
 	cfg = normalizeConfig(cfg)
 	return &Manager{
-		cfg:   cfg,
-		state: newPathState(cfg.Clock.Now(), cfg.RelayConn != nil, cfg.DirectConn != nil),
+		cfg:         cfg,
+		state:       newPathState(cfg.Clock.Now(), cfg.RelayConn != nil, cfg.DirectConn != nil),
+		stateNotify: make(chan struct{}),
 	}
 }
 
@@ -86,13 +88,17 @@ func (m *Manager) now() time.Time {
 func (m *Manager) noteValidatedDirect(now time.Time, addr net.Addr) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.state.noteDirect(now, addr)
+	if m.state.noteDirect(now, addr) {
+		m.signalStateChangeLocked()
+	}
 }
 
 func (m *Manager) noteRelayOnly(now time.Time) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.state.noteRelay(now)
+	if m.state.noteRelay(now) {
+		m.signalStateChangeLocked()
+	}
 }
 
 func (m *Manager) noteEndpointRefresh(now time.Time) {
@@ -148,6 +154,23 @@ func (m *Manager) directStaleTimeout() time.Duration {
 		return m.cfg.DirectStaleTimeout
 	}
 	return defaultDirectStaleTimeout
+}
+
+func (m *Manager) withDiscoveryLock(fn func() error) error {
+	m.discoveryMu.Lock()
+	defer m.discoveryMu.Unlock()
+	return fn()
+}
+
+func (m *Manager) stateChanged() <-chan struct{} {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.stateNotify
+}
+
+func (m *Manager) signalStateChangeLocked() {
+	close(m.stateNotify)
+	m.stateNotify = make(chan struct{})
 }
 
 func normalizeConfig(cfg ManagerConfig) ManagerConfig {

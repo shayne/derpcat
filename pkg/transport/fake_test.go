@@ -175,6 +175,27 @@ func (timeoutErr) Temporary() bool { return true }
 var _ net.PacketConn = (*fakePacketConn)(nil)
 var _ error = timeoutErr{}
 
+func waitForNotify(timeout time.Duration, snapshot func() (bool, <-chan struct{})) bool {
+	if timeout <= 0 {
+		ok, _ := snapshot()
+		return ok
+	}
+
+	deadline := time.After(timeout)
+	for {
+		ok, waitCh := snapshot()
+		if ok {
+			return true
+		}
+		select {
+		case <-waitCh:
+		case <-deadline:
+			ok, _ = snapshot()
+			return ok
+		}
+	}
+}
+
 func (c *fakePacketConn) writeCountTo(addr net.Addr) int {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -189,8 +210,7 @@ func (c *fakePacketConn) writeCountTo(addr net.Addr) int {
 }
 
 func (c *fakePacketConn) waitForWriteCountTo(addr net.Addr, n int, timeout time.Duration) bool {
-	deadline := time.Now().Add(timeout)
-	for {
+	return waitForNotify(timeout, func() (bool, <-chan struct{}) {
 		c.mu.Lock()
 		count := 0
 		for _, pkt := range c.writes {
@@ -200,67 +220,35 @@ func (c *fakePacketConn) waitForWriteCountTo(addr net.Addr, n int, timeout time.
 		}
 		if count >= n {
 			c.mu.Unlock()
-			return true
+			return true, nil
 		}
 		if c.closed {
 			c.mu.Unlock()
-			return false
+			return false, nil
 		}
 		waitCh := c.notify
 		c.mu.Unlock()
-
-		remaining := time.Until(deadline)
-		if remaining <= 0 {
-			return false
-		}
-
-		timer := time.NewTimer(remaining)
-		select {
-		case <-waitCh:
-		case <-timer.C:
-		}
-		if !timer.Stop() {
-			select {
-			case <-timer.C:
-			default:
-			}
-		}
-	}
+		return false, waitCh
+	})
 }
 
 func (c *fakePacketConn) waitForWritePayloadTo(addr net.Addr, payload []byte, timeout time.Duration) bool {
-	deadline := time.Now().Add(timeout)
-	for {
+	return waitForNotify(timeout, func() (bool, <-chan struct{}) {
 		c.mu.Lock()
 		for _, pkt := range c.writes {
 			if pkt.addr.String() == addr.String() && string(pkt.payload) == string(payload) {
 				c.mu.Unlock()
-				return true
+				return true, nil
 			}
 		}
 		if c.closed {
 			c.mu.Unlock()
-			return false
+			return false, nil
 		}
 		waitCh := c.notify
 		c.mu.Unlock()
-
-		remaining := time.Until(deadline)
-		if remaining <= 0 {
-			return false
-		}
-		timer := time.NewTimer(remaining)
-		select {
-		case <-waitCh:
-		case <-timer.C:
-		}
-		if !timer.Stop() {
-			select {
-			case <-timer.C:
-			default:
-			}
-		}
-	}
+		return false, waitCh
+	})
 }
 
 func (c *fakePacketConn) clearWrites() {
@@ -381,20 +369,10 @@ func (p *fakeControlPipe) deliver(msg ControlMessage, timeout time.Duration) boo
 		return false
 	}
 
-	timer := time.NewTimer(timeout)
-	defer func() {
-		if !timer.Stop() {
-			select {
-			case <-timer.C:
-			default:
-			}
-		}
-	}()
-
 	select {
 	case p.inbound <- wire:
 		return true
-	case <-timer.C:
+	case <-time.After(timeout):
 		return false
 	}
 }
@@ -462,98 +440,49 @@ func (p *fakeControlPipe) unblockSend(typ ControlType) {
 }
 
 func (p *fakeControlPipe) waitForSendAttempts(typ ControlType, n int, timeout time.Duration) bool {
-	deadline := time.Now().Add(timeout)
-	for {
+	return waitForNotify(timeout, func() (bool, <-chan struct{}) {
 		p.mu.Lock()
 		count := p.sendAttempts[typ]
 		if count >= n {
 			p.mu.Unlock()
-			return true
+			return true, nil
 		}
 		waitCh := p.notify
 		p.mu.Unlock()
-
-		remaining := time.Until(deadline)
-		if remaining <= 0 {
-			return false
-		}
-		timer := time.NewTimer(remaining)
-		select {
-		case <-waitCh:
-		case <-timer.C:
-		}
-		if !timer.Stop() {
-			select {
-			case <-timer.C:
-			default:
-			}
-		}
-	}
+		return false, waitCh
+	})
 }
 
 func (p *fakeControlPipe) waitForReceiveCount(n int, timeout time.Duration) bool {
-	deadline := time.Now().Add(timeout)
-	for {
+	return waitForNotify(timeout, func() (bool, <-chan struct{}) {
 		p.mu.Lock()
 		count := p.receiveCount
 		if count >= n {
 			p.mu.Unlock()
-			return true
+			return true, nil
 		}
 		waitCh := p.notify
 		p.mu.Unlock()
-
-		remaining := time.Until(deadline)
-		if remaining <= 0 {
-			return false
-		}
-		timer := time.NewTimer(remaining)
-		select {
-		case <-waitCh:
-		case <-timer.C:
-		}
-		if !timer.Stop() {
-			select {
-			case <-timer.C:
-			default:
-			}
-		}
-	}
+		return false, waitCh
+	})
 }
 
 func (p *fakeControlPipe) waitForReceiveErrorsDrained(timeout time.Duration) bool {
-	deadline := time.Now().Add(timeout)
-	for {
+	return waitForNotify(timeout, func() (bool, <-chan struct{}) {
 		p.mu.Lock()
 		remainingErrors := p.receiveErrors
 		if remainingErrors == 0 {
 			p.mu.Unlock()
-			return true
+			return true, nil
 		}
 		waitCh := p.notify
 		p.mu.Unlock()
-
-		remaining := time.Until(deadline)
-		if remaining <= 0 {
-			return false
-		}
-		timer := time.NewTimer(remaining)
-		select {
-		case <-waitCh:
-		case <-timer.C:
-		}
-		if !timer.Stop() {
-			select {
-			case <-timer.C:
-			default:
-			}
-		}
-	}
+		return false, waitCh
+	})
 }
 
 func (p *fakeControlPipe) waitForSentCount(typ ControlType, n int, timeout time.Duration) bool {
-	deadline := time.Now().Add(timeout)
-	for {
+	return waitForNotify(timeout, func() (bool, <-chan struct{}) {
 		p.mu.Lock()
 		count := 0
 		for _, msg := range p.sent {
@@ -563,59 +492,33 @@ func (p *fakeControlPipe) waitForSentCount(typ ControlType, n int, timeout time.
 		}
 		if count >= n {
 			p.mu.Unlock()
-			return true
+			return true, nil
 		}
 		waitCh := p.notify
 		p.mu.Unlock()
-
-		remaining := time.Until(deadline)
-		if remaining <= 0 {
-			return false
-		}
-		timer := time.NewTimer(remaining)
-		select {
-		case <-waitCh:
-		case <-timer.C:
-		}
-		if !timer.Stop() {
-			select {
-			case <-timer.C:
-			default:
-			}
-		}
-	}
+		return false, waitCh
+	})
 }
 
 func (p *fakeControlPipe) waitForSentType(typ ControlType, timeout time.Duration) *ControlMessage {
-	deadline := time.Now().Add(timeout)
-	for {
+	var found *ControlMessage
+	if !waitForNotify(timeout, func() (bool, <-chan struct{}) {
 		p.mu.Lock()
 		for _, msg := range p.sent {
 			if msg.Type == typ {
 				copyMsg := msg
 				p.mu.Unlock()
-				return &copyMsg
+				found = &copyMsg
+				return true, nil
 			}
 		}
 		waitCh := p.notify
 		p.mu.Unlock()
-
-		remaining := time.Until(deadline)
-		if remaining <= 0 {
-			return nil
-		}
-		timer := time.NewTimer(remaining)
-		select {
-		case <-waitCh:
-		case <-timer.C:
-		}
-		if !timer.Stop() {
-			select {
-			case <-timer.C:
-			default:
-			}
-		}
+		return false, waitCh
+	}) {
+		return nil
 	}
+	return found
 }
 
 func (p *fakeControlPipe) lastSentType(typ ControlType) *ControlMessage {
@@ -735,33 +638,17 @@ func (c *fakeClock) Advance(d time.Duration) {
 }
 
 func (c *fakeClock) waitForTimerCountAtLeast(n int, timeout time.Duration) bool {
-	deadline := time.Now().Add(timeout)
-	for {
+	return waitForNotify(timeout, func() (bool, <-chan struct{}) {
 		c.mu.Lock()
 		count := len(c.timers)
 		if count >= n {
 			c.mu.Unlock()
-			return true
+			return true, nil
 		}
 		waitCh := c.notify
 		c.mu.Unlock()
-
-		remaining := time.Until(deadline)
-		if remaining <= 0 {
-			return false
-		}
-		timer := time.NewTimer(remaining)
-		select {
-		case <-waitCh:
-		case <-timer.C:
-		}
-		if !timer.Stop() {
-			select {
-			case <-timer.C:
-			default:
-			}
-		}
-	}
+		return false, waitCh
+	})
 }
 
 func (c *fakeClock) signalLocked() {

@@ -52,7 +52,9 @@ func (m *Manager) handleControl(ctx context.Context, msg ControlMessage) error {
 		m.discoveryTick(ctx)
 		return nil
 	case ControlCallMeMaybe:
-		return m.sendCandidateUpdate(ctx)
+		return m.withDiscoveryLock(func() error {
+			return m.sendCandidateUpdate(ctx)
+		})
 	default:
 		return nil
 	}
