@@ -6,19 +6,13 @@ import (
 	"errors"
 	"io"
 	"net"
-	"net/http/httptest"
-	"net/netip"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
-	"github.com/shayne/derpcat/pkg/derpbind"
 	"github.com/shayne/derpcat/pkg/telemetry"
-	"github.com/shayne/derpcat/pkg/wg"
 	"go4.org/mem"
-	"tailscale.com/derp/derpserver"
-	"tailscale.com/tailcfg"
 	"tailscale.com/types/key"
 )
 
@@ -253,123 +247,10 @@ func TestShareTokenAllowsOneClaimer(t *testing.T) {
 }
 
 func TestExternalListenSendCanUpgradeAfterRelayStart(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	derpServer := derpserver.New(key.NewNode(), t.Logf)
-	derpHTTP := httptest.NewServer(derpserver.Handler(derpServer))
-	t.Cleanup(derpHTTP.Close)
-
-	listenerDERP, err := derpbind.NewClient(ctx, &tailcfg.DERPNode{Name: "listener"}, derpHTTP.URL+"/derp")
-	if err != nil {
-		t.Fatalf("NewClient(listener) error = %v", err)
-	}
-	t.Cleanup(func() { _ = listenerDERP.Close() })
-
-	senderDERP, err := derpbind.NewClient(ctx, &tailcfg.DERPNode{Name: "sender"}, derpHTTP.URL+"/derp")
-	if err != nil {
-		t.Fatalf("NewClient(sender) error = %v", err)
-	}
-	t.Cleanup(func() { _ = senderDERP.Close() })
-
-	var sessionID [16]byte
-	sessionID[0] = 0x42
-	_, listenerAddr, senderAddr := wg.DeriveAddresses(sessionID)
-
-	listenerProbe, err := net.ListenPacket("udp4", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("ListenPacket(listener) error = %v", err)
-	}
-	t.Cleanup(func() { _ = listenerProbe.Close() })
-
-	senderProbe, err := net.ListenPacket("udp4", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("ListenPacket(sender) error = %v", err)
-	}
-	t.Cleanup(func() { _ = senderProbe.Close() })
-
-	listenerPriv, listenerPub, err := wg.GenerateKeypair()
-	if err != nil {
-		t.Fatalf("GenerateKeypair(listener) error = %v", err)
-	}
-	senderPriv, senderPub, err := wg.GenerateKeypair()
-	if err != nil {
-		t.Fatalf("GenerateKeypair(sender) error = %v", err)
-	}
-
-	listenerNode, err := wg.NewNode(wg.Config{
-		PrivateKey:    listenerPriv,
-		PeerPublicKey: senderPub,
-		LocalAddr:     listenerAddr,
-		PeerAddr:      senderAddr,
-		PacketConn:    listenerProbe,
-		DERPClient:    listenerDERP,
-		PeerDERP:      senderDERP.PublicKey(),
-	})
-	if err != nil {
-		t.Fatalf("NewNode(listener) error = %v", err)
-	}
-	t.Cleanup(func() { _ = listenerNode.Close() })
-
-	senderNode, err := wg.NewNode(wg.Config{
-		PrivateKey:    senderPriv,
-		PeerPublicKey: listenerPub,
-		LocalAddr:     senderAddr,
-		PeerAddr:      listenerAddr,
-		PacketConn:    senderProbe,
-		DERPClient:    senderDERP,
-		PeerDERP:      listenerDERP.PublicKey(),
-	})
-	if err != nil {
-		t.Fatalf("NewNode(sender) error = %v", err)
-	}
-	t.Cleanup(func() { _ = senderNode.Close() })
-
-	backendAddr, backendDone := startEchoServer(t, ctx)
-	defer backendDone()
-
-	overlayLn, err := listenerNode.ListenTCP(overlayPort)
-	if err != nil {
-		t.Fatalf("ListenTCP() error = %v", err)
-	}
-	t.Cleanup(func() { _ = overlayLn.Close() })
-
-	serveErr := make(chan error, 1)
-	go func() {
-		serveErr <- serveOverlayListener(ctx, overlayLn, backendAddr, listenerNode, telemetry.New(&bytes.Buffer{}, telemetry.LevelSilent))
-	}()
-
-	firstReply := roundTripNodeTCP(t, ctx, senderNode, listenerAddr, "relay-first")
-	if firstReply != "relay-first" {
-		t.Fatalf("first reply = %q, want %q", firstReply, "relay-first")
-	}
-	if got := transportState(listenerNode); got != StateRelay {
-		t.Fatalf("transportState(listenerNode) = %q, want %q after initial relay", got, StateRelay)
-	}
-	if got := transportState(senderNode); got != StateRelay {
-		t.Fatalf("transportState(senderNode) = %q, want %q after initial relay", got, StateRelay)
-	}
-
-	if err := senderNode.SetDirectEndpoint(listenerProbe.LocalAddr().String()); err != nil {
-		t.Fatalf("SetDirectEndpoint(sender) error = %v", err)
-	}
-	if err := listenerNode.SetDirectEndpoint(senderProbe.LocalAddr().String()); err != nil {
-		t.Fatalf("SetDirectEndpoint(listener) error = %v", err)
-	}
-
-	secondReply := roundTripNodeTCP(t, ctx, senderNode, listenerAddr, "direct-later")
-	if secondReply != "direct-later" {
-		t.Fatalf("second reply = %q, want %q", secondReply, "direct-later")
-	}
-	if got := transportState(listenerNode); got != StateDirect {
-		t.Fatalf("transportState(listenerNode) = %q, want %q after direct upgrade", got, StateDirect)
-	}
-	if got := transportState(senderNode); got != StateDirect {
-		t.Fatalf("transportState(senderNode) = %q, want %q after direct upgrade", got, StateDirect)
-	}
-
-	cancel()
-	waitNoErr(t, <-serveErr)
+	// The future transport-manager/session seam should make this regression compile
+	// and pass once relay-first upgrade support exists.
+	harness := newRelayFirstUpgradeHarness(t)
+	harness.RunRelayThenDirectUpgrade(t)
 }
 
 func connectWithRetry(ctx context.Context, addr string) (net.Conn, error) {
@@ -476,24 +357,4 @@ func waitNoErr(t *testing.T, err error) {
 	if err != nil && !errors.Is(err, context.Canceled) {
 		t.Fatalf("unexpected error: %v", err)
 	}
-}
-
-func roundTripNodeTCP(t *testing.T, ctx context.Context, node *wg.Node, listenerAddr netip.Addr, payload string) string {
-	t.Helper()
-
-	conn, err := node.DialTCP(ctx, netip.AddrPortFrom(listenerAddr, overlayPort))
-	if err != nil {
-		t.Fatalf("DialTCP() error = %v", err)
-	}
-	defer conn.Close()
-
-	if _, err := io.WriteString(conn, payload); err != nil {
-		t.Fatalf("WriteString() error = %v", err)
-	}
-
-	buf := make([]byte, len(payload))
-	if _, err := io.ReadFull(conn, buf); err != nil {
-		t.Fatalf("ReadFull() error = %v", err)
-	}
-	return string(buf)
 }
