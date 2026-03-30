@@ -201,6 +201,9 @@ func sendExternal(ctx context.Context, cfg SendConfig) error {
 	defer transportCleanup()
 	pathEmitter.Watch(transportCtx, transportManager)
 	pathEmitter.Flush(transportManager)
+	if decision.Accept != nil {
+		transportManager.SeedRemoteCandidates(transportCtx, parseCandidateStrings(decision.Accept.Candidates))
+	}
 
 	_, listenerAddr, senderAddr := wg.DeriveAddresses(tok.SessionID)
 	sessionNode, err := wg.NewNode(wg.Config{
@@ -641,6 +644,10 @@ func publicProbeCandidates(ctx context.Context, conn net.PacketConn, dm *tailcfg
 
 func publicProbeAddrs(ctx context.Context, conn net.PacketConn, dm *tailcfg.DERPMap) []net.Addr {
 	raw := publicProbeCandidates(ctx, conn, dm)
+	return parseCandidateStrings(raw)
+}
+
+func parseCandidateStrings(raw []string) []net.Addr {
 	addrs := make([]net.Addr, 0, len(raw))
 	for _, candidate := range raw {
 		addrPort, err := netip.ParseAddrPort(candidate)

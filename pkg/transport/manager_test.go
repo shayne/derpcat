@@ -145,6 +145,46 @@ func TestManagerRestartsDiscoveryWhenDirectBecomesStale(t *testing.T) {
 	}
 }
 
+func TestManagerSeedsRemoteCandidatesWithoutWaitingForDiscoveryTick(t *testing.T) {
+	t.Helper()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	clock := newFakeClock(time.Unix(1700000012, 0))
+	relay := newFakePacketConn(&net.IPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	direct := newFakePacketConn(&net.IPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	relay.useClock(clock)
+	direct.useClock(clock)
+
+	peerCandidate := &net.UDPAddr{IP: net.IPv4(100, 64, 0, 12), Port: 21212}
+	direct.enableResponder(peerCandidate)
+	baseTimers := clock.timerCount()
+
+	mgr := NewManager(ManagerConfig{
+		RelayConn:               relay,
+		DirectConn:              direct,
+		Clock:                   clock,
+		DiscoveryInterval:       1 * time.Second,
+		EndpointRefreshInterval: 2 * time.Second,
+		DirectStaleTimeout:      4 * time.Second,
+	})
+
+	if err := mgr.Start(ctx); err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+	waitForManagerTimers(t, clock, baseTimers, 2)
+
+	mgr.SeedRemoteCandidates(ctx, []net.Addr{peerCandidate})
+
+	if !direct.waitForWritePayloadTo(peerCandidate, discoProbePayload, 200*time.Millisecond) {
+		t.Fatalf("manager did not immediately probe seeded direct candidate %v", peerCandidate)
+	}
+	if !waitForPath(t, mgr, PathDirect, 200*time.Millisecond) {
+		t.Fatalf("PathState() = %v, want %v after seeded direct candidate", mgr.PathState(), PathDirect)
+	}
+}
+
 func TestManagerDemotesAndRediscoversWhenActiveDirectCandidateIsReplaced(t *testing.T) {
 	t.Helper()
 

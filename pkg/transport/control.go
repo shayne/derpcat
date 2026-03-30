@@ -26,6 +26,14 @@ func (m *Manager) MarkDirectBroken() error {
 	return nil
 }
 
+func (m *Manager) SeedRemoteCandidates(ctx context.Context, candidates []net.Addr) {
+	if len(candidates) == 0 {
+		return
+	}
+	m.applyRemoteCandidates(m.now(), candidates)
+	m.requestDiscovery(ctx, false)
+}
+
 func (m *Manager) receiveControlLoop(ctx context.Context) {
 	if m.cfg.ReceiveControl == nil {
 		return
