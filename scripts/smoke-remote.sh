@@ -94,6 +94,16 @@ assert_path_evidence() {
   fi
 }
 
+require_direct_evidence() {
+  local label="$1"
+  local trace="$2"
+
+  if ! grep -q 'connected-direct' <<<"${trace}"; then
+    echo "${label} missing direct promotion evidence" >&2
+    exit 1
+  fi
+}
+
 dump_remote_logs() {
   remote "echo '--- remote err'; sed -n '1,160p' '${remote_base}.err' 2>/dev/null || true; echo '--- remote out'; sed -n '1,160p' '${remote_base}.out' 2>/dev/null || true; echo '--- remote sender err'; sed -n '1,160p' '${remote_base}.sender.err' 2>/dev/null || true; echo '--- remote sender out'; sed -n '1,160p' '${remote_base}.sender.out' 2>/dev/null || true"
 }
@@ -124,8 +134,12 @@ if [[ "${remote_output}" != "${payload_local_to_remote}" ]]; then
   dump_remote_logs >&2
   exit 1
 fi
-assert_path_evidence "local sender" "$(path_trace "${tmp}/local-sender.err")"
-assert_path_evidence "remote listener" "$(remote_path_trace "${remote_base}.err")"
+remote_listener_trace="$(remote_path_trace "${remote_base}.err")"
+local_sender_trace="$(path_trace "${tmp}/local-sender.err")"
+assert_path_evidence "local sender" "${local_sender_trace}"
+assert_path_evidence "remote listener" "${remote_listener_trace}"
+require_direct_evidence "local sender" "${local_sender_trace}"
+require_direct_evidence "remote listener" "${remote_listener_trace}"
 
 payload_remote_to_local="hello ${target}-to-local-$(date +%s)"
 local_listener_log="${tmp}/local-listener.err"
@@ -154,5 +168,9 @@ if [[ "${local_output}" != "${payload_remote_to_local}" ]]; then
   dump_remote_logs >&2
   exit 1
 fi
-assert_path_evidence "local listener" "$(path_trace "${local_listener_log}")"
-assert_path_evidence "remote sender" "$(remote_path_trace "${remote_base}.sender.err")"
+remote_sender_trace="$(remote_path_trace "${remote_base}.sender.err")"
+local_listener_trace="$(path_trace "${local_listener_log}")"
+assert_path_evidence "local listener" "${local_listener_trace}"
+assert_path_evidence "remote sender" "${remote_sender_trace}"
+require_direct_evidence "local listener" "${local_listener_trace}"
+require_direct_evidence "remote sender" "${remote_sender_trace}"

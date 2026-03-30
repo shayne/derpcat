@@ -89,6 +89,16 @@ assert_path_evidence() {
   fi
 }
 
+require_direct_evidence() {
+  local label="$1"
+  local trace="$2"
+
+  if ! grep -q 'connected-direct' <<<"${trace}"; then
+    echo "${label} missing direct promotion evidence" >&2
+    exit 1
+  fi
+}
+
 mise run build
 mise run build-linux-amd64
 scp dist/derpcat-linux-amd64 "root@${target}:${remote_upload}" >/dev/null
@@ -135,5 +145,9 @@ if [[ "${response_two}" != "${shared_content}" ]]; then
 fi
 
 grep -q '^claimed$' "${local_share_log}"
-assert_path_evidence "share" "$(path_trace "${local_share_log}")"
-assert_path_evidence "open" "$(remote_path_trace "${remote_open_err}")"
+share_trace="$(path_trace "${local_share_log}")"
+open_trace="$(remote_path_trace "${remote_open_err}")"
+assert_path_evidence "share" "${share_trace}"
+assert_path_evidence "open" "${open_trace}"
+require_direct_evidence "share" "${share_trace}"
+require_direct_evidence "open" "${open_trace}"

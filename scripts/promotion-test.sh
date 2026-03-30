@@ -36,6 +36,16 @@ path_changed_mid_run() {
   grep -q 'connected-relay' <<<"${trace}" && grep -q 'connected-direct' <<<"${trace}"
 }
 
+require_direct_evidence() {
+  local label="$1"
+  local trace="$2"
+
+  if ! grep -q 'connected-direct' <<<"${trace}"; then
+    echo "${label} missing direct promotion evidence" >&2
+    exit 1
+  fi
+}
+
 cleanup() {
   remote "if [[ -f '${remote_base}.pid' ]]; then kill \$(cat '${remote_base}.pid') 2>/dev/null || true; fi; rm -f '${remote_base}.pid' '${remote_base}.out' '${remote_base}.err'" >/dev/null 2>&1 || true
   rm -rf "${tmp}"
@@ -102,6 +112,8 @@ fi
 [[ "${remote_size}" == "${expected_size}" ]]
 [[ -n "${sender_trace}" ]]
 [[ -n "${listener_trace}" ]]
+require_direct_evidence "sender" "${sender_trace}"
+require_direct_evidence "listener" "${listener_trace}"
 
 echo "target=${target}"
 echo "size_mib=${size_mib}"
