@@ -460,6 +460,7 @@ func TestManagerRetriesAfterTransientReceiveControlError(t *testing.T) {
 	if !controls.waitForReceiveErrorsDrained(200 * time.Millisecond) {
 		t.Fatal("receive control loop did not hit the transient read error")
 	}
+	waitForManagerTimers(t, clock, baseTimers, 3)
 	clock.Advance(250 * time.Millisecond)
 	if !controls.waitForReceiveCount(1, 200*time.Millisecond) {
 		t.Fatal("receive control loop did not recover after transient error")
