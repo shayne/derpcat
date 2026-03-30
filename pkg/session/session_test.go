@@ -77,10 +77,10 @@ func TestSessionPromotesDirectStateWhenProbeSucceeds(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	var listenerOut bytes.Buffer
+	var listenerOut syncBuffer
 	var senderIn bytes.Buffer
-	var listenerStatus bytes.Buffer
-	var senderStatus bytes.Buffer
+	var listenerStatus syncBuffer
+	var senderStatus syncBuffer
 	senderIn.WriteString("hello direct")
 
 	listenerReady := make(chan string, 1)
