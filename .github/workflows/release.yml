@@ -379,7 +379,9 @@ jobs:
           rm -rf dist/downloads
           mkdir -p dist/downloads
           gh run download "$GITHUB_RUN_ID" -R "$GITHUB_REPOSITORY" --dir dist/downloads -n package-artifacts-prod
-          cp dist/downloads/package-artifacts-prod/npm.tgz dist/npm.tgz
+          pkg=$(find dist/downloads -name npm.tgz -print -quit)
+          test -n "$pkg"
+          cp "$pkg" dist/npm.tgz
       - name: Unpack npm artifact
         run: tar -xzf dist/npm.tgz -C dist
       - name: Setup Node
@@ -410,7 +412,9 @@ jobs:
           rm -rf dist/downloads
           mkdir -p dist/downloads
           gh run download "$GITHUB_RUN_ID" -R "$GITHUB_REPOSITORY" --dir dist/downloads -n package-artifacts-dev
-          cp dist/downloads/package-artifacts-dev/npm.tgz dist/npm.tgz
+          pkg=$(find dist/downloads -name npm.tgz -print -quit)
+          test -n "$pkg"
+          cp "$pkg" dist/npm.tgz
       - name: Unpack npm artifact
         run: tar -xzf dist/npm.tgz -C dist
       - name: Setup Node
