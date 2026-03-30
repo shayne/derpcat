@@ -9,41 +9,35 @@ import (
 type ManagerConfig struct {
 	RelayConn  net.PacketConn
 	DirectConn net.PacketConn
-	NoiseConn  net.PacketConn
 }
 
 type Manager struct {
-	mu        sync.Mutex
-	cfg       ManagerConfig
-	state     pathState
-	upgradeCh chan struct{}
-	startOnce sync.Once
+	mu      sync.Mutex
+	cfg     ManagerConfig
+	state   pathState
+	started bool
 }
 
 func NewManager(cfg ManagerConfig) *Manager {
 	return &Manager{
-		cfg:       cfg,
-		state:     newPathState(cfg.RelayConn != nil, cfg.DirectConn != nil),
-		upgradeCh: make(chan struct{}),
+		cfg:   cfg,
+		state: newPathState(cfg.RelayConn != nil, cfg.DirectConn != nil),
 	}
 }
 
 func (m *Manager) Start(ctx context.Context) error {
-	m.startOnce.Do(func() {
-		if m.cfg.DirectConn == nil {
-			return
-		}
+	m.mu.Lock()
+	defer m.mu.Unlock()
 
-		go func() {
-			select {
-			case <-ctx.Done():
-				return
-			default:
-			}
-			m.promoteDirect()
-		}()
-	})
+	if m.started {
+		return nil
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 
+	m.started = true
+	m.state.markDirectReady()
 	return nil
 }
 
@@ -51,14 +45,4 @@ func (m *Manager) PathState() Path {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return m.state.path()
-}
-
-func (m *Manager) promoteDirect() {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	if !m.state.markDirectReady() {
-		return
-	}
-	close(m.upgradeCh)
 }

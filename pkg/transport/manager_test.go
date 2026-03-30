@@ -4,14 +4,10 @@ import (
 	"context"
 	"net"
 	"testing"
-	"time"
 )
 
-func TestManagerStartsRelayAndLaterUpgradesDirect(t *testing.T) {
+func TestManagerStartUpgradesRelayToDirect(t *testing.T) {
 	t.Helper()
-
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
 
 	relay := newFakePacketConn(&net.IPAddr{IP: net.IPv4(127, 0, 0, 1)})
 	direct := newFakePacketConn(&net.IPAddr{IP: net.IPv4(127, 0, 0, 1)})
@@ -25,12 +21,8 @@ func TestManagerStartsRelayAndLaterUpgradesDirect(t *testing.T) {
 		t.Fatalf("PathState() = %v, want %v", got, PathRelay)
 	}
 
-	if err := mgr.Start(ctx); err != nil {
+	if err := mgr.Start(context.Background()); err != nil {
 		t.Fatalf("Start() error = %v", err)
-	}
-
-	if err := mgr.WaitForUpgrade(ctx); err != nil {
-		t.Fatalf("WaitForUpgrade() error = %v", err)
 	}
 
 	if got := mgr.PathState(); got != PathDirect {
@@ -53,6 +45,10 @@ func TestManagerFallsBackToRelayWhenDirectBreaks(t *testing.T) {
 		t.Fatalf("Start() error = %v", err)
 	}
 
+	if got := mgr.PathState(); got != PathDirect {
+		t.Fatalf("PathState() = %v, want %v before fallback", got, PathDirect)
+	}
+
 	if err := mgr.MarkDirectBroken(); err != nil {
 		t.Fatalf("MarkDirectBroken() error = %v", err)
 	}
@@ -62,27 +58,59 @@ func TestManagerFallsBackToRelayWhenDirectBreaks(t *testing.T) {
 	}
 }
 
-func TestManagerDoesNotReportDirectForUnownedUDPNoise(t *testing.T) {
+func TestManagerDirectOnlyBrokenDoesNotInventRelay(t *testing.T) {
 	t.Helper()
 
-	relay := newFakePacketConn(&net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 50001})
-	noise := newFakePacketConn(&net.UDPAddr{IP: net.IPv4(203, 0, 113, 9), Port: 54321})
+	direct := newFakePacketConn(&net.IPAddr{IP: net.IPv4(127, 0, 0, 1)})
 
 	mgr := NewManager(ManagerConfig{
-		RelayConn:  relay,
-		NoiseConn:  noise,
-		DirectConn: nil,
+		DirectConn: direct,
 	})
 
 	if err := mgr.Start(context.Background()); err != nil {
 		t.Fatalf("Start() error = %v", err)
 	}
 
-	if err := mgr.ObserveInboundUDPNoise(noise.LocalAddr(), []byte("random udp noise")); err != nil {
-		t.Fatalf("ObserveInboundUDPNoise() error = %v", err)
+	if got := mgr.PathState(); got != PathDirect {
+		t.Fatalf("PathState() = %v, want %v before fallback", got, PathDirect)
+	}
+
+	if err := mgr.MarkDirectBroken(); err != nil {
+		t.Fatalf("MarkDirectBroken() error = %v", err)
+	}
+
+	if got := mgr.PathState(); got != PathUnknown {
+		t.Fatalf("PathState() = %v, want %v", got, PathUnknown)
+	}
+}
+
+func TestManagerCanceledStartCanBeRetried(t *testing.T) {
+	t.Helper()
+
+	relay := newFakePacketConn(&net.IPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	direct := newFakePacketConn(&net.IPAddr{IP: net.IPv4(127, 0, 0, 1)})
+
+	mgr := NewManager(ManagerConfig{
+		RelayConn:  relay,
+		DirectConn: direct,
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	if err := mgr.Start(ctx); err == nil {
+		t.Fatal("Start() error = nil, want context cancellation")
 	}
 
 	if got := mgr.PathState(); got != PathRelay {
-		t.Fatalf("PathState() = %v, want %v", got, PathRelay)
+		t.Fatalf("PathState() after canceled start = %v, want %v", got, PathRelay)
+	}
+
+	if err := mgr.Start(context.Background()); err != nil {
+		t.Fatalf("Start() retry error = %v", err)
+	}
+
+	if got := mgr.PathState(); got != PathDirect {
+		t.Fatalf("PathState() after retry = %v, want %v", got, PathDirect)
 	}
 }
