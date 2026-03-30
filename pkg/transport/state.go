@@ -163,6 +163,7 @@ func (s *pathState) noteRelay(now time.Time) bool {
 	if next == PathRelay {
 		s.lastRelayAt = now
 	}
+	s.lastEndpointsAt = time.Time{}
 	return changed
 }
 

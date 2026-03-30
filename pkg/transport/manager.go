@@ -9,11 +9,21 @@ import (
 
 type Clock interface {
 	Now() time.Time
+	After(time.Duration) <-chan time.Time
+	AfterFunc(time.Duration, func()) Timer
 }
 
 type realClock struct{}
 
-func (realClock) Now() time.Time { return time.Now() }
+func (realClock) Now() time.Time                         { return time.Now() }
+func (realClock) After(d time.Duration) <-chan time.Time { return time.After(d) }
+func (realClock) AfterFunc(d time.Duration, fn func()) Timer {
+	return time.AfterFunc(d, fn)
+}
+
+type Timer interface {
+	Stop() bool
+}
 
 type ManagerConfig struct {
 	RelayConn               net.PacketConn

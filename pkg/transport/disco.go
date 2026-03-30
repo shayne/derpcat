@@ -20,16 +20,13 @@ var (
 )
 
 func (m *Manager) discoveryLoop(ctx context.Context) {
-	ticker := time.NewTicker(m.discoveryInterval())
-	defer ticker.Stop()
-
 	for {
 		m.discoveryTick(ctx)
 
 		select {
 		case <-ctx.Done():
 			return
-		case <-ticker.C:
+		case <-m.cfg.Clock.After(m.discoveryInterval()):
 		}
 	}
 }
@@ -69,7 +66,7 @@ func (m *Manager) directReadLoop(ctx context.Context) {
 
 	buf := make([]byte, len(discoAckPayload))
 	for {
-		if err := m.cfg.DirectConn.SetReadDeadline(time.Now().Add(m.discoveryInterval())); err != nil {
+		if err := m.cfg.DirectConn.SetReadDeadline(m.now().Add(m.discoveryInterval())); err != nil {
 			return
 		}
 		n, addr, err := m.cfg.DirectConn.ReadFrom(buf)

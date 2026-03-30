@@ -46,6 +46,7 @@ func (m *Manager) handleControl(ctx context.Context, msg ControlMessage) error {
 	switch msg.Type {
 	case ControlCandidates:
 		m.applyRemoteCandidates(m.now(), parseCandidateAddrs(msg.Candidates))
+		m.discoveryTick(ctx)
 		return nil
 	case ControlCallMeMaybe:
 		return m.sendCandidateUpdate(ctx)

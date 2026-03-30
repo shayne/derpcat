@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"net"
+	"slices"
 	"sync"
 	"time"
 )
@@ -22,6 +23,8 @@ type fakePacketConn struct {
 	notify             chan struct{}
 	closed             bool
 	deadline           time.Time
+	deadlineTimer      Timer
+	clock              Clock
 }
 
 func newFakePacketConn(local net.Addr) *fakePacketConn {
@@ -29,6 +32,7 @@ func newFakePacketConn(local net.Addr) *fakePacketConn {
 		local:              local,
 		responderEndpoints: make(map[string]net.Addr),
 		notify:             make(chan struct{}),
+		clock:              realClock{},
 	}
 }
 
@@ -50,29 +54,14 @@ func (c *fakePacketConn) ReadFrom(b []byte) (int, net.Addr, error) {
 		waitCh := c.notify
 		c.mu.Unlock()
 
-		if !deadline.IsZero() && !time.Now().Before(deadline) {
+		if !deadline.IsZero() && !c.clock.Now().Before(deadline) {
 			return 0, nil, timeoutErr{}
 		}
 		if deadline.IsZero() {
 			<-waitCh
 			continue
 		}
-
-		delay := time.Until(deadline)
-		if delay <= 0 {
-			continue
-		}
-		timer := time.NewTimer(delay)
-		select {
-		case <-waitCh:
-		case <-timer.C:
-		}
-		if !timer.Stop() {
-			select {
-			case <-timer.C:
-			default:
-			}
-		}
+		<-waitCh
 	}
 }
 
@@ -113,7 +102,22 @@ func (c *fakePacketConn) LocalAddr() net.Addr { return c.local }
 func (c *fakePacketConn) SetDeadline(t time.Time) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if c.deadlineTimer != nil {
+		c.deadlineTimer.Stop()
+		c.deadlineTimer = nil
+	}
 	c.deadline = t
+	if !t.IsZero() {
+		wait := t.Sub(c.clock.Now())
+		if wait < 0 {
+			wait = 0
+		}
+		c.deadlineTimer = c.clock.AfterFunc(wait, func() {
+			c.mu.Lock()
+			defer c.mu.Unlock()
+			c.signalLocked()
+		})
+	}
 	c.signalLocked()
 	return nil
 }
@@ -121,10 +125,22 @@ func (c *fakePacketConn) SetDeadline(t time.Time) error {
 func (c *fakePacketConn) SetReadDeadline(t time.Time) error { return c.SetDeadline(t) }
 func (c *fakePacketConn) SetWriteDeadline(time.Time) error  { return nil }
 
+func (c *fakePacketConn) useClock(clock Clock) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.clock = clock
+}
+
 func (c *fakePacketConn) enableResponder(addr net.Addr) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.responderEndpoints[addr.String()] = cloneAddr(addr)
+}
+
+func (c *fakePacketConn) enableResponderAfter(clock *fakeClock, d time.Duration, addr net.Addr) {
+	clock.AfterFunc(d, func() {
+		c.enableResponder(addr)
+	})
 }
 
 func (c *fakePacketConn) enqueueRead(payload []byte, addr net.Addr) {
@@ -333,6 +349,18 @@ func (p *fakeControlPipe) enablePeerCandidate(addr net.Addr) {
 	p.peerCandidates = []string{addr.String()}
 }
 
+func (p *fakeControlPipe) enablePeerCandidateAfter(clock *fakeClock, d time.Duration, addr net.Addr) {
+	clock.AfterFunc(d, func() {
+		p.enablePeerCandidate(addr)
+	})
+}
+
+func (p *fakeControlPipe) deliverAfter(clock *fakeClock, d time.Duration, msg ControlMessage) {
+	clock.AfterFunc(d, func() {
+		_ = p.deliver(msg, 50*time.Millisecond)
+	})
+}
+
 func (p *fakeControlPipe) sentCount(typ ControlType) int {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -413,8 +441,116 @@ func (p *fakeControlPipe) waitForSentType(typ ControlType, timeout time.Duration
 	}
 }
 
+func (p *fakeControlPipe) lastSentType(typ ControlType) *ControlMessage {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	for i := len(p.sent) - 1; i >= 0; i-- {
+		if p.sent[i].Type == typ {
+			copyMsg := p.sent[i]
+			return &copyMsg
+		}
+	}
+	return nil
+}
+
 func (p *fakeControlPipe) signalLocked() {
 	next := make(chan struct{})
 	close(p.notify)
 	p.notify = next
+}
+
+type fakeClock struct {
+	mu     sync.Mutex
+	now    time.Time
+	timers []*fakeTimer
+}
+
+type fakeTimer struct {
+	at      time.Time
+	ch      chan time.Time
+	fn      func()
+	stopped bool
+	fired   bool
+}
+
+func newFakeClock(start time.Time) *fakeClock {
+	return &fakeClock{now: start}
+}
+
+func (c *fakeClock) Now() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.now
+}
+
+func (c *fakeClock) After(d time.Duration) <-chan time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	timer := &fakeTimer{
+		at: c.now.Add(d),
+		ch: make(chan time.Time, 1),
+	}
+	c.timers = append(c.timers, timer)
+	return timer.ch
+}
+
+func (c *fakeClock) AfterFunc(d time.Duration, fn func()) Timer {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	timer := &fakeTimer{
+		at: c.now.Add(d),
+		fn: fn,
+	}
+	c.timers = append(c.timers, timer)
+	return timer
+}
+
+func (c *fakeClock) Advance(d time.Duration) {
+	c.mu.Lock()
+	c.now = c.now.Add(d)
+	now := c.now
+	due := make([]*fakeTimer, 0, len(c.timers))
+	remaining := make([]*fakeTimer, 0, len(c.timers))
+	for _, timer := range c.timers {
+		if timer.stopped || timer.fired {
+			continue
+		}
+		if !timer.at.After(now) {
+			timer.fired = true
+			due = append(due, timer)
+			continue
+		}
+		remaining = append(remaining, timer)
+	}
+	slices.SortFunc(due, func(a, b *fakeTimer) int {
+		switch {
+		case a.at.Before(b.at):
+			return -1
+		case a.at.After(b.at):
+			return 1
+		default:
+			return 0
+		}
+	})
+	c.timers = remaining
+	c.mu.Unlock()
+
+	for _, timer := range due {
+		if timer.fn != nil {
+			timer.fn()
+			continue
+		}
+		timer.ch <- timer.at
+	}
+}
+
+func (t *fakeTimer) Stop() bool {
+	if t.fired || t.stopped {
+		return false
+	}
+	t.stopped = true
+	return true
 }
