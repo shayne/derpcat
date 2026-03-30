@@ -26,6 +26,7 @@ func TestManagerUpgradesDirectViaDelayedCallMeMaybe(t *testing.T) {
 	controls.enablePeerCandidateAfter(clock, 3*time.Second, peerCandidate)
 	controls.deliverAfter(clock, 3*time.Second, ControlMessage{Type: ControlCallMeMaybe})
 	direct.enableResponderAfter(clock, 3*time.Second, peerCandidate)
+	baseTimers := clock.timerCount()
 
 	mgr := NewManager(ManagerConfig{
 		RelayConn:               relay,
@@ -46,8 +47,8 @@ func TestManagerUpgradesDirectViaDelayedCallMeMaybe(t *testing.T) {
 	if err := mgr.Start(ctx); err != nil {
 		t.Fatalf("Start() error = %v", err)
 	}
+	waitForManagerTimers(t, clock, baseTimers, 2)
 
-	time.Sleep(20 * time.Millisecond)
 	if controls.sentCount(ControlCallMeMaybe) != 0 {
 		t.Fatal("manager sent discovery traffic before the first scheduled tick")
 	}
@@ -97,6 +98,7 @@ func TestManagerRestartsDiscoveryWhenDirectBecomesStale(t *testing.T) {
 	controls := newFakeControlPipe()
 	controls.enablePeerCandidate(peerCandidate)
 	direct.enableResponder(peerCandidate)
+	baseTimers := clock.timerCount()
 
 	mgr := NewManager(ManagerConfig{
 		DirectConn:              direct,
@@ -111,7 +113,7 @@ func TestManagerRestartsDiscoveryWhenDirectBecomesStale(t *testing.T) {
 	if err := mgr.Start(ctx); err != nil {
 		t.Fatalf("Start() error = %v", err)
 	}
-	time.Sleep(20 * time.Millisecond)
+	waitForManagerTimers(t, clock, baseTimers, 2)
 	if !controls.deliver(ControlMessage{
 		Type:       ControlCandidates,
 		Candidates: []string{peerCandidate.String()},
@@ -154,6 +156,7 @@ func TestManagerFallsBackToRelayAndRetriesDiscovery(t *testing.T) {
 	controls := newFakeControlPipe()
 	controls.enablePeerCandidate(peerCandidate)
 	direct.enableResponder(peerCandidate)
+	baseTimers := clock.timerCount()
 
 	mgr := NewManager(ManagerConfig{
 		RelayConn:               relay,
@@ -169,7 +172,7 @@ func TestManagerFallsBackToRelayAndRetriesDiscovery(t *testing.T) {
 	if err := mgr.Start(ctx); err != nil {
 		t.Fatalf("Start() error = %v", err)
 	}
-	time.Sleep(20 * time.Millisecond)
+	waitForManagerTimers(t, clock, baseTimers, 2)
 
 	clock.Advance(1 * time.Second)
 	if !waitForPath(t, mgr, PathDirect, 200*time.Millisecond) {
@@ -213,6 +216,7 @@ func TestManagerKeepsRefreshingLocallyAfterPeerCandidatesArrive(t *testing.T) {
 	peerCandidate := &net.UDPAddr{IP: net.IPv4(100, 64, 0, 5), Port: 45678}
 	controls := newFakeControlPipe()
 	controls.enablePeerCandidate(peerCandidate)
+	baseTimers := clock.timerCount()
 
 	mgr := NewManager(ManagerConfig{
 		RelayConn:               relay,
@@ -228,7 +232,7 @@ func TestManagerKeepsRefreshingLocallyAfterPeerCandidatesArrive(t *testing.T) {
 	if err := mgr.Start(ctx); err != nil {
 		t.Fatalf("Start() error = %v", err)
 	}
-	time.Sleep(20 * time.Millisecond)
+	waitForManagerTimers(t, clock, baseTimers, 2)
 	clock.Advance(1 * time.Second)
 	if !controls.waitForSentCount(ControlCallMeMaybe, 1, 200*time.Millisecond) {
 		t.Fatal("manager did not send initial call-me-maybe")
@@ -260,6 +264,7 @@ func TestManagerRefreshRetryAfterControlSendFailure(t *testing.T) {
 	direct.useClock(clock)
 	controls := newFakeControlPipe()
 	controls.failNextSend(ControlCandidates)
+	baseTimers := clock.timerCount()
 
 	mgr := NewManager(ManagerConfig{
 		RelayConn:               relay,
@@ -275,12 +280,13 @@ func TestManagerRefreshRetryAfterControlSendFailure(t *testing.T) {
 	if err := mgr.Start(ctx); err != nil {
 		t.Fatalf("Start() error = %v", err)
 	}
-	time.Sleep(20 * time.Millisecond)
+	waitForManagerTimers(t, clock, baseTimers, 2)
 
 	clock.Advance(1 * time.Second)
 	if !controls.waitForSendAttempts(ControlCandidates, 1, 200*time.Millisecond) {
 		t.Fatal("manager did not attempt the first scheduled candidates refresh")
 	}
+	waitForManagerTimers(t, clock, 0, 2)
 
 	clock.Advance(1 * time.Second)
 	if !controls.waitForSendAttempts(ControlCandidates, 2, 200*time.Millisecond) {
@@ -300,6 +306,7 @@ func TestManagerIgnoresAckWithoutOutstandingProbe(t *testing.T) {
 	controls := newFakeControlPipe()
 	peerCandidate := &net.UDPAddr{IP: net.IPv4(100, 64, 0, 6), Port: 56789}
 	direct.failNextWriteTo(peerCandidate)
+	baseTimers := clock.timerCount()
 
 	mgr := NewManager(ManagerConfig{
 		DirectConn:              direct,
@@ -314,7 +321,7 @@ func TestManagerIgnoresAckWithoutOutstandingProbe(t *testing.T) {
 	if err := mgr.Start(ctx); err != nil {
 		t.Fatalf("Start() error = %v", err)
 	}
-	time.Sleep(20 * time.Millisecond)
+	waitForManagerTimers(t, clock, baseTimers, 2)
 	if !controls.deliver(ControlMessage{
 		Type:       ControlCandidates,
 		Candidates: []string{peerCandidate.String()},
@@ -330,8 +337,10 @@ func TestManagerIgnoresAckWithoutOutstandingProbe(t *testing.T) {
 	}
 
 	direct.enqueueRead([]byte("derpcat-ack"), peerCandidate)
-	time.Sleep(20 * time.Millisecond)
 
+	if !waitForPath(t, mgr, PathUnknown, 100*time.Millisecond) {
+		t.Fatalf("PathState() after unsolicited ack = %v, want %v", mgr.PathState(), PathUnknown)
+	}
 	if got := mgr.PathState(); got != PathUnknown {
 		t.Fatalf("PathState() after unsolicited ack = %v, want %v", got, PathUnknown)
 	}
@@ -347,6 +356,7 @@ func TestManagerRespondsToInboundProbeWithAck(t *testing.T) {
 	direct := newFakePacketConn(&net.IPAddr{IP: net.IPv4(127, 0, 0, 1)})
 	direct.useClock(clock)
 	peerCandidate := &net.UDPAddr{IP: net.IPv4(100, 64, 0, 7), Port: 60000}
+	baseTimers := clock.timerCount()
 
 	mgr := NewManager(ManagerConfig{
 		DirectConn:              direct,
@@ -359,7 +369,7 @@ func TestManagerRespondsToInboundProbeWithAck(t *testing.T) {
 	if err := mgr.Start(ctx); err != nil {
 		t.Fatalf("Start() error = %v", err)
 	}
-	time.Sleep(20 * time.Millisecond)
+	waitForManagerTimers(t, clock, baseTimers, 2)
 
 	direct.enqueueRead(discoProbePayload, peerCandidate)
 	if !direct.waitForWritePayloadTo(peerCandidate, discoAckPayload, 200*time.Millisecond) {
@@ -379,6 +389,7 @@ func TestManagerIgnoresUnexpectedDirectNoise(t *testing.T) {
 	relay.useClock(clock)
 	direct.useClock(clock)
 	controls := newFakeControlPipe()
+	baseTimers := clock.timerCount()
 
 	mgr := NewManager(ManagerConfig{
 		RelayConn:               relay,
@@ -394,16 +405,118 @@ func TestManagerIgnoresUnexpectedDirectNoise(t *testing.T) {
 	if err := mgr.Start(ctx); err != nil {
 		t.Fatalf("Start() error = %v", err)
 	}
-	time.Sleep(20 * time.Millisecond)
+	waitForManagerTimers(t, clock, baseTimers, 2)
 
 	direct.enqueueRead([]byte("derpcat-ack"), &net.UDPAddr{IP: net.IPv4(100, 64, 0, 99), Port: 9999})
 	direct.enqueueRead([]byte("udp-noise"), &net.UDPAddr{IP: net.IPv4(100, 64, 0, 100), Port: 10000})
 	clock.Advance(1 * time.Second)
-	time.Sleep(20 * time.Millisecond)
 
+	if !waitForPath(t, mgr, PathRelay, 100*time.Millisecond) {
+		t.Fatalf("PathState() after unexpected direct packets = %v, want %v", mgr.PathState(), PathRelay)
+	}
 	if got := mgr.PathState(); got != PathRelay {
 		t.Fatalf("PathState() after unexpected direct packets = %v, want %v", got, PathRelay)
 	}
+}
+
+func TestManagerRetriesAfterTransientReceiveControlError(t *testing.T) {
+	t.Helper()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	clock := newFakeClock(time.Unix(1700000035, 0))
+	direct := newFakePacketConn(&net.IPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	direct.useClock(clock)
+	controls := newFakeControlPipe()
+	controls.failNextReceive()
+	peerCandidate := &net.UDPAddr{IP: net.IPv4(100, 64, 0, 8), Port: 61000}
+	direct.enableResponder(peerCandidate)
+	baseTimers := clock.timerCount()
+
+	mgr := NewManager(ManagerConfig{
+		DirectConn:              direct,
+		SendControl:             controls.send,
+		ReceiveControl:          controls.receive,
+		Clock:                   clock,
+		DiscoveryInterval:       1 * time.Second,
+		EndpointRefreshInterval: 2 * time.Second,
+		DirectStaleTimeout:      4 * time.Second,
+	})
+
+	if err := mgr.Start(ctx); err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+	waitForManagerTimers(t, clock, baseTimers, 2)
+
+	if !controls.deliver(ControlMessage{
+		Type:       ControlCandidates,
+		Candidates: []string{peerCandidate.String()},
+	}, 200*time.Millisecond) {
+		t.Fatal("failed to deliver candidates after transient receive error")
+	}
+	if !controls.waitForReceiveErrorsDrained(200 * time.Millisecond) {
+		t.Fatal("receive control loop did not hit the transient read error")
+	}
+	clock.Advance(250 * time.Millisecond)
+	if !controls.waitForReceiveCount(1, 200*time.Millisecond) {
+		t.Fatal("receive control loop did not recover after transient error")
+	}
+	if !waitForPath(t, mgr, PathDirect, 200*time.Millisecond) {
+		t.Fatalf("PathState() after transient receive error recovery = %v, want %v", mgr.PathState(), PathDirect)
+	}
+}
+
+func TestManagerSerializesDiscoveryTriggers(t *testing.T) {
+	t.Helper()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	clock := newFakeClock(time.Unix(1700000037, 0))
+	relay := newFakePacketConn(&net.IPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	direct := newFakePacketConn(&net.IPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	relay.useClock(clock)
+	direct.useClock(clock)
+	controls := newFakeControlPipe()
+	controls.blockSend(ControlCandidates)
+	peerCandidate := &net.UDPAddr{IP: net.IPv4(100, 64, 0, 9), Port: 62000}
+	baseTimers := clock.timerCount()
+
+	mgr := NewManager(ManagerConfig{
+		RelayConn:               relay,
+		DirectConn:              direct,
+		SendControl:             controls.send,
+		ReceiveControl:          controls.receive,
+		Clock:                   clock,
+		DiscoveryInterval:       1 * time.Second,
+		EndpointRefreshInterval: 5 * time.Second,
+		DirectStaleTimeout:      4 * time.Second,
+	})
+
+	if err := mgr.Start(ctx); err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+	waitForManagerTimers(t, clock, baseTimers, 2)
+
+	clock.Advance(1 * time.Second)
+	if !controls.waitForSendAttempts(ControlCandidates, 1, 200*time.Millisecond) {
+		t.Fatal("manager did not start the scheduled discovery refresh")
+	}
+	if !controls.deliver(ControlMessage{
+		Type:       ControlCandidates,
+		Candidates: []string{peerCandidate.String()},
+	}, 200*time.Millisecond) {
+		t.Fatal("failed to deliver concurrent peer candidates")
+	}
+	if !controls.waitForReceiveCount(1, 200*time.Millisecond) {
+		t.Fatal("manager did not receive the concurrent candidates control")
+	}
+	if controls.waitForSendAttempts(ControlCandidates, 2, 50*time.Millisecond) {
+		t.Fatal("candidate-triggered discovery overlapped with the in-flight periodic discovery")
+	}
+
+	controls.unblockSend(ControlCandidates)
 }
 
 func TestManagerRelayOnlyStartKeepsRelay(t *testing.T) {
@@ -463,6 +576,15 @@ func TestManagerCanceledStartCanBeRetried(t *testing.T) {
 
 	if got := mgr.PathState(); got != PathRelay {
 		t.Fatalf("PathState() after retry = %v, want %v before discovery", got, PathRelay)
+	}
+}
+
+func waitForManagerTimers(t *testing.T, clock *fakeClock, base, added int) {
+	t.Helper()
+
+	want := base + added
+	if !clock.waitForTimerCountAtLeast(want, 200*time.Millisecond) {
+		t.Fatalf("fake clock armed %d timers, want at least %d", clock.timerCount(), want)
 	}
 }
 

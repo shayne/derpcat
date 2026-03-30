@@ -280,7 +280,10 @@ type fakeControlPipe struct {
 	inbound        chan []byte
 	sent           []ControlMessage
 	sendAttempts   map[ControlType]int
+	receiveCount   int
 	failNextByType map[ControlType]int
+	receiveErrors  int
+	blockByType    map[ControlType]chan struct{}
 	peerCandidates []string
 	notify         chan struct{}
 }
@@ -290,6 +293,7 @@ func newFakeControlPipe() *fakeControlPipe {
 		inbound:        make(chan []byte, 16),
 		sendAttempts:   make(map[ControlType]int),
 		failNextByType: make(map[ControlType]int),
+		blockByType:    make(map[ControlType]chan struct{}),
 		notify:         make(chan struct{}),
 	}
 }
@@ -307,6 +311,7 @@ func (p *fakeControlPipe) send(ctx context.Context, msg ControlMessage) error {
 
 	p.mu.Lock()
 	p.sendAttempts[decoded.Type]++
+	blockCh := p.blockByType[decoded.Type]
 	if p.failNextByType[decoded.Type] > 0 {
 		p.failNextByType[decoded.Type]--
 		p.signalLocked()
@@ -317,6 +322,14 @@ func (p *fakeControlPipe) send(ctx context.Context, msg ControlMessage) error {
 	peerCandidates := append([]string(nil), p.peerCandidates...)
 	p.signalLocked()
 	p.mu.Unlock()
+
+	if blockCh != nil {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-blockCh:
+		}
+	}
 
 	if decoded.Type == ControlCallMeMaybe && len(peerCandidates) > 0 {
 		if p.deliver(ControlMessage{
@@ -337,6 +350,15 @@ func (p *fakeControlPipe) send(ctx context.Context, msg ControlMessage) error {
 }
 
 func (p *fakeControlPipe) receive(ctx context.Context) (ControlMessage, error) {
+	p.mu.Lock()
+	if p.receiveErrors > 0 {
+		p.receiveErrors--
+		p.signalLocked()
+		p.mu.Unlock()
+		return ControlMessage{}, timeoutErr{}
+	}
+	p.mu.Unlock()
+
 	select {
 	case <-ctx.Done():
 		return ControlMessage{}, ctx.Err()
@@ -345,6 +367,10 @@ func (p *fakeControlPipe) receive(ctx context.Context) (ControlMessage, error) {
 		if err := json.Unmarshal(wire, &msg); err != nil {
 			return ControlMessage{}, err
 		}
+		p.mu.Lock()
+		p.receiveCount++
+		p.signalLocked()
+		p.mu.Unlock()
 		return msg, nil
 	}
 }
@@ -410,12 +436,97 @@ func (p *fakeControlPipe) failNextSend(typ ControlType) {
 	p.failNextByType[typ]++
 }
 
+func (p *fakeControlPipe) failNextReceive() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.receiveErrors++
+}
+
+func (p *fakeControlPipe) blockSend(typ ControlType) chan struct{} {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	ch := make(chan struct{})
+	p.blockByType[typ] = ch
+	return ch
+}
+
+func (p *fakeControlPipe) unblockSend(typ ControlType) {
+	p.mu.Lock()
+	ch := p.blockByType[typ]
+	delete(p.blockByType, typ)
+	p.signalLocked()
+	p.mu.Unlock()
+	if ch != nil {
+		close(ch)
+	}
+}
+
 func (p *fakeControlPipe) waitForSendAttempts(typ ControlType, n int, timeout time.Duration) bool {
 	deadline := time.Now().Add(timeout)
 	for {
 		p.mu.Lock()
 		count := p.sendAttempts[typ]
 		if count >= n {
+			p.mu.Unlock()
+			return true
+		}
+		waitCh := p.notify
+		p.mu.Unlock()
+
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			return false
+		}
+		timer := time.NewTimer(remaining)
+		select {
+		case <-waitCh:
+		case <-timer.C:
+		}
+		if !timer.Stop() {
+			select {
+			case <-timer.C:
+			default:
+			}
+		}
+	}
+}
+
+func (p *fakeControlPipe) waitForReceiveCount(n int, timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	for {
+		p.mu.Lock()
+		count := p.receiveCount
+		if count >= n {
+			p.mu.Unlock()
+			return true
+		}
+		waitCh := p.notify
+		p.mu.Unlock()
+
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			return false
+		}
+		timer := time.NewTimer(remaining)
+		select {
+		case <-waitCh:
+		case <-timer.C:
+		}
+		if !timer.Stop() {
+			select {
+			case <-timer.C:
+			default:
+			}
+		}
+	}
+}
+
+func (p *fakeControlPipe) waitForReceiveErrorsDrained(timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	for {
+		p.mu.Lock()
+		remainingErrors := p.receiveErrors
+		if remainingErrors == 0 {
 			p.mu.Unlock()
 			return true
 		}
@@ -530,6 +641,7 @@ type fakeClock struct {
 	mu     sync.Mutex
 	now    time.Time
 	timers []*fakeTimer
+	notify chan struct{}
 }
 
 type fakeTimer struct {
@@ -541,13 +653,19 @@ type fakeTimer struct {
 }
 
 func newFakeClock(start time.Time) *fakeClock {
-	return &fakeClock{now: start}
+	return &fakeClock{now: start, notify: make(chan struct{})}
 }
 
 func (c *fakeClock) Now() time.Time {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.now
+}
+
+func (c *fakeClock) timerCount() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return len(c.timers)
 }
 
 func (c *fakeClock) After(d time.Duration) <-chan time.Time {
@@ -559,6 +677,7 @@ func (c *fakeClock) After(d time.Duration) <-chan time.Time {
 		ch: make(chan time.Time, 1),
 	}
 	c.timers = append(c.timers, timer)
+	c.signalLocked()
 	return timer.ch
 }
 
@@ -571,6 +690,7 @@ func (c *fakeClock) AfterFunc(d time.Duration, fn func()) Timer {
 		fn: fn,
 	}
 	c.timers = append(c.timers, timer)
+	c.signalLocked()
 	return timer
 }
 
@@ -602,6 +722,7 @@ func (c *fakeClock) Advance(d time.Duration) {
 		}
 	})
 	c.timers = remaining
+	c.signalLocked()
 	c.mu.Unlock()
 
 	for _, timer := range due {
@@ -611,6 +732,42 @@ func (c *fakeClock) Advance(d time.Duration) {
 		}
 		timer.ch <- timer.at
 	}
+}
+
+func (c *fakeClock) waitForTimerCountAtLeast(n int, timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	for {
+		c.mu.Lock()
+		count := len(c.timers)
+		if count >= n {
+			c.mu.Unlock()
+			return true
+		}
+		waitCh := c.notify
+		c.mu.Unlock()
+
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			return false
+		}
+		timer := time.NewTimer(remaining)
+		select {
+		case <-waitCh:
+		case <-timer.C:
+		}
+		if !timer.Stop() {
+			select {
+			case <-timer.C:
+			default:
+			}
+		}
+	}
+}
+
+func (c *fakeClock) signalLocked() {
+	next := make(chan struct{})
+	close(c.notify)
+	c.notify = next
 }
 
 func (t *fakeTimer) Stop() bool {

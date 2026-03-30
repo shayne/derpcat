@@ -34,7 +34,10 @@ func (m *Manager) receiveControlLoop(ctx context.Context) {
 			if ctx.Err() != nil {
 				return
 			}
-			return
+			if !m.waitForNextControlRead(ctx) {
+				return
+			}
+			continue
 		}
 		if err := m.handleControl(ctx, msg); err != nil && ctx.Err() != nil {
 			return
@@ -115,4 +118,21 @@ func stringifyCandidates(addrs []net.Addr) []string {
 		out = append(out, addr.String())
 	}
 	return out
+}
+
+func (m *Manager) waitForNextControlRead(ctx context.Context) bool {
+	backoff := m.discoveryInterval() / 4
+	if backoff <= 0 {
+		backoff = 50 * time.Millisecond
+	}
+	if backoff > 250*time.Millisecond {
+		backoff = 250 * time.Millisecond
+	}
+
+	select {
+	case <-ctx.Done():
+		return false
+	case <-m.cfg.Clock.After(backoff):
+		return true
+	}
 }

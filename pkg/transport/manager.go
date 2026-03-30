@@ -38,10 +38,11 @@ type ManagerConfig struct {
 }
 
 type Manager struct {
-	mu      sync.Mutex
-	cfg     ManagerConfig
-	state   pathState
-	started bool
+	mu          sync.Mutex
+	discoveryMu sync.Mutex
+	cfg         ManagerConfig
+	state       pathState
+	started     bool
 }
 
 func NewManager(cfg ManagerConfig) *Manager {

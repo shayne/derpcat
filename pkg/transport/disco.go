@@ -32,6 +32,9 @@ func (m *Manager) discoveryLoop(ctx context.Context) {
 }
 
 func (m *Manager) discoveryTick(ctx context.Context) {
+	m.discoveryMu.Lock()
+	defer m.discoveryMu.Unlock()
+
 	if ctx.Err() != nil {
 		return
 	}
