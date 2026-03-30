@@ -33,14 +33,12 @@ type Client struct {
 }
 
 type packetSubscriber struct {
-	filter func(Packet) bool
-	ch     chan Packet
-	mode   subscriberMode
-	notify chan struct{}
-	mu     sync.Mutex
-	queue  []Packet
-	closed bool
-	once   sync.Once
+	filter  func(Packet) bool
+	ch      chan Packet
+	mode    subscriberMode
+	queueCh chan Packet
+	done    chan struct{}
+	once    sync.Once
 }
 
 type subscriberMode uint8
@@ -49,6 +47,8 @@ const (
 	subscriberLossy subscriberMode = iota
 	subscriberLossless
 )
+
+const losslessSubscriberQueueSize = 64
 
 func NewClient(ctx context.Context, node *tailcfg.DERPNode, serverURL string) (*Client, error) {
 	if node == nil {
@@ -117,7 +117,8 @@ func (c *Client) subscribe(filter func(Packet) bool, mode subscriberMode) (<-cha
 		mode:   mode,
 	}
 	if mode == subscriberLossless {
-		sub.notify = make(chan struct{}, 1)
+		sub.queueCh = make(chan Packet, losslessSubscriberQueueSize)
+		sub.done = make(chan struct{})
 		go sub.run(c.stopCh)
 	}
 
@@ -213,11 +214,16 @@ func (c *Client) recvLoop() {
 
 func (c *Client) dispatchSubscriber(pkt Packet) bool {
 	c.subMu.RLock()
-	defer c.subMu.RUnlock()
+	matches := make([]*packetSubscriber, 0, len(c.subscribers))
 	for _, sub := range c.subscribers {
 		if !sub.filter(pkt) {
 			continue
 		}
+		matches = append(matches, sub)
+	}
+	c.subMu.RUnlock()
+
+	for _, sub := range matches {
 		if c.tryDeliverSubscriber(sub, pkt) {
 			return true
 		}
@@ -227,7 +233,7 @@ func (c *Client) dispatchSubscriber(pkt Packet) bool {
 
 func (c *Client) tryDeliverSubscriber(sub *packetSubscriber, pkt Packet) bool {
 	if sub.mode == subscriberLossless {
-		return sub.enqueue(pkt)
+		return sub.enqueue(c.stopCh, pkt)
 	}
 	ch := sub.ch
 	select {
@@ -252,75 +258,47 @@ func (c *Client) tryDeliverSubscriber(sub *packetSubscriber, pkt Packet) bool {
 	return true
 }
 
-func (s *packetSubscriber) enqueue(pkt Packet) bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.closed {
-		return true
-	}
-	s.queue = append(s.queue, pkt)
-	s.signalLocked()
-	return true
-}
-
-func (s *packetSubscriber) signalLocked() {
+func (s *packetSubscriber) enqueue(stopCh <-chan struct{}, pkt Packet) bool {
 	select {
-	case s.notify <- struct{}{}:
-	default:
+	case s.queueCh <- pkt:
+		return true
+	case <-s.done:
+		return true
+	case <-stopCh:
+		return true
 	}
 }
 
 func (s *packetSubscriber) close() {
-	s.mu.Lock()
-	if s.closed {
-		s.mu.Unlock()
+	if s.mode == subscriberLossless {
+		s.once.Do(func() {
+			close(s.done)
+		})
 		return
 	}
-	s.closed = true
-	if s.mode == subscriberLossless {
-		s.signalLocked()
-	}
-	s.mu.Unlock()
-	if s.mode == subscriberLossy {
-		s.finalize()
-	}
-}
-
-func (s *packetSubscriber) finalize() {
 	s.once.Do(func() {
 		close(s.ch)
 	})
 }
 
 func (s *packetSubscriber) run(stopCh <-chan struct{}) {
-	defer s.finalize()
+	defer s.once.Do(func() {
+		close(s.ch)
+	})
 	for {
 		select {
-		case <-s.notify:
-		case <-stopCh:
-			return
-		}
-
-		for {
-			s.mu.Lock()
-			if len(s.queue) == 0 {
-				closed := s.closed
-				s.mu.Unlock()
-				if closed {
-					return
-				}
-				break
-			}
-			pkt := s.queue[0]
-			s.queue[0] = Packet{}
-			s.queue = s.queue[1:]
-			s.mu.Unlock()
-
+		case pkt := <-s.queueCh:
 			select {
 			case s.ch <- pkt:
+			case <-s.done:
+				return
 			case <-stopCh:
 				return
 			}
+		case <-s.done:
+			return
+		case <-stopCh:
+			return
 		}
 	}
 }

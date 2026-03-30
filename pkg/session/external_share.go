@@ -320,9 +320,12 @@ func serveOverlayListenerWithClaimRejections(
 	emitter *telemetry.Emitter,
 	claimErrCh <-chan error,
 ) error {
+	serveCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
 	overlayErrCh := make(chan error, 1)
 	go func() {
-		overlayErrCh <- serveOverlayListener(ctx, listener, targetAddr, emitter)
+		overlayErrCh <- serveOverlayListener(serveCtx, listener, targetAddr, emitter)
 	}()
 
 	for {
@@ -335,6 +338,7 @@ func serveOverlayListenerWithClaimRejections(
 				continue
 			}
 			if err != nil {
+				cancel()
 				_ = listener.Close()
 				<-overlayErrCh
 				return err
