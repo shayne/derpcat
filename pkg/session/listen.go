@@ -25,13 +25,16 @@ type relayMessage struct {
 }
 
 type relaySession struct {
-	mailbox   chan relayMessage
-	probeConn net.PacketConn
-	derp      *derpbind.Client
-	token     token.Token
-	gate      *rendezvous.Gate
-	derpMap   *tailcfg.DERPMap
-	wgPrivate [32]byte
+	mailbox      chan relayMessage
+	probeConn    net.PacketConn
+	derp         *derpbind.Client
+	token        token.Token
+	gate         *rendezvous.Gate
+	derpMap      *tailcfg.DERPMap
+	wgPrivate    [32]byte
+	claimMu      sync.Mutex
+	claimed      bool
+	shareClaimCh chan shareClaim
 }
 
 func issueLocalToken() (string, *relaySession, error) {
@@ -50,7 +53,7 @@ func issueLocalToken() (string, *relaySession, error) {
 		SessionID:    sessionID,
 		ExpiresUnix:  time.Now().Add(10 * time.Minute).Unix(),
 		BearerSecret: bearerSecret,
-		Capabilities: token.CapabilityStdio | token.CapabilityTCP,
+		Capabilities: token.CapabilityStdio,
 	})
 	if err != nil {
 		return "", nil, err

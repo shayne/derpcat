@@ -60,17 +60,6 @@ func TestSendRejectsTrailingArgs(t *testing.T) {
 	}
 }
 
-func TestSendRejectsMutuallyExclusiveTCPFlags(t *testing.T) {
-	var stdout, stderr bytes.Buffer
-	code := runSend([]string{"token-value", "--tcp-listen", "127.0.0.1:7000", "--tcp-connect", "127.0.0.1:9000"}, telemetry.LevelDefault, nil, &stdout, &stderr)
-	if code != 2 {
-		t.Fatalf("runSend() = %d, want 2", code)
-	}
-	if got := stderr.String(); got != "send: --tcp-listen and --tcp-connect are mutually exclusive\n" {
-		t.Fatalf("stderr = %q, want mutual exclusion error", got)
-	}
-}
-
 func assertSendHelpText(t *testing.T, got string) {
 	t.Helper()
 	for _, want := range []string{
@@ -79,10 +68,8 @@ func assertSendHelpText(t *testing.T, got string) {
 		"ARGUMENTS:",
 		"TOKEN",
 		"--force-relay",
-		"--tcp-listen",
-		"--tcp-connect",
 		"cat file | derpcat send <token>",
-		"derpcat send <token> --tcp-listen 127.0.0.1:7000",
+		"printf 'hello' | derpcat send <token>",
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("stderr = %q, want help mentioning %q", got, want)

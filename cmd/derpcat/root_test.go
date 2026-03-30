@@ -85,6 +85,42 @@ func TestRunHelpSendShowsSendHelp(t *testing.T) {
 	}
 }
 
+func TestRunHelpShareShowsShareHelp(t *testing.T) {
+	for _, args := range [][]string{{"help", "share"}, {"share", "--help"}} {
+		t.Run(strings.Join(args, "_"), func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			code := run(args, nil, &stdout, &stderr)
+			if code != 0 {
+				t.Fatalf("run() = %d, want 0", code)
+			}
+			if got, want := stderr.String(), shareHelpText(); got != want {
+				t.Fatalf("stderr = %q, want exact share help %q", got, want)
+			}
+			if got := stdout.String(); got != "" {
+				t.Fatalf("stdout = %q, want empty", got)
+			}
+		})
+	}
+}
+
+func TestRunHelpOpenShowsOpenHelp(t *testing.T) {
+	for _, args := range [][]string{{"help", "open"}, {"open", "--help"}} {
+		t.Run(strings.Join(args, "_"), func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			code := run(args, nil, &stdout, &stderr)
+			if code != 0 {
+				t.Fatalf("run() = %d, want 0", code)
+			}
+			if got, want := stderr.String(), openHelpText(); got != want {
+				t.Fatalf("stderr = %q, want exact open help %q", got, want)
+			}
+			if got := stdout.String(); got != "" {
+				t.Fatalf("stdout = %q, want empty", got)
+			}
+		})
+	}
+}
+
 func TestRunVersionCommandSucceeds(t *testing.T) {
 	origVersion, origCommit, origBuildDate := version, commit, buildDate
 	t.Cleanup(func() {
@@ -156,6 +192,28 @@ func TestRunRejectsUnknownRootFlag(t *testing.T) {
 				t.Fatalf("stdout = %q, want empty", got)
 			}
 		})
+	}
+}
+
+func TestRunListenRejectsRemovedTCPFlags(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"listen", "--tcp-connect", "127.0.0.1:3000"}, nil, &stdout, &stderr)
+	if code != 2 {
+		t.Fatalf("run() = %d, want 2", code)
+	}
+	if !strings.HasPrefix(stderr.String(), "unknown flag: --tcp-connect\n") {
+		t.Fatalf("stderr = %q, want removed-flag parse error", stderr.String())
+	}
+}
+
+func TestRunSendRejectsRemovedTCPFlags(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"send", "token-value", "--tcp-listen", "127.0.0.1:8080"}, nil, &stdout, &stderr)
+	if code != 2 {
+		t.Fatalf("run() = %d, want 2", code)
+	}
+	if !strings.HasPrefix(stderr.String(), "unknown flag: --tcp-listen\n") {
+		t.Fatalf("stderr = %q, want removed-flag parse error", stderr.String())
 	}
 }
 
@@ -329,6 +387,8 @@ func assertRootHelp(t *testing.T, got string) {
 		"EXAMPLES:",
 		"derpcat listen",
 		"derpcat send <token>",
+		"derpcat share 127.0.0.1:3000",
+		"derpcat open <token>",
 		"derpcat version",
 	} {
 		if !strings.Contains(got, want) {

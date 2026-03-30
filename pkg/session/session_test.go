@@ -3,9 +3,11 @@ package session
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"net"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -39,10 +41,9 @@ func TestRelayOnlyStdioRoundTrip(t *testing.T) {
 	listenerReady := make(chan string, 1)
 	go func() {
 		token, err := Listen(ctx, ListenConfig{
-			Attachment: nil,
-			Emitter:    telemetry.New(&bytes.Buffer{}, telemetry.LevelSilent),
-			TokenSink:  listenerReady,
-			StdioOut:   &listenerOut,
+			Emitter:   telemetry.New(&bytes.Buffer{}, telemetry.LevelSilent),
+			TokenSink: listenerReady,
+			StdioOut:  &listenerOut,
 		})
 		if err != nil || token == "" {
 			t.Errorf("Listen() err=%v token=%q", err, token)
@@ -106,173 +107,143 @@ func TestSessionPromotesDirectStateWhenProbeSucceeds(t *testing.T) {
 	}
 }
 
-func TestRelayOnlyTCPConnectRoundTrip(t *testing.T) {
+func TestShareOpenUsesEphemeralLocalBind(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	sourceLn, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("net.Listen(source) error = %v", err)
-	}
-	defer sourceLn.Close()
+	backendAddr, backendDone := startEchoServer(t, ctx)
 
-	sinkLn, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("net.Listen(sink) error = %v", err)
-	}
-	defer sinkLn.Close()
-
-	const payload = "hello over tcp-connect"
-	sourceDone := make(chan error, 1)
+	tokenSink := make(chan string, 1)
+	shareErr := make(chan error, 1)
 	go func() {
-		conn, err := sourceLn.Accept()
-		if err != nil {
-			sourceDone <- err
-			return
-		}
-		defer conn.Close()
-		_, err = io.WriteString(conn, payload)
-		sourceDone <- err
-	}()
-
-	sinkPayload := make(chan string, 1)
-	sinkDone := make(chan error, 1)
-	go func() {
-		conn, err := sinkLn.Accept()
-		if err != nil {
-			sinkDone <- err
-			return
-		}
-		defer conn.Close()
-		buf, err := io.ReadAll(conn)
-		if err != nil {
-			sinkDone <- err
-			return
-		}
-		sinkPayload <- string(buf)
-		sinkDone <- nil
-	}()
-
-	listenerReady := make(chan string, 1)
-	listenerErr := make(chan error, 1)
-	go func() {
-		_, err := Listen(ctx, ListenConfig{
+		_, err := Share(ctx, ShareConfig{
 			Emitter:    telemetry.New(&bytes.Buffer{}, telemetry.LevelSilent),
-			TokenSink:  listenerReady,
-			TCPConnect: sinkLn.Addr().String(),
+			TokenSink:  tokenSink,
+			TargetAddr: backendAddr,
 		})
-		listenerErr <- err
+		shareErr <- err
 	}()
 
-	token := <-listenerReady
-	if err := Send(ctx, SendConfig{
-		Token:      token,
-		Emitter:    telemetry.New(&bytes.Buffer{}, telemetry.LevelSilent),
-		TCPConnect: sourceLn.Addr().String(),
-		ForceRelay: true,
-	}); err != nil {
-		t.Fatalf("Send() error = %v", err)
+	tok := <-tokenSink
+	bindSink := make(chan string, 1)
+	openErr := make(chan error, 1)
+	go func() {
+		openErr <- Open(ctx, OpenConfig{
+			Token:        tok,
+			BindAddrSink: bindSink,
+			Emitter:      telemetry.New(&bytes.Buffer{}, telemetry.LevelSilent),
+		})
+	}()
+
+	bindAddr := <-bindSink
+	if !strings.HasPrefix(bindAddr, "127.0.0.1:") {
+		t.Fatalf("bindAddr = %q, want ephemeral localhost listener", bindAddr)
+	}
+	if strings.HasSuffix(bindAddr, ":0") {
+		t.Fatalf("bindAddr = %q, want assigned port", bindAddr)
 	}
 
-	if err := <-sourceDone; err != nil {
-		t.Fatalf("source server error = %v", err)
-	}
-	if err := <-sinkDone; err != nil {
-		t.Fatalf("sink server error = %v", err)
-	}
-	if got := <-sinkPayload; got != payload {
-		t.Fatalf("sink payload = %q, want %q", got, payload)
-	}
-	if err := <-listenerErr; err != nil {
-		t.Fatalf("Listen() error = %v", err)
-	}
+	cancel()
+	waitNoErr(t, <-openErr)
+	waitNoErr(t, <-shareErr)
+	backendDone()
 }
 
-func TestRelayOnlyTCPListenRoundTrip(t *testing.T) {
+func TestShareOpenForwardsSequentialConnections(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	sourceAddr := reserveTCPAddr(t)
-	sinkAddr := reserveTCPAddr(t)
-	const payload = "hello over tcp-listen"
+	backendAddr, backendDone := startEchoServer(t, ctx)
+	openAddr, stop, shareErr, openErr := startSharedSession(t, ctx, backendAddr, "")
 
-	listenerReady := make(chan string, 1)
-	listenerErr := make(chan error, 1)
-	go func() {
-		_, err := Listen(ctx, ListenConfig{
-			Emitter:   telemetry.New(&bytes.Buffer{}, telemetry.LevelSilent),
-			TokenSink: listenerReady,
-			TCPListen: sinkAddr,
-		})
-		listenerErr <- err
-	}()
-
-	token := <-listenerReady
-
-	received := make(chan string, 1)
-	sinkClientErr := make(chan error, 1)
-	go func() {
-		conn, err := connectWithRetry(ctx, sinkAddr)
-		if err != nil {
-			sinkClientErr <- err
-			return
+	for _, payload := range []string{"alpha", "beta", "gamma"} {
+		reply := roundTripTCP(t, ctx, openAddr, payload)
+		if reply != payload {
+			t.Fatalf("reply = %q, want %q", reply, payload)
 		}
-		defer conn.Close()
-		buf, err := io.ReadAll(conn)
-		if err != nil {
-			sinkClientErr <- err
-			return
-		}
-		received <- string(buf)
-		sinkClientErr <- nil
-	}()
-
-	sendErr := make(chan error, 1)
-	go func() {
-		sendErr <- Send(ctx, SendConfig{
-			Token:      token,
-			Emitter:    telemetry.New(&bytes.Buffer{}, telemetry.LevelSilent),
-			TCPListen:  sourceAddr,
-			ForceRelay: true,
-		})
-	}()
-
-	sourceConn, err := connectWithRetry(ctx, sourceAddr)
-	if err != nil {
-		t.Fatalf("connectWithRetry(source) error = %v", err)
-	}
-	if _, err := io.WriteString(sourceConn, payload); err != nil {
-		t.Fatalf("sourceConn WriteString() error = %v", err)
-	}
-	if err := sourceConn.Close(); err != nil {
-		t.Fatalf("sourceConn Close() error = %v", err)
 	}
 
-	if err := <-sendErr; err != nil {
-		t.Fatalf("Send() error = %v", err)
-	}
-	if err := <-sinkClientErr; err != nil {
-		t.Fatalf("sink client error = %v", err)
-	}
-	if got := <-received; got != payload {
-		t.Fatalf("received = %q, want %q", got, payload)
-	}
-	if err := <-listenerErr; err != nil {
-		t.Fatalf("Listen() error = %v", err)
-	}
+	stop()
+	waitNoErr(t, <-openErr)
+	waitNoErr(t, <-shareErr)
+	backendDone()
 }
 
-func reserveTCPAddr(t *testing.T) string {
-	t.Helper()
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("net.Listen() error = %v", err)
+func TestShareOpenForwardsConcurrentConnections(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	backendAddr, backendDone := startEchoServer(t, ctx)
+	openAddr, stop, shareErr, openErr := startSharedSession(t, ctx, backendAddr, "")
+
+	payloads := []string{"one", "two", "three", "four", "five"}
+	var wg sync.WaitGroup
+	errCh := make(chan error, len(payloads))
+	for _, payload := range payloads {
+		wg.Add(1)
+		go func(payload string) {
+			defer wg.Done()
+			reply := roundTripTCP(t, ctx, openAddr, payload)
+			if reply != payload {
+				errCh <- errors.New("reply mismatch")
+			}
+		}(payload)
 	}
-	addr := ln.Addr().String()
-	if err := ln.Close(); err != nil {
-		t.Fatalf("Close() error = %v", err)
+	wg.Wait()
+	close(errCh)
+	for err := range errCh {
+		if err != nil {
+			t.Fatal(err)
+		}
 	}
-	return addr
+
+	stop()
+	waitNoErr(t, <-openErr)
+	waitNoErr(t, <-shareErr)
+	backendDone()
+}
+
+func TestShareTokenAllowsOneClaimer(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	backendAddr, backendDone := startEchoServer(t, ctx)
+
+	tokenSink := make(chan string, 1)
+	shareErr := make(chan error, 1)
+	go func() {
+		_, err := Share(ctx, ShareConfig{
+			Emitter:    telemetry.New(&bytes.Buffer{}, telemetry.LevelSilent),
+			TokenSink:  tokenSink,
+			TargetAddr: backendAddr,
+		})
+		shareErr <- err
+	}()
+
+	tok := <-tokenSink
+	bindSink := make(chan string, 1)
+	openErr := make(chan error, 1)
+	go func() {
+		openErr <- Open(ctx, OpenConfig{
+			Token:        tok,
+			BindAddrSink: bindSink,
+			Emitter:      telemetry.New(&bytes.Buffer{}, telemetry.LevelSilent),
+		})
+	}()
+	<-bindSink
+
+	err := Open(ctx, OpenConfig{
+		Token:   tok,
+		Emitter: telemetry.New(&bytes.Buffer{}, telemetry.LevelSilent),
+	})
+	if !errors.Is(err, ErrSessionClaimed) {
+		t.Fatalf("Open() error = %v, want %v", err, ErrSessionClaimed)
+	}
+
+	cancel()
+	waitNoErr(t, <-openErr)
+	waitNoErr(t, <-shareErr)
+	backendDone()
 }
 
 func connectWithRetry(ctx context.Context, addr string) (net.Conn, error) {
@@ -293,5 +264,90 @@ func connectWithRetry(ctx context.Context, addr string) (net.Conn, error) {
 		case <-ctx.Done():
 			return nil, ctx.Err()
 		}
+	}
+}
+
+func startEchoServer(t *testing.T, ctx context.Context) (string, func()) {
+	t.Helper()
+
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("net.Listen() error = %v", err)
+	}
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for {
+			conn, err := acceptNetListener(ctx, listener)
+			if err != nil {
+				return
+			}
+			go func(conn net.Conn) {
+				defer conn.Close()
+				_, _ = io.Copy(conn, conn)
+			}(conn)
+		}
+	}()
+
+	return listener.Addr().String(), func() {
+		_ = listener.Close()
+		<-done
+	}
+}
+
+func startSharedSession(t *testing.T, ctx context.Context, backendAddr, bindAddr string) (string, func(), <-chan error, <-chan error) {
+	t.Helper()
+
+	sessionCtx, cancel := context.WithCancel(ctx)
+	tokenSink := make(chan string, 1)
+	shareErr := make(chan error, 1)
+	go func() {
+		_, err := Share(sessionCtx, ShareConfig{
+			Emitter:    telemetry.New(&bytes.Buffer{}, telemetry.LevelSilent),
+			TokenSink:  tokenSink,
+			TargetAddr: backendAddr,
+		})
+		shareErr <- err
+	}()
+
+	tok := <-tokenSink
+	bindSink := make(chan string, 1)
+	openErr := make(chan error, 1)
+	go func() {
+		openErr <- Open(sessionCtx, OpenConfig{
+			Token:        tok,
+			BindAddr:     bindAddr,
+			BindAddrSink: bindSink,
+			Emitter:      telemetry.New(&bytes.Buffer{}, telemetry.LevelSilent),
+		})
+	}()
+
+	return <-bindSink, cancel, shareErr, openErr
+}
+
+func roundTripTCP(t *testing.T, ctx context.Context, addr, payload string) string {
+	t.Helper()
+
+	conn, err := connectWithRetry(ctx, addr)
+	if err != nil {
+		t.Fatalf("connectWithRetry() error = %v", err)
+	}
+	defer conn.Close()
+
+	if _, err := io.WriteString(conn, payload); err != nil {
+		t.Fatalf("WriteString() error = %v", err)
+	}
+	buf := make([]byte, len(payload))
+	if _, err := io.ReadFull(conn, buf); err != nil {
+		t.Fatalf("ReadFull() error = %v", err)
+	}
+	return string(buf)
+}
+
+func waitNoErr(t *testing.T, err error) {
+	t.Helper()
+	if err != nil && !errors.Is(err, context.Canceled) {
+		t.Fatalf("unexpected error: %v", err)
 	}
 }

@@ -11,7 +11,7 @@ import (
 
 const (
 	CapabilityStdio uint32 = 1 << iota
-	CapabilityTCP
+	CapabilityShare
 )
 
 type Token struct {
@@ -24,6 +24,9 @@ type Token struct {
 	DiscoPublic     [32]byte
 	BearerSecret    [32]byte
 	Capabilities    uint32
+	ShareTargetAddr string
+	DefaultBindHost string
+	DefaultBindPort uint16
 }
 
 var (
@@ -33,8 +36,8 @@ var (
 	ErrInvalidLength      = errors.New("token invalid length")
 )
 
-const SupportedVersion uint8 = 1
-const payloadSize = 1 + 16 + 8 + 2 + 32 + 32 + 32 + 32 + 4
+const SupportedVersion uint8 = 2
+const fixedPayloadSize = 1 + 16 + 8 + 2 + 32 + 32 + 32 + 32 + 4 + 2 + 2 + 2
 
 func Encode(tok Token) (string, error) {
 	if tok.Version == 0 {
@@ -71,6 +74,15 @@ func Encode(tok Token) (string, error) {
 	if err := binary.Write(&payload, binary.BigEndian, tok.Capabilities); err != nil {
 		return "", err
 	}
+	if err := writeString(&payload, tok.ShareTargetAddr); err != nil {
+		return "", err
+	}
+	if err := writeString(&payload, tok.DefaultBindHost); err != nil {
+		return "", err
+	}
+	if err := binary.Write(&payload, binary.BigEndian, tok.DefaultBindPort); err != nil {
+		return "", err
+	}
 
 	sum := crc32.ChecksumIEEE(payload.Bytes())
 	if err := binary.Write(&payload, binary.BigEndian, sum); err != nil {
@@ -95,12 +107,12 @@ func Decode(encoded string, now time.Time) (Token, error) {
 	if tok.Version != SupportedVersion {
 		return tok, ErrUnsupportedVersion
 	}
-	if len(raw) != payloadSize+4 {
+	if len(raw) < fixedPayloadSize+4 {
 		return tok, ErrInvalidLength
 	}
 
-	payload := raw[:payloadSize]
-	checksum := binary.BigEndian.Uint32(raw[payloadSize:])
+	payload := raw[:len(raw)-4]
+	checksum := binary.BigEndian.Uint32(raw[len(raw)-4:])
 	if got := crc32.ChecksumIEEE(payload); got != checksum {
 		return tok, ErrChecksum
 	}
@@ -130,10 +142,50 @@ func Decode(encoded string, now time.Time) (Token, error) {
 	if err := binary.Read(r, binary.BigEndian, &tok.Capabilities); err != nil {
 		return tok, err
 	}
+	if tok.ShareTargetAddr, err = readString(r); err != nil {
+		return tok, err
+	}
+	if tok.DefaultBindHost, err = readString(r); err != nil {
+		return tok, err
+	}
+	if err := binary.Read(r, binary.BigEndian, &tok.DefaultBindPort); err != nil {
+		return tok, err
+	}
+	if r.Len() != 0 {
+		return tok, ErrInvalidLength
+	}
 
 	if now.Unix() >= tok.ExpiresUnix {
 		return tok, ErrExpired
 	}
 
 	return tok, nil
+}
+
+func writeString(buf *bytes.Buffer, v string) error {
+	if len(v) > 0xffff {
+		return ErrInvalidLength
+	}
+	if err := binary.Write(buf, binary.BigEndian, uint16(len(v))); err != nil {
+		return err
+	}
+	if _, err := buf.WriteString(v); err != nil {
+		return err
+	}
+	return nil
+}
+
+func readString(r *bytes.Reader) (string, error) {
+	var size uint16
+	if err := binary.Read(r, binary.BigEndian, &size); err != nil {
+		return "", err
+	}
+	if int(size) > r.Len() {
+		return "", ErrInvalidLength
+	}
+	buf := make([]byte, int(size))
+	if _, err := r.Read(buf); err != nil {
+		return "", err
+	}
+	return string(buf), nil
 }

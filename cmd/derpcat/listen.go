@@ -12,10 +12,8 @@ import (
 )
 
 type listenFlags struct {
-	PrintTokenOnly bool   `flag:"print-token-only" help:"Print only the session token"`
-	ForceRelay     bool   `flag:"force-relay" help:"Disable direct probing"`
-	TCPListen      string `flag:"tcp-listen" help:"Accept one local TCP connection and forward its bytes to the session sink"`
-	TCPConnect     string `flag:"tcp-connect" help:"Connect to a local TCP service and forward session bytes to it"`
+	PrintTokenOnly bool `flag:"print-token-only" help:"Print only the session token"`
+	ForceRelay     bool `flag:"force-relay" help:"Disable direct probing"`
 }
 
 var listenHelpConfig = yargs.HelpConfig{
@@ -32,10 +30,10 @@ var listenHelpConfig = yargs.HelpConfig{
 		"listen": {
 			Name:        "listen",
 			Description: "Listen for one incoming derpcat session and receive data.",
-			Usage:       "[--print-token-only] [--tcp-listen addr | --tcp-connect addr] [--force-relay]",
+			Usage:       "[--print-token-only] [--force-relay]",
 			Examples: []string{
 				"derpcat listen",
-				"derpcat listen --tcp-connect 127.0.0.1:9000",
+				"derpcat listen --print-token-only",
 			},
 		},
 	},
@@ -64,11 +62,6 @@ func runListen(args []string, level telemetry.Level, stdout, stderr io.Writer) i
 		return 2
 	}
 
-	if parsed.SubCommandFlags.TCPListen != "" && parsed.SubCommandFlags.TCPConnect != "" {
-		fmt.Fprintln(stderr, "listen: --tcp-listen and --tcp-connect are mutually exclusive")
-		return 2
-	}
-
 	emitter := telemetry.New(stderr, level)
 	tokenSink := make(chan string, 1)
 	done := make(chan error, 1)
@@ -77,9 +70,6 @@ func runListen(args []string, level telemetry.Level, stdout, stderr io.Writer) i
 			Emitter:       emitter,
 			TokenSink:     tokenSink,
 			StdioOut:      stdout,
-			Attachment:    nil,
-			TCPListen:     parsed.SubCommandFlags.TCPListen,
-			TCPConnect:    parsed.SubCommandFlags.TCPConnect,
 			ForceRelay:    parsed.SubCommandFlags.ForceRelay,
 			UsePublicDERP: usePublicDERPTransport(),
 		})

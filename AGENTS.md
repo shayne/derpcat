@@ -20,7 +20,7 @@ Use `mise` for toolchain consistency.
 - `mise run release:build-all` builds vendored binaries, release tarballs, and `dist/npm`
 - `mise run release:npm-dry-run` validates the npm package without publishing
 
-For remote verification, use tasks such as `mise run smoke-remote`, `mise run smoke-remote-tcp`, and `mise run promotion-1g-hetz`.
+For remote verification, use tasks such as `mise run smoke-remote`, `mise run smoke-remote-share`, and `mise run promotion-1g-hetz`.
 
 ## Coding Style & Naming Conventions
 

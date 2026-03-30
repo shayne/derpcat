@@ -3,8 +3,6 @@ package session
 import (
 	"context"
 	"io"
-
-	"github.com/shayne/derpcat/pkg/stream"
 )
 
 type nopWriteCloser struct {
@@ -20,23 +18,6 @@ type nopReadCloser struct {
 func (nopReadCloser) Close() error { return nil }
 
 func openSendSource(ctx context.Context, cfg SendConfig) (io.ReadCloser, error) {
-	if cfg.Attachment != nil {
-		return nopReadCloser{Reader: cfg.Attachment}, nil
-	}
-	if cfg.TCPListen != "" {
-		conn, err := stream.ListenOnce(ctx, cfg.TCPListen)
-		if err != nil {
-			return nil, err
-		}
-		return conn, nil
-	}
-	if cfg.TCPConnect != "" {
-		conn, err := stream.Connect(ctx, cfg.TCPConnect)
-		if err != nil {
-			return nil, err
-		}
-		return conn, nil
-	}
 	if cfg.StdioIn != nil {
 		return nopReadCloser{Reader: cfg.StdioIn}, nil
 	}
@@ -44,26 +25,6 @@ func openSendSource(ctx context.Context, cfg SendConfig) (io.ReadCloser, error) 
 }
 
 func openListenSink(ctx context.Context, cfg ListenConfig) (io.WriteCloser, error) {
-	if cfg.Attachment != nil {
-		if wc, ok := cfg.Attachment.(io.WriteCloser); ok {
-			return wc, nil
-		}
-		return nopWriteCloser{Writer: cfg.Attachment}, nil
-	}
-	if cfg.TCPListen != "" {
-		conn, err := stream.ListenOnce(ctx, cfg.TCPListen)
-		if err != nil {
-			return nil, err
-		}
-		return conn, nil
-	}
-	if cfg.TCPConnect != "" {
-		conn, err := stream.Connect(ctx, cfg.TCPConnect)
-		if err != nil {
-			return nil, err
-		}
-		return conn, nil
-	}
 	if cfg.StdioOut != nil {
 		return nopWriteCloser{Writer: cfg.StdioOut}, nil
 	}

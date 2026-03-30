@@ -18,10 +18,12 @@ type rootGlobalFlags struct {
 var rootRegistry = yargs.Registry{
 	Command: yargs.CommandInfo{
 		Name:        "derpcat",
-		Description: "Relay payloads through a public DERP server or a private listener.",
+		Description: "Move one-shot streams or shared TCP services over public DERP with direct UDP promotion when available.",
 		Examples: []string{
 			"derpcat listen",
 			"derpcat send <token>",
+			"derpcat share 127.0.0.1:3000",
+			"derpcat open <token>",
 			"derpcat version",
 		},
 	},
@@ -36,6 +38,18 @@ var rootRegistry = yargs.Registry{
 			Info: yargs.SubCommandInfo{
 				Name:        "send",
 				Description: "Claim a token and stream stdin to a relay listener.",
+			},
+		},
+		"share": {
+			Info: yargs.SubCommandInfo{
+				Name:        "share",
+				Description: "Share a local TCP service until Ctrl-C.",
+			},
+		},
+		"open": {
+			Info: yargs.SubCommandInfo{
+				Name:        "open",
+				Description: "Open a shared service locally until Ctrl-C.",
 			},
 		},
 		"version": {
@@ -86,6 +100,10 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return runListen(remaining[1:], level, stdout, stderr)
 	case "send":
 		return runSend(remaining[1:], level, stdin, stdout, stderr)
+	case "share":
+		return runShare(remaining[1:], level, stdout, stderr)
+	case "open":
+		return runOpen(remaining[1:], level, stdout, stderr)
 	case "version":
 		return runVersion(remaining[1:], stdout, stderr)
 	default:
@@ -148,6 +166,20 @@ func runHelpCommand(args []string, stderr io.Writer) int {
 			fmt.Fprint(stderr, sendHelpLLMText())
 		} else {
 			fmt.Fprint(stderr, sendHelpText())
+		}
+		return 0
+	case "share":
+		if llm {
+			fmt.Fprint(stderr, shareHelpLLMText())
+		} else {
+			fmt.Fprint(stderr, shareHelpText())
+		}
+		return 0
+	case "open":
+		if llm {
+			fmt.Fprint(stderr, openHelpLLMText())
+		} else {
+			fmt.Fprint(stderr, openHelpText())
 		}
 		return 0
 	case "version":

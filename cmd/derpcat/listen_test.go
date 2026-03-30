@@ -196,17 +196,6 @@ func TestListenUnknownFlagShowsParseErrorAndHelp(t *testing.T) {
 	}
 }
 
-func TestListenRejectsMutuallyExclusiveTCPFlags(t *testing.T) {
-	var stdout, stderr bytes.Buffer
-	code := runListen([]string{"--tcp-listen", "127.0.0.1:7000", "--tcp-connect", "127.0.0.1:9000"}, telemetry.LevelDefault, &stdout, &stderr)
-	if code != 2 {
-		t.Fatalf("runListen() = %d, want 2", code)
-	}
-	if got := stderr.String(); got != "listen: --tcp-listen and --tcp-connect are mutually exclusive\n" {
-		t.Fatalf("stderr = %q, want mutual exclusion error", got)
-	}
-}
-
 func TestListenHonorsVerbosityLevel(t *testing.T) {
 	tests := []struct {
 		name       string

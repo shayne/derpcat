@@ -1,6 +1,6 @@
 # derpcat
 
-`derpcat` is a standalone Go CLI for moving one bidirectional byte stream between two hosts using the public Tailscale DERP network for bootstrap and relay fallback, with direct UDP promotion when possible.
+`derpcat` is a standalone Go CLI for moving one bidirectional byte stream or sharing a local TCP service between two hosts using the public Tailscale DERP network for bootstrap and relay fallback, with direct UDP promotion when possible.
 
 ## npm
 
@@ -39,6 +39,23 @@ mise run check
 ```bash
 mise run test
 mise run smoke-local
+mise run smoke-remote-share
+```
+
+## Usage
+
+One-shot stdin/stdout transfer:
+
+```bash
+derpcat listen
+printf 'hello\n' | derpcat send <token>
+```
+
+Share a local service until Ctrl-C:
+
+```bash
+derpcat share 127.0.0.1:3000
+derpcat open <token>
 ```
 
 ## Publishing

@@ -90,7 +90,7 @@ func issuePublicSession(ctx context.Context) (string, *relaySession, error) {
 		WGPublic:        wgPublic,
 		DiscoPublic:     discoPublic,
 		BearerSecret:    bearerSecret,
-		Capabilities:    token.CapabilityStdio | token.CapabilityTCP,
+		Capabilities:    token.CapabilityStdio,
 	}
 	tok, err := token.Encode(tokValue)
 	if err != nil {
@@ -120,6 +120,9 @@ func sendExternal(ctx context.Context, cfg SendConfig) error {
 	tok, err := token.Decode(cfg.Token, time.Now())
 	if err != nil {
 		return err
+	}
+	if tok.Capabilities&token.CapabilityStdio == 0 {
+		return ErrUnknownSession
 	}
 	listenerDERP := key.NodePublicFromRaw32(mem.B(tok.DERPPublic[:]))
 	if listenerDERP.IsZero() {
