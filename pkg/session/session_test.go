@@ -157,7 +157,10 @@ func TestShareOpenForwardsSequentialConnections(t *testing.T) {
 	openAddr, stop, shareErr, openErr := startSharedSession(t, ctx, backendAddr, "")
 
 	for _, payload := range []string{"alpha", "beta", "gamma"} {
-		reply := roundTripTCP(t, ctx, openAddr, payload)
+		reply, err := roundTripTCP(ctx, openAddr, payload)
+		if err != nil {
+			t.Fatalf("roundTripTCP() error = %v", err)
+		}
 		if reply != payload {
 			t.Fatalf("reply = %q, want %q", reply, payload)
 		}
@@ -183,7 +186,11 @@ func TestShareOpenForwardsConcurrentConnections(t *testing.T) {
 		wg.Add(1)
 		go func(payload string) {
 			defer wg.Done()
-			reply := roundTripTCP(t, ctx, openAddr, payload)
+			reply, err := roundTripTCP(ctx, openAddr, payload)
+			if err != nil {
+				errCh <- err
+				return
+			}
 			if reply != payload {
 				errCh <- errors.New("reply mismatch")
 			}
@@ -333,23 +340,21 @@ func startSharedSession(t *testing.T, ctx context.Context, backendAddr, bindAddr
 	return <-bindSink, cancel, shareErr, openErr
 }
 
-func roundTripTCP(t *testing.T, ctx context.Context, addr, payload string) string {
-	t.Helper()
-
+func roundTripTCP(ctx context.Context, addr, payload string) (string, error) {
 	conn, err := connectWithRetry(ctx, addr)
 	if err != nil {
-		t.Fatalf("connectWithRetry() error = %v", err)
+		return "", err
 	}
 	defer conn.Close()
 
 	if _, err := io.WriteString(conn, payload); err != nil {
-		t.Fatalf("WriteString() error = %v", err)
+		return "", err
 	}
 	buf := make([]byte, len(payload))
 	if _, err := io.ReadFull(conn, buf); err != nil {
-		t.Fatalf("ReadFull() error = %v", err)
+		return "", err
 	}
-	return string(buf)
+	return string(buf), nil
 }
 
 func waitNoErr(t *testing.T, err error) {

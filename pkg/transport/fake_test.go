@@ -1,7 +1,6 @@
 package transport
 
 import (
-	"errors"
 	"net"
 	"sync"
 	"time"
@@ -15,38 +14,63 @@ type packet struct {
 type fakePacketConn struct {
 	mu       sync.Mutex
 	local    net.Addr
-	reads    chan packet
+	reads    []packet
 	writes   []packet
+	notify   chan struct{}
 	closed   bool
 	deadline time.Time
 }
 
 func newFakePacketConn(local net.Addr) *fakePacketConn {
 	return &fakePacketConn{
-		local: local,
-		reads: make(chan packet, 8),
+		local:  local,
+		notify: make(chan struct{}),
 	}
 }
 
 func (c *fakePacketConn) ReadFrom(b []byte) (int, net.Addr, error) {
-	select {
-	case pkt := <-c.reads:
-		n := copy(b, pkt.payload)
-		return n, pkt.addr, nil
-	default:
-	}
+	for {
+		c.mu.Lock()
+		if len(c.reads) > 0 {
+			pkt := c.reads[0]
+			c.reads = c.reads[1:]
+			c.mu.Unlock()
+			n := copy(b, pkt.payload)
+			return n, pkt.addr, nil
+		}
+		if c.closed {
+			c.mu.Unlock()
+			return 0, nil, net.ErrClosed
+		}
+		deadline := c.deadline
+		if !deadline.IsZero() && !time.Now().Before(deadline) {
+			c.mu.Unlock()
+			return 0, nil, timeoutErr{}
+		}
+		waitCh := c.notify
+		c.mu.Unlock()
 
-	c.mu.Lock()
-	closed := c.closed
-	deadline := c.deadline
-	c.mu.Unlock()
-	if closed {
-		return 0, nil, net.ErrClosed
+		if deadline.IsZero() {
+			<-waitCh
+			continue
+		}
+
+		delay := time.Until(deadline)
+		if delay <= 0 {
+			continue
+		}
+		timer := time.NewTimer(delay)
+		select {
+		case <-waitCh:
+		case <-timer.C:
+		}
+		if !timer.Stop() {
+			select {
+			case <-timer.C:
+			default:
+			}
+		}
 	}
-	if !deadline.IsZero() && time.Now().After(deadline) {
-		return 0, nil, timeoutErr{}
-	}
-	return 0, nil, timeoutErr{}
 }
 
 func (c *fakePacketConn) WriteTo(b []byte, addr net.Addr) (int, error) {
@@ -66,6 +90,7 @@ func (c *fakePacketConn) Close() error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.closed = true
+	c.signalLocked()
 	return nil
 }
 
@@ -75,6 +100,7 @@ func (c *fakePacketConn) SetDeadline(t time.Time) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.deadline = t
+	c.signalLocked()
 	return nil
 }
 
@@ -82,7 +108,13 @@ func (c *fakePacketConn) SetReadDeadline(t time.Time) error { return c.SetDeadli
 func (c *fakePacketConn) SetWriteDeadline(time.Time) error  { return nil }
 
 func (c *fakePacketConn) inject(payload []byte, addr net.Addr) {
-	c.reads <- packet{payload: append([]byte(nil), payload...), addr: addr}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.reads = append(c.reads, packet{
+		payload: append([]byte(nil), payload...),
+		addr:    addr,
+	})
+	c.signalLocked()
 }
 
 func (c *fakePacketConn) writesSnapshot() []packet {
@@ -93,6 +125,12 @@ func (c *fakePacketConn) writesSnapshot() []packet {
 	return out
 }
 
+func (c *fakePacketConn) signalLocked() {
+	next := make(chan struct{})
+	close(c.notify)
+	c.notify = next
+}
+
 type timeoutErr struct{}
 
 func (timeoutErr) Error() string   { return "timeout" }
@@ -101,5 +139,3 @@ func (timeoutErr) Temporary() bool { return true }
 
 var _ net.PacketConn = (*fakePacketConn)(nil)
 var _ error = timeoutErr{}
-
-var errFakePacketTimeout = errors.New("fake packet timeout")
