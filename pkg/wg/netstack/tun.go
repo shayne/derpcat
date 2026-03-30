@@ -11,6 +11,7 @@ import (
 	"net"
 	"net/netip"
 	"os"
+	"sync"
 	"syscall"
 
 	"github.com/tailscale/wireguard-go/tun"
@@ -33,6 +34,8 @@ type netTun struct {
 	stack          *stack.Stack
 	events         chan tun.Event
 	incomingPacket chan *buffer.View
+	packetMu       sync.RWMutex
+	closed         bool
 	mtu            int
 	dnsServers     []netip.Addr
 	hasV4, hasV6   bool
@@ -137,6 +140,11 @@ func (tun *netTun) WriteNotify() {
 	}
 	view := pkt.ToView()
 	pkt.DecRef()
+	tun.packetMu.RLock()
+	defer tun.packetMu.RUnlock()
+	if tun.closed {
+		return
+	}
 	tun.incomingPacket <- view
 }
 
@@ -146,9 +154,12 @@ func (tun *netTun) Close() error {
 		close(tun.events)
 	}
 	tun.ep.Close()
+	tun.packetMu.Lock()
+	tun.closed = true
 	if tun.incomingPacket != nil {
 		close(tun.incomingPacket)
 	}
+	tun.packetMu.Unlock()
 	return nil
 }
 

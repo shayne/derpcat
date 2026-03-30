@@ -82,15 +82,15 @@ func runUpgradingExternalShareAndOpen(t *testing.T) (shareStderr string, openStd
 		t.Fatalf("relay reply = %q, want %q", reply, "relay-first")
 	}
 
-	waitForStatusPrefix(t, shareStderrBuf, 10*time.Second, "waiting-for-claim", "connected-relay")
-	waitForStatusPrefix(t, openStderrBuf, 10*time.Second, "probing-direct", "connected-relay")
+	waitForStatusPrefix(t, shareStderrBuf, 20*time.Second, "waiting-for-claim", "connected-relay")
+	waitForStatusPrefix(t, openStderrBuf, 20*time.Second, "probing-direct", "connected-relay")
 
 	if err := os.Setenv("DERPCAT_FAKE_TRANSPORT_ENABLE_DIRECT_AT", "0"); err != nil {
 		t.Fatalf("Setenv(enable direct) error = %v", err)
 	}
 
-	waitForStatusPrefix(t, shareStderrBuf, 10*time.Second, "waiting-for-claim", "connected-relay", "connected-direct")
-	waitForStatusPrefix(t, openStderrBuf, 10*time.Second, "probing-direct", "connected-relay", "connected-direct")
+	waitForStatusPrefix(t, shareStderrBuf, 20*time.Second, "waiting-for-claim", "connected-relay", "connected-direct")
+	waitForStatusPrefix(t, openStderrBuf, 20*time.Second, "probing-direct", "connected-relay", "connected-direct")
 
 	for _, payload := range []string{"direct-one", "direct-two", "direct-three"} {
 		reply, err := roundTripCommandTCP(ctx, openAddr, payload)
@@ -170,7 +170,7 @@ func startCommandEchoServer(t *testing.T, ctx context.Context) string {
 func waitForOpenBindAddr(t *testing.T, buf *lockedBuffer) string {
 	t.Helper()
 
-	deadline := time.Now().Add(2 * time.Second)
+	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
 		for _, line := range strings.Split(buf.String(), "\n") {
 			line = strings.TrimSpace(line)

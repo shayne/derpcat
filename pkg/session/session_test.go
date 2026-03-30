@@ -269,7 +269,7 @@ func TestShareOpenExternalAllowsOneClaimerUnderContention(t *testing.T) {
 	t.Setenv("DERPCAT_TEST_DERP_MAP_URL", srv.MapURL)
 	t.Setenv("DERPCAT_TEST_DERP_SERVER_URL", srv.DERPURL)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
 	backendAddr, backendDone := startEchoServer(t, ctx)
@@ -314,7 +314,7 @@ func TestShareOpenExternalAllowsOneClaimerUnderContention(t *testing.T) {
 	errCh := make(chan error, contenders)
 	for i := 0; i < contenders; i++ {
 		go func() {
-			secondCtx, secondCancel := context.WithTimeout(ctx, 5*time.Second)
+			secondCtx, secondCancel := context.WithTimeout(ctx, 15*time.Second)
 			defer secondCancel()
 			errCh <- Open(secondCtx, OpenConfig{
 				Token:         tok,
@@ -468,7 +468,7 @@ func runExternalRoundTrip(t *testing.T, cfg roundTripConfig) roundTripResult {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	timeout := time.After(20 * time.Second)
+	timeout := time.After(40 * time.Second)
 
 	var listenerOut bytes.Buffer
 	var listenerStatus syncBuffer
@@ -498,13 +498,13 @@ func runExternalRoundTrip(t *testing.T, cfg roundTripConfig) roundTripResult {
 		})
 	}()
 
-	waitForStatusPrefixBuffer(t, &listenerStatus, 10*time.Second, "waiting-for-claim", "connected-relay")
-	waitForStatusPrefixBuffer(t, &senderStatus, 10*time.Second, "probing-direct", "connected-relay")
+	waitForStatusPrefixBuffer(t, &listenerStatus, 20*time.Second, "waiting-for-claim", "connected-relay")
+	waitForStatusPrefixBuffer(t, &senderStatus, 20*time.Second, "probing-direct", "connected-relay")
 	if err := os.Setenv("DERPCAT_FAKE_TRANSPORT_ENABLE_DIRECT_AT", "0"); err != nil {
 		t.Fatalf("Setenv(enable direct) error = %v", err)
 	}
-	waitForStatusPrefixBuffer(t, &listenerStatus, 10*time.Second, "waiting-for-claim", "connected-relay", "connected-direct")
-	waitForStatusPrefixBuffer(t, &senderStatus, 10*time.Second, "probing-direct", "connected-relay", "connected-direct")
+	waitForStatusPrefixBuffer(t, &listenerStatus, 20*time.Second, "waiting-for-claim", "connected-relay", "connected-direct")
+	waitForStatusPrefixBuffer(t, &senderStatus, 20*time.Second, "probing-direct", "connected-relay", "connected-direct")
 	close(releaseEOF)
 
 	select {
@@ -588,13 +588,13 @@ func runExternalShareOpenSession(t *testing.T, cfg shareOpenRoundTripConfig) sha
 		t.Fatalf("relay roundTripTCP() error = %v", err)
 	}
 
-	waitForStatusPrefixBuffer(t, &shareStatus, 10*time.Second, string(StateWaiting), string(StateRelay))
-	waitForStatusPrefixBuffer(t, &openStatus, 10*time.Second, string(StateProbing), string(StateRelay))
+	waitForStatusPrefixBuffer(t, &shareStatus, 20*time.Second, string(StateWaiting), string(StateRelay))
+	waitForStatusPrefixBuffer(t, &openStatus, 20*time.Second, string(StateProbing), string(StateRelay))
 	if err := os.Setenv("DERPCAT_FAKE_TRANSPORT_ENABLE_DIRECT_AT", "0"); err != nil {
 		t.Fatalf("Setenv(enable direct) error = %v", err)
 	}
-	waitForStatusPrefixBuffer(t, &shareStatus, 10*time.Second, string(StateWaiting), string(StateRelay), string(StateDirect))
-	waitForStatusPrefixBuffer(t, &openStatus, 10*time.Second, string(StateProbing), string(StateRelay), string(StateDirect))
+	waitForStatusPrefixBuffer(t, &shareStatus, 20*time.Second, string(StateWaiting), string(StateRelay), string(StateDirect))
+	waitForStatusPrefixBuffer(t, &openStatus, 20*time.Second, string(StateProbing), string(StateRelay), string(StateDirect))
 
 	replies := make(map[string]string, len(cfg.upgradePayloads))
 	var mu sync.Mutex

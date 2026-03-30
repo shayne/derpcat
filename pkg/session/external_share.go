@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net"
 	"net/netip"
+	"sync"
 	"time"
 
 	"github.com/shayne/derpcat/pkg/derpbind"
@@ -281,6 +282,9 @@ func openExternal(ctx context.Context, cfg OpenConfig, tok token.Token) error {
 }
 
 func serveOverlayListener(ctx context.Context, listener net.Listener, targetAddr string, emitter *telemetry.Emitter) error {
+	var wg sync.WaitGroup
+	defer wg.Wait()
+
 	for {
 		overlayConn, err := acceptOverlay(ctx, listener)
 		if err != nil {
@@ -299,7 +303,9 @@ func serveOverlayListener(ctx context.Context, listener net.Listener, targetAddr
 			continue
 		}
 
+		wg.Add(1)
 		go func() {
+			defer wg.Done()
 			defer overlayConn.Close()
 			defer backendConn.Close()
 			_ = stream.Bridge(ctx, overlayConn, backendConn)
@@ -329,6 +335,8 @@ func serveOverlayListenerWithClaimRejections(
 				continue
 			}
 			if err != nil {
+				_ = listener.Close()
+				<-overlayErrCh
 				return err
 			}
 		}

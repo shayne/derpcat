@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net"
 	"strconv"
+	"sync"
 	"time"
 
 	"github.com/shayne/derpcat/pkg/stream"
@@ -84,6 +85,9 @@ func notifyBindAddr(sink chan<- string, addr string, ctx context.Context) {
 }
 
 func serveOpenListener(ctx context.Context, listener net.Listener, dial func(context.Context) (net.Conn, error), emitter interface{ Debug(string) }) error {
+	var wg sync.WaitGroup
+	defer wg.Wait()
+
 	for {
 		clientConn, err := acceptNetListener(ctx, listener)
 		if err != nil {
@@ -102,7 +106,9 @@ func serveOpenListener(ctx context.Context, listener net.Listener, dial func(con
 			continue
 		}
 
+		wg.Add(1)
 		go func() {
+			defer wg.Done()
 			defer clientConn.Close()
 			defer overlayConn.Close()
 			_ = stream.Bridge(ctx, clientConn, overlayConn)
