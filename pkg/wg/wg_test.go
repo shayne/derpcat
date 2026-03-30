@@ -127,6 +127,20 @@ func TestBindCloseAfterReopenUnblocksReceive(t *testing.T) {
 	}
 }
 
+func TestBindDoesNotInferDirectFromArbitraryInboundUDP(t *testing.T) {
+	pc := newLoopPacketConn(t)
+	defer pc.Close()
+
+	bind := NewBind(BindConfig{
+		PacketConn:   pc,
+		PathSelector: fakeSelector{},
+	})
+
+	if got := bind.activeDirectAddr(); got != nil {
+		t.Fatalf("activeDirectAddr() = %v, want nil", got)
+	}
+}
+
 func TestNodeTCPRoundTripOverUDP(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -350,4 +364,23 @@ func mustHex32(t *testing.T, v string) [32]byte {
 	var out [32]byte
 	copy(out[:], raw)
 	return out
+}
+
+type fakeSelector struct {
+	endpoint string
+	direct   bool
+}
+
+func (f fakeSelector) ActiveDirectEndpoint() string { return f.endpoint }
+
+func (f fakeSelector) DirectActive() bool { return f.direct }
+
+func newLoopPacketConn(t *testing.T) net.PacketConn {
+	t.Helper()
+
+	pc, err := net.ListenPacket("udp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("ListenPacket() error = %v", err)
+	}
+	return pc
 }

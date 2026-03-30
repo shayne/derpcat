@@ -85,16 +85,20 @@ func (m *Manager) PathState() Path {
 	return m.state.path()
 }
 
-func (m *Manager) now() time.Time {
-	return m.cfg.Clock.Now()
-}
-
-func (m *Manager) noteValidatedDirect(now time.Time, addr net.Addr) {
+func (m *Manager) ActiveDirectEndpoint() string {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if m.state.noteDirect(now, addr) {
-		m.signalStateChangeLocked()
-	}
+	return m.state.activeDirectEndpoint()
+}
+
+func (m *Manager) DirectActive() bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.state.directActive()
+}
+
+func (m *Manager) now() time.Time {
+	return m.cfg.Clock.Now()
 }
 
 func (m *Manager) noteRelayOnly(now time.Time) {
@@ -106,18 +110,6 @@ func (m *Manager) noteRelayOnly(now time.Time) {
 	}
 }
 
-func (m *Manager) noteEndpointRefresh(now time.Time) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.state.noteRefreshSuccess(now)
-}
-
-func (m *Manager) noteCallMeMaybeSuccess(now time.Time) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.state.noteCallMeMaybeSuccess(now)
-}
-
 func (m *Manager) snapshotDiscoveryPlan() discoveryPlan {
 	now := m.now()
 	m.mu.Lock()
@@ -125,12 +117,6 @@ func (m *Manager) snapshotDiscoveryPlan() discoveryPlan {
 	plan := m.state.discoveryPlan(now, m.endpointRefreshInterval(), m.directStaleTimeout())
 	plan.generation = m.discoveryGen
 	return plan
-}
-
-func (m *Manager) noteProbeSent(now time.Time, addr net.Addr) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.state.noteProbeSent(now, addr)
 }
 
 func (m *Manager) tryPromoteDirect(now time.Time, addr net.Addr) bool {

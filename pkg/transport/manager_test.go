@@ -869,6 +869,69 @@ func TestManagerCanceledStartCanBeRetried(t *testing.T) {
 	}
 }
 
+func TestManagerExposesActiveDirectEndpoint(t *testing.T) {
+	t.Helper()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	clock := newFakeClock(time.Unix(1700000060, 0))
+	relay := newFakePacketConn(&net.IPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	direct := newFakePacketConn(&net.IPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	relay.useClock(clock)
+	direct.useClock(clock)
+
+	peerCandidate := &net.UDPAddr{IP: net.IPv4(100, 64, 0, 10), Port: 63000}
+	controls := newFakeControlPipe()
+	controls.enablePeerCandidate(peerCandidate)
+	direct.enableResponder(peerCandidate)
+	baseTimers := clock.timerCount()
+
+	mgr := NewManager(ManagerConfig{
+		RelayConn:               relay,
+		DirectConn:              direct,
+		SendControl:             controls.send,
+		ReceiveControl:          controls.receive,
+		Clock:                   clock,
+		DiscoveryInterval:       1 * time.Second,
+		EndpointRefreshInterval: 2 * time.Second,
+		DirectStaleTimeout:      4 * time.Second,
+	})
+
+	if got := mgr.ActiveDirectEndpoint(); got != "" {
+		t.Fatalf("ActiveDirectEndpoint() before Start = %q, want empty", got)
+	}
+	if mgr.DirectActive() {
+		t.Fatal("DirectActive() before Start = true, want false")
+	}
+
+	if err := mgr.Start(ctx); err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+	waitForManagerTimers(t, clock, baseTimers, 2)
+
+	clock.Advance(1 * time.Second)
+	if !waitForPath(t, mgr, PathDirect, 200*time.Millisecond) {
+		t.Fatalf("PathState() = %v, want %v after direct promotion", mgr.PathState(), PathDirect)
+	}
+	if got := mgr.ActiveDirectEndpoint(); got != peerCandidate.String() {
+		t.Fatalf("ActiveDirectEndpoint() after promotion = %q, want %q", got, peerCandidate.String())
+	}
+	if !mgr.DirectActive() {
+		t.Fatal("DirectActive() after promotion = false, want true")
+	}
+
+	if err := mgr.MarkDirectBroken(); err != nil {
+		t.Fatalf("MarkDirectBroken() error = %v", err)
+	}
+	if got := mgr.ActiveDirectEndpoint(); got != "" {
+		t.Fatalf("ActiveDirectEndpoint() after fallback = %q, want empty", got)
+	}
+	if mgr.DirectActive() {
+		t.Fatal("DirectActive() after fallback = true, want false")
+	}
+}
+
 func waitForManagerTimers(t *testing.T, clock *fakeClock, base, added int) {
 	t.Helper()
 

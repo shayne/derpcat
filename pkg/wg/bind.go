@@ -18,7 +18,13 @@ type BindConfig struct {
 	PacketConn     net.PacketConn
 	DERPClient     *derpbind.Client
 	PeerDERP       key.NodePublic
+	PathSelector   PathSelector
 	DirectEndpoint string
+}
+
+type PathSelector interface {
+	ActiveDirectEndpoint() string
+	DirectActive() bool
 }
 
 type Bind struct {
@@ -27,10 +33,10 @@ type Bind struct {
 	ownsConn   bool
 	derp       *derpbind.Client
 	peerDERP   key.NodePublic
+	selector   PathSelector
 	state      *bindState
 	opened     bool
 	directAddr *net.UDPAddr
-	directSeen atomic.Bool
 	sent       atomic.Int64
 	received   atomic.Int64
 }
@@ -62,6 +68,7 @@ func NewBind(cfg BindConfig) *Bind {
 		ownsConn: cfg.PacketConn == nil,
 		derp:     cfg.DERPClient,
 		peerDERP: cfg.PeerDERP,
+		selector: cfg.PathSelector,
 	}
 	if cfg.DirectEndpoint != "" {
 		_ = b.SetDirectEndpoint(cfg.DirectEndpoint)
@@ -150,7 +157,7 @@ func (b *Bind) Send(bufs [][]byte, ep conn.Endpoint, offset int) error {
 			continue
 		}
 
-		directAddr := b.directUDPAddr()
+		directAddr := b.activeDirectAddr()
 		if directAddr != nil {
 			if pc == nil {
 				return net.ErrClosed
@@ -225,7 +232,7 @@ func (b *Bind) SetDirectEndpoint(s string) error {
 }
 
 func (b *Bind) DirectEndpoint() string {
-	addr := b.directUDPAddr()
+	addr := b.activeDirectAddr()
 	if addr == nil {
 		return ""
 	}
@@ -262,8 +269,6 @@ func (s *bindState) readUDP() {
 			continue
 		}
 		if ip, ok := netip.AddrFromSlice(udpAddr.IP); ok {
-			s.parent.learnDirect(udpAddr)
-			s.parent.directSeen.Store(true)
 			s.parent.received.Add(1)
 			s.deliver(inboundPacket{
 				payload: append([]byte(nil), buf[:n]...),
@@ -308,6 +313,19 @@ func (s *bindState) reportErr(err error) {
 	}
 }
 
+func (b *Bind) activeDirectAddr() *net.UDPAddr {
+	if b.selector != nil {
+		ep := b.selector.ActiveDirectEndpoint()
+		if ep != "" {
+			addr, err := net.ResolveUDPAddr("udp", ep)
+			if err == nil {
+				return addr
+			}
+		}
+	}
+	return b.directUDPAddr()
+}
+
 func (b *Bind) directUDPAddr() *net.UDPAddr {
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -318,17 +336,11 @@ func (b *Bind) directUDPAddr() *net.UDPAddr {
 	return &clone
 }
 
-func (b *Bind) learnDirect(addr *net.UDPAddr) {
-	if addr == nil {
-		return
-	}
-	b.mu.Lock()
-	b.directAddr = addr
-	b.mu.Unlock()
-}
-
 func (b *Bind) directConfirmed() bool {
-	return b.directSeen.Load()
+	if b.selector != nil {
+		return b.selector.DirectActive()
+	}
+	return b.directUDPAddr() != nil
 }
 
 func (e *Endpoint) ClearSrc() {}

@@ -25,6 +25,7 @@ type Config struct {
 	PacketConn     net.PacketConn
 	DERPClient     *derpbind.Client
 	PeerDERP       key.NodePublic
+	PathSelector   PathSelector
 	DirectEndpoint string
 	MTU            int
 }
@@ -66,6 +67,7 @@ func NewNode(cfg Config) (*Node, error) {
 		PacketConn:     cfg.PacketConn,
 		DERPClient:     cfg.DERPClient,
 		PeerDERP:       cfg.PeerDERP,
+		PathSelector:   cfg.PathSelector,
 		DirectEndpoint: cfg.DirectEndpoint,
 	})
 

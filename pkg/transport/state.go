@@ -60,6 +60,17 @@ func (s pathState) path() Path {
 	return s.current
 }
 
+func (s pathState) activeDirectEndpoint() string {
+	if s.current != PathDirect {
+		return ""
+	}
+	return s.bestEndpoint
+}
+
+func (s pathState) directActive() bool {
+	return s.current == PathDirect && s.bestEndpoint != ""
+}
+
 func (s pathState) discoveryPlan(now time.Time, refreshInterval, staleAfter time.Duration) discoveryPlan {
 	if !s.directConfigured {
 		return discoveryPlan{}

@@ -441,12 +441,6 @@ func (p *fakeControlPipe) enablePeerCandidate(addr net.Addr) {
 	p.peerCandidates = []string{addr.String()}
 }
 
-func (p *fakeControlPipe) enablePeerCandidateAfter(clock *fakeClock, d time.Duration, addr net.Addr) {
-	clock.AfterFunc(d, func() {
-		p.enablePeerCandidate(addr)
-	})
-}
-
 func (p *fakeControlPipe) deliverAfter(clock *fakeClock, d time.Duration, msg ControlMessage) {
 	clock.AfterFunc(d, func() {
 		_ = p.deliver(msg, 0)
@@ -589,27 +583,6 @@ func (p *fakeControlPipe) waitForSentCount(typ ControlType, n int, timeout time.
 		p.mu.Unlock()
 		return false, waitCh
 	})
-}
-
-func (p *fakeControlPipe) waitForSentType(typ ControlType, timeout time.Duration) *ControlMessage {
-	var found *ControlMessage
-	if !waitForNotify(timeout, func() (bool, <-chan struct{}) {
-		p.mu.Lock()
-		for _, msg := range p.sent {
-			if msg.Type == typ {
-				copyMsg := msg
-				p.mu.Unlock()
-				found = &copyMsg
-				return true, nil
-			}
-		}
-		waitCh := p.notify
-		p.mu.Unlock()
-		return false, waitCh
-	}) {
-		return nil
-	}
-	return found
 }
 
 func (p *fakeControlPipe) lastSentType(typ ControlType) *ControlMessage {
