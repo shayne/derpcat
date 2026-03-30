@@ -262,7 +262,7 @@ func TestShareTokenAllowsOneClaimer(t *testing.T) {
 	backendDone()
 }
 
-func TestShareOpenExternalAllowsOneClaimer(t *testing.T) {
+func TestShareOpenExternalAllowsOneClaimerUnderContention(t *testing.T) {
 	t.Setenv("DERPCAT_FAKE_TRANSPORT", "1")
 
 	srv := newSessionTestDERPServer(t)
@@ -310,24 +310,32 @@ func TestShareOpenExternalAllowsOneClaimer(t *testing.T) {
 		t.Fatalf("reply = %q, want %q", reply, "claimed")
 	}
 
-	secondCtx, secondCancel := context.WithTimeout(ctx, 500*time.Millisecond)
-	defer secondCancel()
+	const contenders = 18
+	errCh := make(chan error, contenders)
+	for i := 0; i < contenders; i++ {
+		go func() {
+			secondCtx, secondCancel := context.WithTimeout(ctx, 5*time.Second)
+			defer secondCancel()
+			errCh <- Open(secondCtx, OpenConfig{
+				Token:         tok,
+				Emitter:       telemetry.New(&bytes.Buffer{}, telemetry.LevelSilent),
+				ForceRelay:    true,
+				UsePublicDERP: true,
+			})
+		}()
+	}
 
-	start := time.Now()
-	err = Open(secondCtx, OpenConfig{
-		Token:         tok,
-		Emitter:       telemetry.New(&bytes.Buffer{}, telemetry.LevelSilent),
-		ForceRelay:    true,
-		UsePublicDERP: true,
-	})
-	if err == nil {
-		t.Fatal("second Open() error = nil, want rejection")
-	}
-	if errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("second Open() error = %v after %v, want deterministic rejection", err, time.Since(start))
-	}
-	if !strings.Contains(err.Error(), "session already claimed") {
-		t.Fatalf("second Open() error = %v, want session already claimed", err)
+	for i := 0; i < contenders; i++ {
+		err := <-errCh
+		if err == nil {
+			t.Fatal("contending Open() error = nil, want rejection")
+		}
+		if errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("contending Open() error = %v, want deterministic rejection", err)
+		}
+		if !strings.Contains(err.Error(), "session already claimed") {
+			t.Fatalf("contending Open() error = %v, want session already claimed", err)
+		}
 	}
 
 	cancel()

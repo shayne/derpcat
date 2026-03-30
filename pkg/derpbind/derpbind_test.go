@@ -177,7 +177,7 @@ func TestClientRecoversAfterTransientTransportDisconnect(t *testing.T) {
 func TestClientSubscribeInterceptsMatchingPackets(t *testing.T) {
 	c := &Client{
 		stopCh:      make(chan struct{}),
-		subscribers: make(map[uint64]packetSubscriber),
+		subscribers: make(map[uint64]*packetSubscriber),
 	}
 	controlPayload := []byte(`{"type":"control"}`)
 	controlCh, unsubscribe := c.Subscribe(func(pkt Packet) bool {
@@ -213,7 +213,7 @@ func TestClientSubscribeInterceptsMatchingPackets(t *testing.T) {
 func TestClientSubscribeDropsOldestWhenSubscriberBackedUp(t *testing.T) {
 	c := &Client{
 		stopCh:      make(chan struct{}),
-		subscribers: make(map[uint64]packetSubscriber),
+		subscribers: make(map[uint64]*packetSubscriber),
 	}
 
 	controlCh, unsubscribe := c.Subscribe(func(Packet) bool { return true })
@@ -249,5 +249,38 @@ func TestClientSubscribeDropsOldestWhenSubscriberBackedUp(t *testing.T) {
 	}
 	if !gotLatest {
 		t.Fatalf("subscriber queue did not retain latest packet %q", latest.Payload)
+	}
+}
+
+func TestClientSubscribeLosslessRetainsAllBackedUpPackets(t *testing.T) {
+	c := &Client{
+		stopCh:      make(chan struct{}),
+		subscribers: make(map[uint64]*packetSubscriber),
+	}
+
+	controlCh, unsubscribe := c.SubscribeLossless(func(Packet) bool { return true })
+	defer unsubscribe()
+
+	const total = 64
+	for i := 0; i < total; i++ {
+		if !c.dispatchSubscriber(Packet{Payload: []byte{byte(i)}}) {
+			t.Fatalf("dispatchSubscriber(%d) = false, want true", i)
+		}
+	}
+
+	got := make([]byte, 0, total)
+	for i := 0; i < total; i++ {
+		select {
+		case pkt := <-controlCh:
+			got = append(got, pkt.Payload...)
+		case <-time.After(100 * time.Millisecond):
+			t.Fatalf("timed out waiting for packet %d", i)
+		}
+	}
+
+	for i := 0; i < total; i++ {
+		if got[i] != byte(i) {
+			t.Fatalf("got packet sequence %v, want ordered 0..%d", got, total-1)
+		}
 	}
 }

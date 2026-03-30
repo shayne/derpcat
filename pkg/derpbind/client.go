@@ -27,7 +27,7 @@ type Client struct {
 	doneCh   chan struct{}
 
 	subMu       sync.RWMutex
-	subscribers map[uint64]packetSubscriber
+	subscribers map[uint64]*packetSubscriber
 	nextSubID   uint64
 	stopOnce    sync.Once
 }
@@ -35,7 +35,20 @@ type Client struct {
 type packetSubscriber struct {
 	filter func(Packet) bool
 	ch     chan Packet
+	mode   subscriberMode
+	notify chan struct{}
+	mu     sync.Mutex
+	queue  []Packet
+	closed bool
+	once   sync.Once
 }
+
+type subscriberMode uint8
+
+const (
+	subscriberLossy subscriberMode = iota
+	subscriberLossless
+)
 
 func NewClient(ctx context.Context, node *tailcfg.DERPNode, serverURL string) (*Client, error) {
 	if node == nil {
@@ -58,7 +71,7 @@ func NewClient(ctx context.Context, node *tailcfg.DERPNode, serverURL string) (*
 		packetCh:    make(chan Packet, 16),
 		stopCh:      make(chan struct{}),
 		doneCh:      make(chan struct{}),
-		subscribers: make(map[uint64]packetSubscriber),
+		subscribers: make(map[uint64]*packetSubscriber),
 	}
 	go c.recvLoop()
 	return c, nil
@@ -84,19 +97,34 @@ func (c *Client) Send(ctx context.Context, dst key.NodePublic, payload []byte) e
 }
 
 func (c *Client) Subscribe(filter func(Packet) bool) (<-chan Packet, func()) {
+	return c.subscribe(filter, subscriberLossy)
+}
+
+func (c *Client) SubscribeLossless(filter func(Packet) bool) (<-chan Packet, func()) {
+	return c.subscribe(filter, subscriberLossless)
+}
+
+func (c *Client) subscribe(filter func(Packet) bool, mode subscriberMode) (<-chan Packet, func()) {
 	ch := make(chan Packet, 16)
 	if filter == nil {
 		close(ch)
 		return ch, func() {}
 	}
 
+	sub := &packetSubscriber{
+		filter: filter,
+		ch:     ch,
+		mode:   mode,
+	}
+	if mode == subscriberLossless {
+		sub.notify = make(chan struct{}, 1)
+		go sub.run(c.stopCh)
+	}
+
 	c.subMu.Lock()
 	id := c.nextSubID
 	c.nextSubID++
-	c.subscribers[id] = packetSubscriber{
-		filter: filter,
-		ch:     ch,
-	}
+	c.subscribers[id] = sub
 	c.subMu.Unlock()
 
 	var once sync.Once
@@ -109,7 +137,7 @@ func (c *Client) Subscribe(filter func(Packet) bool) (<-chan Packet, func()) {
 			}
 			c.subMu.Unlock()
 			if ok {
-				close(sub.ch)
+				sub.close()
 			}
 		})
 	}
@@ -190,14 +218,18 @@ func (c *Client) dispatchSubscriber(pkt Packet) bool {
 		if !sub.filter(pkt) {
 			continue
 		}
-		if c.tryDeliverSubscriber(sub.ch, pkt) {
+		if c.tryDeliverSubscriber(sub, pkt) {
 			return true
 		}
 	}
 	return false
 }
 
-func (c *Client) tryDeliverSubscriber(ch chan Packet, pkt Packet) bool {
+func (c *Client) tryDeliverSubscriber(sub *packetSubscriber, pkt Packet) bool {
+	if sub.mode == subscriberLossless {
+		return sub.enqueue(pkt)
+	}
+	ch := sub.ch
 	select {
 	case ch <- pkt:
 		return true
@@ -218,4 +250,77 @@ func (c *Client) tryDeliverSubscriber(ch chan Packet, pkt Packet) bool {
 	case <-c.stopCh:
 	}
 	return true
+}
+
+func (s *packetSubscriber) enqueue(pkt Packet) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return true
+	}
+	s.queue = append(s.queue, pkt)
+	s.signalLocked()
+	return true
+}
+
+func (s *packetSubscriber) signalLocked() {
+	select {
+	case s.notify <- struct{}{}:
+	default:
+	}
+}
+
+func (s *packetSubscriber) close() {
+	s.mu.Lock()
+	if s.closed {
+		s.mu.Unlock()
+		return
+	}
+	s.closed = true
+	if s.mode == subscriberLossless {
+		s.signalLocked()
+	}
+	s.mu.Unlock()
+	if s.mode == subscriberLossy {
+		s.finalize()
+	}
+}
+
+func (s *packetSubscriber) finalize() {
+	s.once.Do(func() {
+		close(s.ch)
+	})
+}
+
+func (s *packetSubscriber) run(stopCh <-chan struct{}) {
+	defer s.finalize()
+	for {
+		select {
+		case <-s.notify:
+		case <-stopCh:
+			return
+		}
+
+		for {
+			s.mu.Lock()
+			if len(s.queue) == 0 {
+				closed := s.closed
+				s.mu.Unlock()
+				if closed {
+					return
+				}
+				break
+			}
+			pkt := s.queue[0]
+			s.queue[0] = Packet{}
+			s.queue = s.queue[1:]
+			s.mu.Unlock()
+
+			select {
+			case s.ch <- pkt:
+			case <-stopCh:
+				return
+			}
+		}
+	}
 }

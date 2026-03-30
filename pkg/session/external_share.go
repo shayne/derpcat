@@ -19,7 +19,7 @@ import (
 )
 
 func issuePublicShareSession(ctx context.Context, cfg ShareConfig) (string, *relaySession, error) {
-	dm, err := derpbind.FetchMap(ctx, derpbind.PublicDERPMapURL)
+	dm, err := derpbind.FetchMap(ctx, publicDERPMapURL())
 	if err != nil {
 		return "", nil, err
 	}
@@ -28,7 +28,7 @@ func issuePublicShareSession(ctx context.Context, cfg ShareConfig) (string, *rel
 		return "", nil, errors.New("no DERP node available")
 	}
 
-	derpClient, err := derpbind.NewClient(ctx, node, derpServerURL(node))
+	derpClient, err := derpbind.NewClient(ctx, node, publicDERPServerURL(node))
 	if err != nil {
 		return "", nil, err
 	}
@@ -98,7 +98,7 @@ func shareExternal(ctx context.Context, cfg ShareConfig) (string, error) {
 	}
 	defer session.derp.Close()
 	defer session.probeConn.Close()
-	claimCh, unsubscribeClaims := session.derp.Subscribe(func(pkt derpbind.Packet) bool {
+	claimCh, unsubscribeClaims := session.derp.SubscribeLossless(func(pkt derpbind.Packet) bool {
 		return isClaimPayload(pkt.Payload)
 	})
 	defer unsubscribeClaims()
@@ -185,7 +185,7 @@ func openExternal(ctx context.Context, cfg OpenConfig, tok token.Token) error {
 		return ErrUnknownSession
 	}
 
-	dm, err := derpbind.FetchMap(ctx, derpbind.PublicDERPMapURL)
+	dm, err := derpbind.FetchMap(ctx, publicDERPMapURL())
 	if err != nil {
 		return err
 	}
@@ -193,7 +193,7 @@ func openExternal(ctx context.Context, cfg OpenConfig, tok token.Token) error {
 	if node == nil {
 		return errors.New("no bootstrap DERP node available")
 	}
-	derpClient, err := derpbind.NewClient(ctx, node, derpServerURL(node))
+	derpClient, err := derpbind.NewClient(ctx, node, publicDERPServerURL(node))
 	if err != nil {
 		return err
 	}
