@@ -192,7 +192,7 @@ func TestShareOpenForwardsConcurrentConnections(t *testing.T) {
 				return
 			}
 			if reply != payload {
-				errCh <- errors.New("reply mismatch")
+				errCh <- errors.New("reply mismatch: payload=" + payload + " reply=" + reply)
 			}
 		}(payload)
 	}

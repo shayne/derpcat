@@ -57,8 +57,8 @@ func TestManagerFallsBackToRelayWhenDirectBreaks(t *testing.T) {
 func TestManagerDoesNotReportDirectForUnownedUDPNoise(t *testing.T) {
 	t.Helper()
 
-	relay := newFakePacketConn(&net.IPAddr{IP: net.IPv4(127, 0, 0, 1)})
-	noise := newFakePacketConn(&net.IPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	relay := newFakePacketConn(&net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 50001})
+	noise := newFakePacketConn(&net.UDPAddr{IP: net.IPv4(203, 0, 113, 9), Port: 54321})
 
 	mgr := NewManager(ManagerConfig{
 		RelayConn:  relay,
@@ -67,6 +67,10 @@ func TestManagerDoesNotReportDirectForUnownedUDPNoise(t *testing.T) {
 	})
 
 	noise.inject([]byte("random udp noise"), noise.LocalAddr())
+	buf := make([]byte, 64)
+	if _, _, err := noise.ReadFrom(buf); err != nil {
+		t.Fatalf("noise ReadFrom() error = %v", err)
+	}
 
 	if got := mgr.PathState(); got != PathRelay {
 		t.Fatalf("PathState() = %v, want %v", got, PathRelay)
