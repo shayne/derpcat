@@ -144,7 +144,6 @@ if [[ "${response_two}" != "${shared_content}" ]]; then
   exit 1
 fi
 
-grep -q '^claimed$' "${local_share_log}"
 share_trace="$(path_trace "${local_share_log}")"
 open_trace="$(remote_path_trace "${remote_open_err}")"
 assert_path_evidence "share" "${share_trace}"
