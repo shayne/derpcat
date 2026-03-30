@@ -132,16 +132,64 @@ func TestBindDoesNotInferDirectFromArbitraryInboundUDP(t *testing.T) {
 	defer pc.Close()
 
 	bind := NewBind(BindConfig{
-		DirectEndpoint: "127.0.0.1:12345",
-		PacketConn:     pc,
-		PathSelector:   fakeSelector{},
+		PacketConn:   pc,
+		PathSelector: fakeSelector{},
 	})
+	fns, _, err := bind.Open(0)
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	defer bind.Close()
 
-	if got := bind.activeDirectAddr(); got != nil {
-		t.Fatalf("activeDirectAddr() = %v, want nil", got)
+	sender := newLoopPacketConn(t)
+	defer sender.Close()
+
+	done := make(chan error, 1)
+	go func() {
+		packet := make([][]byte, 1)
+		packet[0] = make([]byte, 64<<10)
+		sizes := make([]int, 1)
+		eps := make([]conn.Endpoint, 1)
+		n, err := fns[0](packet, sizes, eps)
+		if err != nil {
+			done <- err
+			return
+		}
+		if n != 1 {
+			done <- errors.New("receive count != 1")
+			return
+		}
+		if got := string(packet[0][:sizes[0]]); got != "noise" {
+			done <- errors.New("unexpected payload: " + got)
+			return
+		}
+		done <- nil
+	}()
+
+	if _, err := sender.WriteTo([]byte("noise"), pc.LocalAddr()); err != nil {
+		t.Fatalf("WriteTo() error = %v", err)
+	}
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("receive error = %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("receive did not complete")
+	}
+
+	if got := bind.directUDPAddr(); got != nil {
+		t.Fatalf("directUDPAddr() = %v, want nil", got)
 	}
 	if got := bind.DirectEndpoint(); got != "" {
 		t.Fatalf("DirectEndpoint() = %q, want empty", got)
+	}
+	if got := bind.activeDirectAddr(); got != nil {
+		t.Fatalf("activeDirectAddr() = %v, want nil", got)
+	}
+	if bind.DirectConfirmed() {
+		t.Fatal("DirectConfirmed() = true, want false")
 	}
 }
 
