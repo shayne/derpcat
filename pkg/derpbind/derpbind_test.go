@@ -7,6 +7,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
 	"time"
 
@@ -282,5 +283,50 @@ func TestClientSubscribeLosslessRetainsAllBackedUpPackets(t *testing.T) {
 		if got[i] != byte(i) {
 			t.Fatalf("got packet sequence %v, want ordered 0..%d", got, total-1)
 		}
+	}
+}
+
+func TestClientSubscribeUnsubscribeWhileDispatchingDoesNotPanic(t *testing.T) {
+	c := &Client{
+		stopCh:      make(chan struct{}),
+		subscribers: make(map[uint64]*packetSubscriber),
+	}
+
+	for i := 0; i < 200; i++ {
+		controlCh, unsubscribe := c.Subscribe(func(Packet) bool { return true })
+
+		var wg sync.WaitGroup
+		wg.Add(2)
+		go func(iteration int) {
+			defer wg.Done()
+			for j := 0; j < 32; j++ {
+				c.dispatchSubscriber(Packet{Payload: []byte{byte(iteration), byte(j)}})
+			}
+		}(i)
+		go func() {
+			defer wg.Done()
+			time.Sleep(time.Microsecond)
+			unsubscribe()
+		}()
+		wg.Wait()
+
+		select {
+		case _, ok := <-controlCh:
+			if ok {
+				for {
+					select {
+					case _, ok := <-controlCh:
+						if !ok {
+							goto closed
+						}
+					case <-time.After(100 * time.Millisecond):
+						t.Fatal("subscriber channel remained open after unsubscribe")
+					}
+				}
+			}
+		case <-time.After(100 * time.Millisecond):
+			t.Fatal("timed out waiting for unsubscribe to close subscriber channel")
+		}
+	closed:
 	}
 }

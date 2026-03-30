@@ -33,12 +33,14 @@ type Client struct {
 }
 
 type packetSubscriber struct {
-	filter  func(Packet) bool
-	ch      chan Packet
-	mode    subscriberMode
-	queueCh chan Packet
-	done    chan struct{}
-	once    sync.Once
+	filter    func(Packet) bool
+	ch        chan Packet
+	mode      subscriberMode
+	queueCh   chan Packet
+	done      chan struct{}
+	once      sync.Once
+	deliverMu sync.Mutex
+	closed    bool
 }
 
 type subscriberMode uint8
@@ -235,27 +237,7 @@ func (c *Client) tryDeliverSubscriber(sub *packetSubscriber, pkt Packet) bool {
 	if sub.mode == subscriberLossless {
 		return sub.enqueue(c.stopCh, pkt)
 	}
-	ch := sub.ch
-	select {
-	case ch <- pkt:
-		return true
-	case <-c.stopCh:
-		return true
-	default:
-	}
-
-	select {
-	case <-ch:
-	case <-c.stopCh:
-		return true
-	default:
-	}
-
-	select {
-	case ch <- pkt:
-	case <-c.stopCh:
-	}
-	return true
+	return sub.tryDeliverLossy(c.stopCh, pkt)
 }
 
 func (s *packetSubscriber) enqueue(stopCh <-chan struct{}, pkt Packet) bool {
@@ -263,9 +245,9 @@ func (s *packetSubscriber) enqueue(stopCh <-chan struct{}, pkt Packet) bool {
 	case s.queueCh <- pkt:
 		return true
 	case <-s.done:
-		return true
+		return false
 	case <-stopCh:
-		return true
+		return false
 	}
 }
 
@@ -276,9 +258,13 @@ func (s *packetSubscriber) close() {
 		})
 		return
 	}
-	s.once.Do(func() {
-		close(s.ch)
-	})
+	s.deliverMu.Lock()
+	defer s.deliverMu.Unlock()
+	if s.closed {
+		return
+	}
+	s.closed = true
+	close(s.ch)
 }
 
 func (s *packetSubscriber) run(stopCh <-chan struct{}) {
@@ -301,4 +287,38 @@ func (s *packetSubscriber) run(stopCh <-chan struct{}) {
 			return
 		}
 	}
+}
+
+func (s *packetSubscriber) tryDeliverLossy(stopCh <-chan struct{}, pkt Packet) bool {
+	s.deliverMu.Lock()
+	defer s.deliverMu.Unlock()
+
+	if s.closed {
+		return false
+	}
+
+	select {
+	case s.ch <- pkt:
+		return true
+	case <-stopCh:
+		return true
+	default:
+	}
+
+	select {
+	case <-s.ch:
+	case <-stopCh:
+		return true
+	default:
+	}
+
+	if s.closed {
+		return false
+	}
+
+	select {
+	case s.ch <- pkt:
+	case <-stopCh:
+	}
+	return true
 }

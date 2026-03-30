@@ -34,8 +34,8 @@ type netTun struct {
 	stack          *stack.Stack
 	events         chan tun.Event
 	incomingPacket chan *buffer.View
-	packetMu       sync.RWMutex
-	closed         bool
+	closeCh        chan struct{}
+	closeOnce      sync.Once
 	mtu            int
 	dnsServers     []netip.Addr
 	hasV4, hasV6   bool
@@ -54,6 +54,7 @@ func CreateNetTUN(localAddresses, dnsServers []netip.Addr, mtu int) (tun.Device,
 		stack:          stack.New(opts),
 		events:         make(chan tun.Event, 10),
 		incomingPacket: make(chan *buffer.View),
+		closeCh:        make(chan struct{}),
 		dnsServers:     dnsServers,
 		mtu:            mtu,
 	}
@@ -102,8 +103,16 @@ func (tun *netTun) File() *os.File { return nil }
 func (tun *netTun) Events() <-chan tun.Event { return tun.events }
 
 func (tun *netTun) Read(buf [][]byte, sizes []int, offset int) (int, error) {
-	view, ok := <-tun.incomingPacket
-	if !ok {
+	select {
+	case <-tun.closeCh:
+		return 0, os.ErrClosed
+	default:
+	}
+
+	var view *buffer.View
+	select {
+	case view = <-tun.incomingPacket:
+	case <-tun.closeCh:
 		return 0, os.ErrClosed
 	}
 	n, err := view.Read(buf[0][offset:])
@@ -140,26 +149,32 @@ func (tun *netTun) WriteNotify() {
 	}
 	view := pkt.ToView()
 	pkt.DecRef()
-	tun.packetMu.RLock()
-	defer tun.packetMu.RUnlock()
-	if tun.closed {
+
+	select {
+	case <-tun.closeCh:
 		return
+	default:
 	}
-	tun.incomingPacket <- view
+
+	select {
+	case tun.incomingPacket <- view:
+	case <-tun.closeCh:
+	}
 }
 
 func (tun *netTun) Close() error {
-	tun.stack.RemoveNIC(1)
-	if tun.events != nil {
-		close(tun.events)
-	}
-	tun.ep.Close()
-	tun.packetMu.Lock()
-	tun.closed = true
-	if tun.incomingPacket != nil {
-		close(tun.incomingPacket)
-	}
-	tun.packetMu.Unlock()
+	tun.closeOnce.Do(func() {
+		close(tun.closeCh)
+		if tun.stack != nil {
+			tun.stack.RemoveNIC(1)
+		}
+		if tun.events != nil {
+			close(tun.events)
+		}
+		if tun.ep != nil {
+			tun.ep.Close()
+		}
+	})
 	return nil
 }
 
