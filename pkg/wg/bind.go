@@ -27,18 +27,22 @@ type PathSelector interface {
 }
 
 type Bind struct {
-	mu         sync.Mutex
-	conn       net.PacketConn
-	ownsConn   bool
-	derp       *derpbind.Client
-	peerDERP   key.NodePublic
-	selector   PathSelector
-	state      *bindState
-	opened     bool
-	directAddr *net.UDPAddr
-	directSeen atomic.Bool
-	sent       atomic.Int64
-	received   atomic.Int64
+	mu       sync.Mutex
+	conn     net.PacketConn
+	ownsConn bool
+	derp     *derpbind.Client
+	peerDERP key.NodePublic
+	selector PathSelector
+	state    *bindState
+	opened   bool
+	direct   directState
+	sent     atomic.Int64
+	received atomic.Int64
+}
+
+type directState struct {
+	addr *net.UDPAddr
+	seen bool
 }
 
 type bindState struct {
@@ -218,9 +222,8 @@ func (b *Bind) BatchSize() int { return 1 }
 func (b *Bind) SetDirectEndpoint(s string) error {
 	if s == "" {
 		b.mu.Lock()
-		b.directAddr = nil
+		b.direct = directState{}
 		b.mu.Unlock()
-		b.directSeen.Store(false)
 		return nil
 	}
 	addr, err := net.ResolveUDPAddr("udp", s)
@@ -228,9 +231,8 @@ func (b *Bind) SetDirectEndpoint(s string) error {
 		return err
 	}
 	b.mu.Lock()
-	b.directAddr = addr
+	b.direct = directState{addr: cloneUDPAddr(addr)}
 	b.mu.Unlock()
-	b.directSeen.Store(false)
 	return nil
 }
 
@@ -322,34 +324,29 @@ func (b *Bind) activeDirectAddr() *net.UDPAddr {
 func (b *Bind) directUDPAddr() *net.UDPAddr {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	if b.directAddr == nil {
-		return nil
-	}
-	clone := *b.directAddr
-	return &clone
+	return cloneUDPAddr(b.direct.addr)
 }
 
 func (b *Bind) directPath() (endpoint string, active bool) {
 	if b.selector != nil {
 		return b.selector.DirectPath()
 	}
-	addr := b.directUDPAddr()
-	if addr == nil {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.direct.addr == nil {
 		return "", false
 	}
-	return addr.String(), b.directSeen.Load()
+	return b.direct.addr.String(), b.direct.seen
 }
 
 func (b *Bind) noteDirectValidation(addr *net.UDPAddr) {
 	if b.selector != nil || addr == nil {
 		return
 	}
-	directAddr := b.directUDPAddr()
-	if directAddr == nil {
-		return
-	}
-	if udpAddrsEqual(directAddr, addr) {
-		b.directSeen.Store(true)
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if udpAddrsEqual(b.direct.addr, addr) {
+		b.direct.seen = true
 	}
 }
 
@@ -374,6 +371,17 @@ func resolveUDPAddr(endpoint string) *net.UDPAddr {
 		return nil
 	}
 	return addr
+}
+
+func cloneUDPAddr(addr *net.UDPAddr) *net.UDPAddr {
+	if addr == nil {
+		return nil
+	}
+	clone := *addr
+	if addr.IP != nil {
+		clone.IP = append(net.IP(nil), addr.IP...)
+	}
+	return &clone
 }
 
 func (e *Endpoint) ClearSrc() {}

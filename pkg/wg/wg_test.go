@@ -4,11 +4,9 @@ import (
 	"bytes"
 	"context"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"io"
 	"net"
-	"net/http"
 	"net/http/httptest"
 	"net/netip"
 	"sync"
@@ -262,6 +260,91 @@ func TestBindNonSelectorDirectRequiresValidationBeforeConfirmation(t *testing.T)
 	}
 	if bind.DirectConfirmed() {
 		t.Fatal("DirectConfirmed() after send without inbound validation = true, want false")
+	}
+}
+
+func TestBindNonSelectorReplacementEndpointRequiresNewValidation(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	derpA, derpB := newTestDERPClientPair(t, ctx)
+	pc := newLoopPacketConn(t)
+	defer pc.Close()
+	oldPeer := newLoopPacketConn(t)
+	defer oldPeer.Close()
+	newPeer := newLoopPacketConn(t)
+	defer newPeer.Close()
+
+	bind := NewBind(BindConfig{
+		PacketConn:     pc,
+		DERPClient:     derpA,
+		PeerDERP:       derpB.PublicKey(),
+		DirectEndpoint: oldPeer.LocalAddr().String(),
+	})
+	fns, _, err := bind.Open(0)
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	defer bind.Close()
+
+	if _, err := oldPeer.WriteTo([]byte("validated"), pc.LocalAddr()); err != nil {
+		t.Fatalf("WriteTo(old validation) error = %v", err)
+	}
+	receiveOnePacket(t, fns[0], "validated")
+	if !bind.DirectConfirmed() {
+		t.Fatal("DirectConfirmed() after old validation = false, want true")
+	}
+
+	if err := bind.SetDirectEndpoint(newPeer.LocalAddr().String()); err != nil {
+		t.Fatalf("SetDirectEndpoint(new) error = %v", err)
+	}
+	if bind.DirectConfirmed() {
+		t.Fatal("DirectConfirmed() after endpoint replacement = true, want false")
+	}
+
+	if _, err := oldPeer.WriteTo([]byte("late-old"), pc.LocalAddr()); err != nil {
+		t.Fatalf("WriteTo(old late packet) error = %v", err)
+	}
+	receiveOnePacket(t, fns[0], "late-old")
+	if bind.DirectConfirmed() {
+		t.Fatal("DirectConfirmed() after late packet from old endpoint = true, want false")
+	}
+	if got := bind.DirectEndpoint(); got != newPeer.LocalAddr().String() {
+		t.Fatalf("DirectEndpoint() after replacement = %q, want %q", got, newPeer.LocalAddr().String())
+	}
+
+	newDirectDone := make(chan []byte, 1)
+	go func() {
+		buf := make([]byte, 64<<10)
+		_ = newPeer.SetReadDeadline(time.Now().Add(2 * time.Second))
+		n, _, err := newPeer.ReadFrom(buf)
+		if err != nil {
+			newDirectDone <- nil
+			return
+		}
+		newDirectDone <- append([]byte(nil), buf[:n]...)
+	}()
+
+	payload := []byte("replacement")
+	if err := bind.Send([][]byte{payload}, &Endpoint{dst: "derp"}, 0); err != nil {
+		t.Fatalf("Send() error = %v", err)
+	}
+
+	select {
+	case got := <-newDirectDone:
+		if string(got) != string(payload) {
+			t.Fatalf("new direct payload = %q, want %q", got, payload)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("direct send did not reach replacement endpoint")
+	}
+
+	pkt, err := derpB.Receive(ctx)
+	if err != nil {
+		t.Fatalf("Receive() error = %v", err)
+	}
+	if got := string(pkt.Payload); got != string(payload) {
+		t.Fatalf("DERP payload = %q, want %q", got, payload)
 	}
 }
 
@@ -657,34 +740,47 @@ func newTestDERPNode(t *testing.T) (*tailcfg.DERPNode, string) {
 	derpHTTP := httptest.NewServer(derpserver.Handler(server))
 	t.Cleanup(derpHTTP.Close)
 
-	dm := &tailcfg.DERPMap{
-		Regions: map[int]*tailcfg.DERPRegion{
-			1: {
-				RegionID:   1,
-				RegionCode: "test",
-				RegionName: "Test Region",
-				Nodes: []*tailcfg.DERPNode{
-					{
-						Name:     "test-1",
-						RegionID: 1,
-						HostName: "127.0.0.1",
-						IPv4:     "127.0.0.1",
-						STUNPort: -1,
-						DERPPort: 0,
-					},
-				},
-			},
-		},
-	}
+	return &tailcfg.DERPNode{
+		Name:     "test-1",
+		RegionID: 1,
+		HostName: "127.0.0.1",
+		IPv4:     "127.0.0.1",
+		STUNPort: -1,
+		DERPPort: 0,
+	}, derpHTTP.URL + "/derp"
+}
 
-	mapHTTP := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/" {
-			http.NotFound(w, r)
+func receiveOnePacket(t *testing.T, fn conn.ReceiveFunc, want string) {
+	t.Helper()
+
+	done := make(chan error, 1)
+	go func() {
+		packets := make([][]byte, 1)
+		packets[0] = make([]byte, 64<<10)
+		sizes := make([]int, 1)
+		eps := make([]conn.Endpoint, 1)
+		n, err := fn(packets, sizes, eps)
+		if err != nil {
+			done <- err
 			return
 		}
-		_ = json.NewEncoder(w).Encode(dm)
-	}))
-	t.Cleanup(mapHTTP.Close)
+		if n != 1 {
+			done <- errors.New("receive count != 1")
+			return
+		}
+		if got := string(packets[0][:sizes[0]]); got != want {
+			done <- errors.New("unexpected payload: " + got)
+			return
+		}
+		done <- nil
+	}()
 
-	return dm.Regions[1].Nodes[0], derpHTTP.URL + "/derp"
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("receive error = %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("receive did not complete")
+	}
 }
