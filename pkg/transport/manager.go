@@ -29,7 +29,6 @@ type ManagerConfig struct {
 	RelayConn               net.PacketConn
 	DirectConn              net.PacketConn
 	DisableDirectReads      bool
-	PathChanged             func(Path)
 	CandidateSource         func(context.Context) []net.Addr
 	SendControl             func(context.Context, ControlMessage) error
 	ReceiveControl          func(context.Context) (ControlMessage, error)
@@ -106,15 +105,10 @@ func (m *Manager) now() time.Time {
 func (m *Manager) noteRelayOnly(now time.Time) {
 	m.mu.Lock()
 	m.discoveryGen++
-	changed := m.state.noteRelay(now)
-	path := m.state.path()
-	if changed {
+	if m.state.noteRelay(now) {
 		m.signalStateChangeLocked()
 	}
 	m.mu.Unlock()
-	if changed {
-		m.emitPathChange(path)
-	}
 }
 
 func (m *Manager) snapshotDiscoveryPlan() discoveryPlan {
@@ -136,10 +130,8 @@ func (m *Manager) tryPromoteDirect(now time.Time, addr net.Addr) bool {
 		m.mu.Unlock()
 		return false
 	}
-	path := m.state.path()
 	m.signalStateChangeLocked()
 	m.mu.Unlock()
-	m.emitPathChange(path)
 	return true
 }
 
@@ -233,13 +225,6 @@ func (m *Manager) Updates(ctx context.Context) <-chan Update {
 func (m *Manager) signalStateChangeLocked() {
 	close(m.stateNotify)
 	m.stateNotify = make(chan struct{})
-}
-
-func (m *Manager) emitPathChange(path Path) {
-	if path == PathUnknown || m.cfg.PathChanged == nil {
-		return
-	}
-	m.cfg.PathChanged(path)
 }
 
 func normalizeConfig(cfg ManagerConfig) ManagerConfig {

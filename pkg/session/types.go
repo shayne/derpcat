@@ -1,6 +1,7 @@
 package session
 
 import (
+	"context"
 	"io"
 	"sync"
 
@@ -62,6 +63,9 @@ type transportPathEmitter struct {
 	mu      sync.Mutex
 	emitter *telemetry.Emitter
 	last    transport.Path
+	closed  bool
+	cancel  context.CancelFunc
+	done    chan struct{}
 }
 
 func newTransportPathEmitter(emitter *telemetry.Emitter) *transportPathEmitter {
@@ -78,7 +82,7 @@ func (e *transportPathEmitter) Handle(path transport.Path) {
 
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	if path == e.last {
+	if e.closed || path == e.last {
 		return
 	}
 	e.last = path
@@ -89,6 +93,27 @@ func (e *transportPathEmitter) Handle(path transport.Path) {
 	case transport.PathRelay:
 		e.emitter.Status(string(StateRelay))
 	}
+}
+
+func (e *transportPathEmitter) Watch(ctx context.Context, manager *transport.Manager) {
+	if e == nil || manager == nil {
+		return
+	}
+
+	watchCtx, cancel := context.WithCancel(ctx)
+	done := make(chan struct{})
+
+	e.mu.Lock()
+	e.cancel = cancel
+	e.done = done
+	e.mu.Unlock()
+
+	go func() {
+		defer close(done)
+		for update := range manager.Updates(watchCtx) {
+			e.Handle(update.Path)
+		}
+	}()
 }
 
 func (e *transportPathEmitter) Flush(manager *transport.Manager) {
@@ -105,5 +130,54 @@ func (e *transportPathEmitter) Emit(state State) {
 
 	e.mu.Lock()
 	defer e.mu.Unlock()
+	if e.closed {
+		return
+	}
 	e.emitter.Status(string(state))
+}
+
+func (e *transportPathEmitter) Complete(manager *transport.Manager) {
+	if e == nil {
+		return
+	}
+	e.stopWatching()
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.emitter == nil || e.closed {
+		return
+	}
+	if manager != nil {
+		path := manager.PathState()
+		if path != transport.PathUnknown && path != e.last {
+			e.last = path
+			switch path {
+			case transport.PathDirect:
+				e.emitter.Status(string(StateDirect))
+			case transport.PathRelay:
+				e.emitter.Status(string(StateRelay))
+			}
+		}
+	}
+	e.closed = true
+	e.emitter.Status(string(StateComplete))
+}
+
+func (e *transportPathEmitter) stopWatching() {
+	if e == nil {
+		return
+	}
+
+	e.mu.Lock()
+	cancel := e.cancel
+	done := e.done
+	e.cancel = nil
+	e.done = nil
+	e.mu.Unlock()
+
+	if cancel != nil {
+		cancel()
+	}
+	if done != nil {
+		<-done
+	}
 }

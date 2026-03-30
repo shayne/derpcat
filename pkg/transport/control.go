@@ -95,15 +95,10 @@ func (m *Manager) sendCandidateUpdate(ctx context.Context) error {
 
 func (m *Manager) applyRemoteCandidates(now time.Time, candidates []net.Addr) {
 	m.mu.Lock()
-	changed := m.state.noteCandidates(now, candidates)
-	path := m.state.path()
-	if changed {
+	if m.state.noteCandidates(now, candidates) {
 		m.signalStateChangeLocked()
 	}
 	m.mu.Unlock()
-	if changed {
-		m.emitPathChange(path)
-	}
 }
 
 func parseCandidateAddrs(raw []string) []net.Addr {

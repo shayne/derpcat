@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/shayne/derpcat/pkg/telemetry"
+	"github.com/shayne/derpcat/pkg/transport"
 	"go4.org/mem"
 	"tailscale.com/derp/derpserver"
 	"tailscale.com/tailcfg"
@@ -271,6 +272,20 @@ func TestExternalListenSendCanUpgradeAfterRelayStart(t *testing.T) {
 	}
 	if got := result.Output; got != "upgrade-me" {
 		t.Fatalf("output = %q, want %q", got, "upgrade-me")
+	}
+}
+
+func TestTransportPathEmitterCompletionIsTerminal(t *testing.T) {
+	var status bytes.Buffer
+	emitter := newTransportPathEmitter(telemetry.New(&status, telemetry.LevelDefault))
+
+	emitter.Handle(transport.PathRelay)
+	emitter.Complete(nil)
+	emitter.Handle(transport.PathDirect)
+	emitter.Emit(StateDirect)
+
+	if got := sessionStatusLines(status.String()); len(got) != 2 || got[0] != string(StateRelay) || got[1] != string(StateComplete) {
+		t.Fatalf("status lines = %q, want [%q %q]", got, StateRelay, StateComplete)
 	}
 }
 
