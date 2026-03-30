@@ -43,6 +43,10 @@ type envelope struct {
 	Control  *transport.ControlMessage `json:"control,omitempty"`
 }
 
+type remoteCandidateSeeder interface {
+	SeedRemoteCandidates(context.Context, []net.Addr)
+}
+
 func derpPublicKeyRaw32(pub key.NodePublic) [32]byte {
 	var raw [32]byte
 	copy(raw[:], pub.AppendTo(raw[:0]))
@@ -201,9 +205,7 @@ func sendExternal(ctx context.Context, cfg SendConfig) error {
 	defer transportCleanup()
 	pathEmitter.Watch(transportCtx, transportManager)
 	pathEmitter.Flush(transportManager)
-	if decision.Accept != nil {
-		transportManager.SeedRemoteCandidates(transportCtx, parseCandidateStrings(decision.Accept.Candidates))
-	}
+	seedAcceptedDecisionCandidates(transportCtx, transportManager, decision)
 
 	_, listenerAddr, senderAddr := wg.DeriveAddresses(tok.SessionID)
 	sessionNode, err := wg.NewNode(wg.Config{
@@ -661,6 +663,13 @@ func parseCandidateStrings(raw []string) []net.Addr {
 		})
 	}
 	return addrs
+}
+
+func seedAcceptedDecisionCandidates(ctx context.Context, seeder remoteCandidateSeeder, decision rendezvous.Decision) {
+	if seeder == nil || decision.Accept == nil || len(decision.Accept.Candidates) == 0 {
+		return
+	}
+	seeder.SeedRemoteCandidates(ctx, parseCandidateStrings(decision.Accept.Candidates))
 }
 
 func isTransportControlPayload(payload []byte) bool {

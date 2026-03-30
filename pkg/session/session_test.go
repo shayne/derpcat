@@ -16,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/shayne/derpcat/pkg/rendezvous"
 	"github.com/shayne/derpcat/pkg/telemetry"
 	"github.com/shayne/derpcat/pkg/transport"
 	"go4.org/mem"
@@ -289,6 +290,36 @@ func TestTransportPathEmitterCompletionIsTerminal(t *testing.T) {
 	}
 }
 
+func TestSeedAcceptedDecisionCandidatesUsesAcceptCandidates(t *testing.T) {
+	ctx := context.Background()
+	decision := rendezvous.Decision{
+		Accepted: true,
+		Accept: &rendezvous.AcceptInfo{
+			Candidates: []string{
+				"100.64.0.10:12345",
+				"[2001:db8::10]:23456",
+				"not-an-addr",
+			},
+		},
+	}
+	seeder := &captureCandidateSeeder{}
+
+	seedAcceptedDecisionCandidates(ctx, seeder, decision)
+
+	if seeder.calls != 1 {
+		t.Fatalf("SeedRemoteCandidates() calls = %d, want 1", seeder.calls)
+	}
+	if got := len(seeder.candidates); got != 2 {
+		t.Fatalf("seeded candidates = %#v, want 2 parsed candidates", seeder.candidates)
+	}
+	if got := seeder.candidates[0].String(); got != "100.64.0.10:12345" {
+		t.Fatalf("first seeded candidate = %q, want %q", got, "100.64.0.10:12345")
+	}
+	if got := seeder.candidates[1].String(); got != "[2001:db8::10]:23456" {
+		t.Fatalf("second seeded candidate = %q, want %q", got, "[2001:db8::10]:23456")
+	}
+}
+
 type roundTripConfig struct {
 	payload []byte
 }
@@ -299,6 +330,16 @@ type roundTripResult struct {
 	SenderStatus   string
 	SeenRelay      bool
 	SeenDirect     bool
+}
+
+type captureCandidateSeeder struct {
+	calls      int
+	candidates []net.Addr
+}
+
+func (c *captureCandidateSeeder) SeedRemoteCandidates(_ context.Context, candidates []net.Addr) {
+	c.calls++
+	c.candidates = append([]net.Addr(nil), candidates...)
 }
 
 func runExternalRoundTrip(t *testing.T, cfg roundTripConfig) roundTripResult {
