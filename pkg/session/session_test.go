@@ -246,6 +246,50 @@ func TestShareTokenAllowsOneClaimer(t *testing.T) {
 	backendDone()
 }
 
+func TestExternalListenSendCanUpgradeAfterRelayStart(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	var listenerStatus bytes.Buffer
+	var senderStatus bytes.Buffer
+	var listenerOut bytes.Buffer
+	var senderIn bytes.Buffer
+	senderIn.WriteString("relay-first-then-direct")
+
+	listenerReady := make(chan string, 1)
+	go func() {
+		token, err := Listen(ctx, ListenConfig{
+			Emitter:    telemetry.New(&listenerStatus, telemetry.LevelDefault),
+			TokenSink:  listenerReady,
+			StdioOut:   &listenerOut,
+			ForceRelay: true,
+		})
+		if err != nil || token == "" {
+			t.Errorf("Listen() err=%v token=%q", err, token)
+		}
+	}()
+
+	token := <-listenerReady
+	if err := Send(ctx, SendConfig{
+		Token:      token,
+		StdioIn:    &senderIn,
+		Emitter:    telemetry.New(&senderStatus, telemetry.LevelDefault),
+		ForceRelay: true,
+	}); err != nil {
+		t.Fatalf("Send() error = %v", err)
+	}
+
+	if !strings.Contains(listenerStatus.String(), string(StateDirect)) {
+		t.Fatalf("listener statuses = %q, want %q after relay-first start", listenerStatus.String(), StateDirect)
+	}
+	if !strings.Contains(senderStatus.String(), string(StateDirect)) {
+		t.Fatalf("sender statuses = %q, want %q after relay-first start", senderStatus.String(), StateDirect)
+	}
+	if got := listenerOut.String(); got != "relay-first-then-direct" {
+		t.Fatalf("listener output = %q, want %q", got, "relay-first-then-direct")
+	}
+}
+
 func connectWithRetry(ctx context.Context, addr string) (net.Conn, error) {
 	var d net.Dialer
 	ticker := time.NewTicker(10 * time.Millisecond)
