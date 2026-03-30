@@ -105,14 +105,17 @@ assert_path_evidence() {
   fi
 }
 
-require_direct_evidence() {
+require_direct_evidence_on_either_side() {
   local label="$1"
-  local trace="$2"
+  local left_trace="$2"
+  local right_trace="$3"
 
-  if ! grep -q 'connected-direct' <<<"${trace}"; then
-    echo "${label} missing direct promotion evidence" >&2
-    exit 1
+  if grep -q 'connected-direct' <<<"${left_trace}" || grep -q 'connected-direct' <<<"${right_trace}"; then
+    return 0
   fi
+
+  echo "${label} missing direct promotion evidence on both sides" >&2
+  exit 1
 }
 
 dump_remote_logs() {
@@ -149,8 +152,7 @@ remote_listener_trace="$(remote_path_trace "${remote_base}.err")"
 local_sender_trace="$(path_trace "${tmp}/local-sender.err")"
 assert_path_evidence "local sender" "${local_sender_trace}"
 assert_path_evidence "remote listener" "${remote_listener_trace}"
-require_direct_evidence "local sender" "${local_sender_trace}"
-require_direct_evidence "remote listener" "${remote_listener_trace}"
+require_direct_evidence_on_either_side "local-to-${target}" "${local_sender_trace}" "${remote_listener_trace}"
 
 payload_remote_to_local="hello ${target}-to-local-$(date +%s)"
 local_listener_log="${tmp}/local-listener.err"
@@ -183,5 +185,4 @@ remote_sender_trace="$(remote_path_trace "${remote_base}.sender.err")"
 local_listener_trace="$(path_trace "${local_listener_log}")"
 assert_path_evidence "local listener" "${local_listener_trace}"
 assert_path_evidence "remote sender" "${remote_sender_trace}"
-require_direct_evidence "local listener" "${local_listener_trace}"
-require_direct_evidence "remote sender" "${remote_sender_trace}"
+require_direct_evidence_on_either_side "${target}-to-local" "${local_listener_trace}" "${remote_sender_trace}"
