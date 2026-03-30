@@ -485,6 +485,51 @@ func TestBindSelectorInboundTrafficRefreshesDirectActivity(t *testing.T) {
 	}
 }
 
+func TestBindSelectorOutboundTrafficRefreshesDirectActivity(t *testing.T) {
+	pc := newLoopPacketConn(t)
+	defer pc.Close()
+
+	directPeer := newLoopPacketConn(t)
+	defer directPeer.Close()
+
+	selector := &trackingSelector{
+		path: selectorPath{endpoint: directPeer.LocalAddr().String(), active: true},
+	}
+	bind := NewBind(BindConfig{
+		PacketConn:   pc,
+		PathSelector: selector,
+	})
+	if _, _, err := bind.Open(0); err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	defer bind.Close()
+
+	done := make(chan error, 1)
+	go func() {
+		buf := make([]byte, 64<<10)
+		_ = directPeer.SetReadDeadline(time.Now().Add(2 * time.Second))
+		_, _, err := directPeer.ReadFrom(buf)
+		done <- err
+	}()
+
+	if err := bind.Send([][]byte{[]byte("direct-data")}, &Endpoint{dst: "derp"}, 0); err != nil {
+		t.Fatalf("Send() error = %v", err)
+	}
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("direct peer read error = %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("direct peer did not receive packet")
+	}
+
+	if !selector.sawActivity(directPeer.LocalAddr()) {
+		t.Fatalf("selector activity = %v, want %v", selector.activity, directPeer.LocalAddr())
+	}
+}
+
 func TestBindSelectorWriteFailureFallsBackToDERPAndMarksDirectBroken(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()

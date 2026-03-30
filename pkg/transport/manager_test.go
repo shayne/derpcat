@@ -185,7 +185,7 @@ func TestManagerSeedsRemoteCandidatesWithoutWaitingForDiscoveryTick(t *testing.T
 	}
 }
 
-func TestManagerDemotesAndRediscoversWhenActiveDirectCandidateIsReplaced(t *testing.T) {
+func TestManagerKeepsActiveDirectPathWhenCandidateSetReplacesEndpoint(t *testing.T) {
 	t.Helper()
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -236,16 +236,14 @@ func TestManagerDemotesAndRediscoversWhenActiveDirectCandidateIsReplaced(t *test
 	}, 200*time.Millisecond) {
 		t.Fatal("failed to deliver replacement direct candidate")
 	}
-	if !waitForPath(t, mgr, PathRelay, 200*time.Millisecond) {
-		t.Fatalf("PathState() after candidate replacement = %v, want %v before rediscovery", mgr.PathState(), PathRelay)
+	if got := mgr.PathState(); got != PathDirect {
+		t.Fatalf("PathState() after candidate replacement = %v, want %v while active direct path is healthy", got, PathDirect)
 	}
-	if !direct.waitForWritePayloadTo(newCandidate, discoProbePayload, 200*time.Millisecond) {
-		t.Fatalf("manager did not probe replacement direct candidate %v", newCandidate)
+	if endpoint, active := mgr.DirectPath(); endpoint != oldCandidate.String() || !active {
+		t.Fatalf("DirectPath() after candidate replacement = (%q, %t), want (%q, true)", endpoint, active, oldCandidate.String())
 	}
-
-	direct.enqueueRead(discoAckPayload, newCandidate)
-	if !waitForPath(t, mgr, PathDirect, 200*time.Millisecond) {
-		t.Fatalf("PathState() after candidate replacement recovery = %v, want %v", mgr.PathState(), PathDirect)
+	if direct.waitForWritePayloadTo(newCandidate, discoProbePayload, 200*time.Millisecond) {
+		t.Fatalf("manager unexpectedly reprobed replacement candidate %v while active direct path remained healthy", newCandidate)
 	}
 }
 

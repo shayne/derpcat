@@ -190,6 +190,7 @@ func (b *Bind) Send(bufs [][]byte, ep conn.Endpoint, offset int) error {
 				}
 			} else {
 				b.sent.Add(1)
+				b.noteDirectActivity(directAddr)
 			}
 			if directConfirmed || state == nil || state.derp == nil || state.peerDERP.IsZero() {
 				continue

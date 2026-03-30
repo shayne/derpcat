@@ -119,12 +119,20 @@ func (s *pathState) noteCallMeMaybeSuccess(now time.Time) {
 }
 
 func (s *pathState) noteCandidates(now time.Time, candidates []net.Addr) bool {
+	prevBest := s.bestEndpoint
+	prevBestAddr := cloneAddr(s.endpoints[prevBest])
 	next := make(map[string]net.Addr, len(candidates))
 	for _, candidate := range candidates {
 		if candidate == nil {
 			continue
 		}
 		next[candidate.String()] = cloneAddr(candidate)
+	}
+
+	if s.current == PathDirect && prevBest != "" {
+		if _, ok := next[prevBest]; !ok && prevBestAddr != nil {
+			next[prevBest] = prevBestAddr
+		}
 	}
 
 	changed := len(next) != len(s.endpoints)
