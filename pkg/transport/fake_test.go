@@ -83,6 +83,7 @@ func (c *fakePacketConn) WriteTo(b []byte, addr net.Addr) (int, error) {
 		payload: append([]byte(nil), b...),
 		addr:    addr,
 	})
+	c.signalLocked()
 	return len(b), nil
 }
 
@@ -121,3 +122,115 @@ func (timeoutErr) Temporary() bool { return true }
 
 var _ net.PacketConn = (*fakePacketConn)(nil)
 var _ error = timeoutErr{}
+
+func (c *fakePacketConn) waitForWriteTo(addr net.Addr, timeout time.Duration) bool {
+	return c.waitForWriteCountTo(addr, 1, timeout)
+}
+
+func (c *fakePacketConn) writeCountTo(addr net.Addr) int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	count := 0
+	for _, pkt := range c.writes {
+		if pkt.addr.String() == addr.String() {
+			count++
+		}
+	}
+	return count
+}
+
+func (c *fakePacketConn) waitForWriteCountTo(addr net.Addr, n int, timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	for {
+		c.mu.Lock()
+		count := 0
+		for _, pkt := range c.writes {
+			if pkt.addr.String() == addr.String() {
+				count++
+			}
+		}
+		if count >= n {
+			c.mu.Unlock()
+			return true
+		}
+		if c.closed {
+			c.mu.Unlock()
+			return false
+		}
+		waitCh := c.notify
+		c.mu.Unlock()
+
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			return false
+		}
+
+		timer := time.NewTimer(remaining)
+		select {
+		case <-waitCh:
+		case <-timer.C:
+		}
+		if !timer.Stop() {
+			select {
+			case <-timer.C:
+			default:
+			}
+		}
+	}
+}
+
+type fakeSignal struct {
+	mu     sync.Mutex
+	count  int
+	notify chan struct{}
+}
+
+func newFakeSignal() *fakeSignal {
+	return &fakeSignal{notify: make(chan struct{})}
+}
+
+func (s *fakeSignal) fire() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.count++
+	next := make(chan struct{})
+	close(s.notify)
+	s.notify = next
+}
+
+func (s *fakeSignal) waitForCount(n int, timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	for {
+		s.mu.Lock()
+		if s.count >= n {
+			s.mu.Unlock()
+			return true
+		}
+		waitCh := s.notify
+		s.mu.Unlock()
+
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			return false
+		}
+
+		timer := time.NewTimer(remaining)
+		select {
+		case <-waitCh:
+		case <-timer.C:
+		}
+		if !timer.Stop() {
+			select {
+			case <-timer.C:
+			default:
+			}
+		}
+	}
+}
+
+func (s *fakeSignal) countNow() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.count
+}

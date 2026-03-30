@@ -4,11 +4,15 @@ import (
 	"context"
 	"net"
 	"sync"
+	"time"
 )
 
 type ManagerConfig struct {
-	RelayConn  net.PacketConn
-	DirectConn net.PacketConn
+	RelayConn              net.PacketConn
+	DirectConn             net.PacketConn
+	DiscoveryInterval      time.Duration
+	RequestEndpointRefresh func()
+	SendCallMeMaybe        func()
 }
 
 type Manager struct {
@@ -27,17 +31,19 @@ func NewManager(cfg ManagerConfig) *Manager {
 
 func (m *Manager) Start(ctx context.Context) error {
 	m.mu.Lock()
-	defer m.mu.Unlock()
-
 	if m.started {
+		m.mu.Unlock()
 		return nil
 	}
 	if err := ctx.Err(); err != nil {
+		m.mu.Unlock()
 		return err
 	}
 
 	m.started = true
-	m.state.activateConfiguredDirect()
+	m.mu.Unlock()
+
+	go m.discoveryLoop(ctx)
 	return nil
 }
 
@@ -45,4 +51,11 @@ func (m *Manager) PathState() Path {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return m.state.path()
+}
+
+func (m *Manager) discoveryInterval() time.Duration {
+	if m.cfg.DiscoveryInterval > 0 {
+		return m.cfg.DiscoveryInterval
+	}
+	return 250 * time.Millisecond
 }
