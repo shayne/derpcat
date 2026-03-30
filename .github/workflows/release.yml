@@ -131,6 +131,7 @@ jobs:
           rm -rf dist/downloads dist/raw
           mkdir -p dist/downloads dist/raw
           gh run download "$GITHUB_RUN_ID" \
+            -R "$GITHUB_REPOSITORY" \
             --dir dist/downloads \
             -n derpcat-linux-amd64 \
             -n derpcat-linux-arm64 \
@@ -160,10 +161,10 @@ jobs:
             dist/release/derpcat-darwin-arm64.tar.gz
             dist/release/derpcat-darwin-arm64.tar.gz.sha256
           )
-          if gh release view "$TAG" >/dev/null 2>&1; then
-            gh release upload "$TAG" "${files[@]}" --clobber
+          if gh release view "$TAG" -R "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$TAG" -R "$GITHUB_REPOSITORY" "${files[@]}" --clobber
           else
-            gh release create "$TAG" "${files[@]}" --verify-tag --generate-notes
+            gh release create "$TAG" -R "$GITHUB_REPOSITORY" "${files[@]}" --verify-tag --generate-notes
           fi
 
   release-dev:
@@ -186,6 +187,7 @@ jobs:
           rm -rf dist/downloads dist/raw
           mkdir -p dist/downloads dist/raw
           gh run download "$GITHUB_RUN_ID" \
+            -R "$GITHUB_REPOSITORY" \
             --dir dist/downloads \
             -n derpcat-linux-amd64 \
             -n derpcat-linux-arm64 \
@@ -220,11 +222,11 @@ jobs:
             dist/release/derpcat-darwin-arm64.tar.gz
             dist/release/derpcat-darwin-arm64.tar.gz.sha256
           )
-          if gh release view dev >/dev/null 2>&1; then
-            gh release edit dev --title Dev --prerelease
-            gh release upload dev "${files[@]}" --clobber
+          if gh release view dev -R "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release edit dev -R "$GITHUB_REPOSITORY" --title Dev --prerelease
+            gh release upload dev -R "$GITHUB_REPOSITORY" "${files[@]}" --clobber
           else
-            gh release create dev "${files[@]}" --verify-tag --title Dev --prerelease --latest=false
+            gh release create dev -R "$GITHUB_REPOSITORY" "${files[@]}" --verify-tag --title Dev --prerelease --latest=false
           fi
 
   publish-packages-prod:
@@ -247,6 +249,7 @@ jobs:
           rm -rf dist/downloads dist/raw
           mkdir -p dist/downloads dist/raw
           gh run download "$GITHUB_RUN_ID" \
+            -R "$GITHUB_REPOSITORY" \
             --dir dist/downloads \
             -n derpcat-linux-amd64 \
             -n derpcat-linux-arm64 \
@@ -311,6 +314,7 @@ jobs:
           rm -rf dist/downloads dist/raw
           mkdir -p dist/downloads dist/raw
           gh run download "$GITHUB_RUN_ID" \
+            -R "$GITHUB_REPOSITORY" \
             --dir dist/downloads \
             -n derpcat-linux-amd64 \
             -n derpcat-linux-arm64 \
@@ -374,7 +378,7 @@ jobs:
         run: |
           rm -rf dist/downloads
           mkdir -p dist/downloads
-          gh run download "$GITHUB_RUN_ID" --dir dist/downloads -n package-artifacts-prod
+          gh run download "$GITHUB_RUN_ID" -R "$GITHUB_REPOSITORY" --dir dist/downloads -n package-artifacts-prod
           cp dist/downloads/package-artifacts-prod/npm.tgz dist/npm.tgz
       - name: Unpack npm artifact
         run: tar -xzf dist/npm.tgz -C dist
@@ -405,7 +409,7 @@ jobs:
         run: |
           rm -rf dist/downloads
           mkdir -p dist/downloads
-          gh run download "$GITHUB_RUN_ID" --dir dist/downloads -n package-artifacts-dev
+          gh run download "$GITHUB_RUN_ID" -R "$GITHUB_REPOSITORY" --dir dist/downloads -n package-artifacts-dev
           cp dist/downloads/package-artifacts-dev/npm.tgz dist/npm.tgz
       - name: Unpack npm artifact
         run: tar -xzf dist/npm.tgz -C dist
