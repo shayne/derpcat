@@ -2,6 +2,9 @@ package portmap
 
 import (
 	"bytes"
+	"errors"
+	"io"
+	"net"
 	"net/netip"
 	"strings"
 	"sync"
@@ -9,20 +12,35 @@ import (
 	"time"
 
 	"github.com/shayne/derpcat/pkg/telemetry"
+	"tailscale.com/net/netmon"
+	"tailscale.com/net/portmapper"
+	"tailscale.com/types/logger"
+	"tailscale.com/util/eventbus"
 )
 
 type fakeMapper struct {
-	localPort uint16
-	external  netip.AddrPort
-	have      bool
+	localPort          uint16
+	external           netip.AddrPort
+	have               bool
+	closed             int
+	gatewayLookupCalls int
 }
 
 func (f *fakeMapper) SetLocalPort(p uint16) { f.localPort = p }
+
+func (f *fakeMapper) SetGatewayLookupFunc(func() (gw, myIP netip.Addr, ok bool)) {
+	f.gatewayLookupCalls++
+}
 
 func (f *fakeMapper) HaveMapping() bool { return f.have }
 
 func (f *fakeMapper) GetCachedMappingOrStartCreatingOne() (netip.AddrPort, bool) {
 	return f.external, f.have
+}
+
+func (f *fakeMapper) Close() error {
+	f.closed++
+	return nil
 }
 
 func newMappedClient(t *testing.T) (*Client, *fakeMapper, *bytes.Buffer) {
@@ -127,6 +145,10 @@ func (m *blockingMapper) GetCachedMappingOrStartCreatingOne() (netip.AddrPort, b
 	return external, true
 }
 
+func (m *blockingMapper) Close() error { return nil }
+
+func (m *blockingMapper) SetGatewayLookupFunc(func() (gw, myIP netip.Addr, ok bool)) {}
+
 func TestClientSetLocalPortBlocksRefreshUntilComplete(t *testing.T) {
 	mapper := &blockingMapper{
 		localPort: 45678,
@@ -222,6 +244,68 @@ func TestClientRefreshPublishesExternalMapping(t *testing.T) {
 
 	if got := buf.String(); !strings.Contains(got, "portmap=external external=198.51.100.10:54321") {
 		t.Fatalf("debug output = %q, want external mapping line", got)
+	}
+}
+
+func TestClientCloseClosesUnderlyingMapper(t *testing.T) {
+	mapper := &fakeMapper{
+		have:     true,
+		external: netip.MustParseAddrPort("198.51.100.10:54321"),
+	}
+	c := NewForTest(mapper, telemetry.New(io.Discard, telemetry.LevelVerbose))
+
+	if err := c.Close(); err != nil {
+		t.Fatalf("Close() error = %v, want nil", err)
+	}
+	if got, want := mapper.closed, 1; got != want {
+		t.Fatalf("mapper closed count = %d, want %d", got, want)
+	}
+
+	if err := c.Close(); err != nil {
+		t.Fatalf("second Close() error = %v, want nil", err)
+	}
+	if got, want := mapper.closed, 1; got != want {
+		t.Fatalf("mapper closed count after second Close = %d, want %d", got, want)
+	}
+}
+
+func TestNewFallsBackWhenMonitorConstructionFails(t *testing.T) {
+	old := newNetMon
+	newNetMon = func(*eventbus.Bus, logger.Logf) (*netmon.Monitor, error) {
+		return nil, errors.New("monitor unavailable")
+	}
+	oldCtor := newPortmapperClient
+	fake := &fakeMapper{}
+	newPortmapperClient = func(portmapper.Config) mapper { return fake }
+	t.Cleanup(func() { newPortmapperClient = oldCtor })
+	t.Cleanup(func() { newNetMon = old })
+
+	c := New(telemetry.New(io.Discard, telemetry.LevelVerbose))
+	if c == nil {
+		t.Fatal("New() returned nil")
+	}
+	if got, want := fake.gatewayLookupCalls, 0; got != want {
+		t.Fatalf("SetGatewayLookupFunc called %d times, want %d", got, want)
+	}
+	if err := c.Close(); err != nil {
+		t.Fatalf("Close() error = %v, want nil", err)
+	}
+}
+
+func TestSnapshotAddrsReturnsUDPAddr(t *testing.T) {
+	c, _, _ := newMappedClient(t)
+
+	addrs := c.SnapshotAddrs()
+	if got, want := len(addrs), 1; got != want {
+		t.Fatalf("len(addrs) = %d, want %d", got, want)
+	}
+
+	udp, ok := addrs[0].(*net.UDPAddr)
+	if !ok {
+		t.Fatalf("addrs[0] type = %T, want *net.UDPAddr", addrs[0])
+	}
+	if got, want := udp.String(), "198.51.100.10:54321"; got != want {
+		t.Fatalf("udp.String() = %q, want %q", got, want)
 	}
 }
 
