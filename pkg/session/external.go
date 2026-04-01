@@ -42,6 +42,7 @@ var publicSessionPortmaps sync.Map
 var newPublicPortmap = func(emitter *telemetry.Emitter) publicPortmap {
 	return portmap.New(emitter)
 }
+var newTransportManager = transport.NewManager
 
 type publicPortmap interface {
 	transport.Portmap
@@ -423,7 +424,7 @@ func startExternalTransportManager(
 		}
 	}
 
-	manager := transport.NewManager(cfg)
+	manager := newTransportManager(cfg)
 	if err := manager.Start(ctx); err != nil {
 		unsubscribe()
 		unsubscribePayload()

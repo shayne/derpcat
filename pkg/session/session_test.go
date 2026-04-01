@@ -576,6 +576,115 @@ func TestIssuePublicSessionAttachesAndClosesPortmap(t *testing.T) {
 	}
 }
 
+func TestExternalRoundTripUsesSessionPortmapLifecycle(t *testing.T) {
+	t.Setenv("DERPCAT_FAKE_TRANSPORT", "1")
+
+	srv := newSessionTestDERPServer(t)
+	t.Setenv("DERPCAT_TEST_DERP_MAP_URL", srv.MapURL)
+	t.Setenv("DERPCAT_TEST_DERP_SERVER_URL", srv.DERPURL)
+
+	fakes := []*sessionLifecyclePortmap{
+		{have: true, snapshot: netip.MustParseAddrPort("198.51.100.10:54321")},
+		{have: true, snapshot: netip.MustParseAddrPort("198.51.100.11:54322")},
+	}
+	var ctorMu sync.Mutex
+	var ctorCalls int
+	prevCtor := newPublicPortmap
+	newPublicPortmap = func(*telemetry.Emitter) publicPortmap {
+		ctorMu.Lock()
+		defer ctorMu.Unlock()
+		if ctorCalls >= len(fakes) {
+			return &sessionLifecyclePortmap{}
+		}
+		pm := fakes[ctorCalls]
+		ctorCalls++
+		return pm
+	}
+	t.Cleanup(func() { newPublicPortmap = prevCtor })
+
+	seenPortmaps := make(chan publicPortmap, len(fakes))
+	prevTransportCtor := newTransportManager
+	newTransportManager = func(cfg transport.ManagerConfig) *transport.Manager {
+		if cfg.Portmap != nil {
+			if pm, ok := cfg.Portmap.(publicPortmap); ok {
+				select {
+				case seenPortmaps <- pm:
+				default:
+				}
+			}
+		}
+		return prevTransportCtor(cfg)
+	}
+	t.Cleanup(func() { newTransportManager = prevTransportCtor })
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	var listenerOut bytes.Buffer
+	var senderIn bytes.Buffer
+	senderIn.WriteString("hello over public session")
+	listenerReady := make(chan string, 1)
+	listenErr := make(chan error, 1)
+	go func() {
+		_, err := Listen(ctx, ListenConfig{
+			Emitter:       telemetry.New(&bytes.Buffer{}, telemetry.LevelSilent),
+			TokenSink:     listenerReady,
+			StdioOut:      &listenerOut,
+			UsePublicDERP: true,
+		})
+		listenErr <- err
+	}()
+
+	token := <-listenerReady
+	sendErr := make(chan error, 1)
+	go func() {
+		sendErr <- Send(ctx, SendConfig{
+			Token:         token,
+			StdioIn:       &senderIn,
+			Emitter:       telemetry.New(&bytes.Buffer{}, telemetry.LevelSilent),
+			UsePublicDERP: true,
+		})
+	}()
+
+	if err := <-listenErr; err != nil {
+		t.Fatalf("Listen() error = %v", err)
+	}
+	if err := <-sendErr; err != nil {
+		t.Fatalf("Send() error = %v", err)
+	}
+
+	if got := listenerOut.String(); got != "hello over public session" {
+		t.Fatalf("listener output = %q, want %q", got, "hello over public session")
+	}
+
+	gotPortmaps := make(map[publicPortmap]int)
+	for i := 0; i < len(fakes); i++ {
+		pm := <-seenPortmaps
+		gotPortmaps[pm]++
+	}
+	close(seenPortmaps)
+
+	if got, want := ctorCalls, len(fakes); got != want {
+		t.Fatalf("portmap ctor calls = %d, want %d", got, want)
+	}
+	for i, pm := range fakes {
+		pm.mu.Lock()
+		localPort := pm.localPort
+		closeCalls := pm.closeCalls
+		pm.mu.Unlock()
+
+		if localPort == 0 {
+			t.Fatalf("fake portmap %d localPort = 0, want bound port", i)
+		}
+		if gotPortmaps[pm] == 0 {
+			t.Fatalf("fake portmap %d was not threaded into transport manager", i)
+		}
+		if closeCalls != 1 {
+			t.Fatalf("fake portmap %d Close() calls = %d, want 1", i, closeCalls)
+		}
+	}
+}
+
 type sessionFakePortmapMapper struct {
 	localPort uint16
 	external  netip.AddrPort
@@ -602,11 +711,13 @@ func (m *sessionFakePortmapMapper) Close() error {
 }
 
 type sessionLifecyclePortmap struct {
-	mu         sync.Mutex
-	localPort  uint16
-	snapshot   netip.AddrPort
-	have       bool
-	closeCalls int
+	mu                 sync.Mutex
+	localPort          uint16
+	snapshot           netip.AddrPort
+	have               bool
+	refreshCalls       int
+	snapshotAddrsCalls int
+	closeCalls         int
 }
 
 func (m *sessionLifecyclePortmap) SetLocalPort(p uint16) {
@@ -644,6 +755,7 @@ func (m *sessionLifecyclePortmap) Snapshot() (netip.AddrPort, bool) {
 func (m *sessionLifecyclePortmap) SnapshotAddrs() []net.Addr {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	m.snapshotAddrsCalls++
 	if !m.have || !m.snapshot.Addr().IsValid() || m.snapshot.Port() == 0 {
 		return nil
 	}
@@ -654,7 +766,12 @@ func (m *sessionLifecyclePortmap) SnapshotAddrs() []net.Addr {
 	}}
 }
 
-func (m *sessionLifecyclePortmap) Refresh(time.Time) bool { return true }
+func (m *sessionLifecyclePortmap) Refresh(time.Time) bool {
+	m.mu.Lock()
+	m.refreshCalls++
+	m.mu.Unlock()
+	return true
+}
 
 func (m *sessionLifecyclePortmap) Close() error {
 	m.mu.Lock()
