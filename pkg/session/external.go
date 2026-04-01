@@ -560,7 +560,7 @@ func publicProbeCandidates(ctx context.Context, conn net.PacketConn, dm *tailcfg
 	}
 
 	if dm != nil {
-		if gathered, err := traversal.GatherCandidates(ctx, dm); err == nil {
+		if gathered, err := traversal.GatherCandidates(ctx, dm, nil); err == nil {
 			for _, candidateIP := range gathered {
 				if ip, err := netip.ParseAddr(candidateIP); err == nil {
 					add(ip)
