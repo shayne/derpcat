@@ -2,6 +2,7 @@ package portmap
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"io"
 	"net"
@@ -14,6 +15,7 @@ import (
 	"github.com/shayne/derpcat/pkg/telemetry"
 	"tailscale.com/net/netmon"
 	"tailscale.com/net/portmapper"
+	"tailscale.com/net/portmapper/portmappertype"
 	"tailscale.com/types/logger"
 	"tailscale.com/util/eventbus"
 )
@@ -22,6 +24,7 @@ type fakeMapper struct {
 	localPort          uint16
 	external           netip.AddrPort
 	have               bool
+	probe              portmappertype.ProbeResult
 	closed             int
 	gatewayLookupCalls int
 }
@@ -30,6 +33,10 @@ func (f *fakeMapper) SetLocalPort(p uint16) { f.localPort = p }
 
 func (f *fakeMapper) SetGatewayLookupFunc(func() (gw, myIP netip.Addr, ok bool)) {
 	f.gatewayLookupCalls++
+}
+
+func (f *fakeMapper) Probe(context.Context) (portmappertype.ProbeResult, error) {
+	return f.probe, nil
 }
 
 func (f *fakeMapper) HaveMapping() bool { return f.have }
@@ -134,6 +141,10 @@ func (m *blockingMapper) SetLocalPort(p uint16) {
 }
 
 func (m *blockingMapper) HaveMapping() bool { return m.have }
+
+func (m *blockingMapper) Probe(context.Context) (portmappertype.ProbeResult, error) {
+	return portmappertype.ProbeResult{}, nil
+}
 
 func (m *blockingMapper) GetCachedMappingOrStartCreatingOne() (netip.AddrPort, bool) {
 	m.mu.Lock()
@@ -244,6 +255,56 @@ func TestClientRefreshPublishesExternalMapping(t *testing.T) {
 
 	if got := buf.String(); !strings.Contains(got, "portmap=external external=198.51.100.10:54321") {
 		t.Fatalf("debug output = %q, want external mapping line", got)
+	}
+}
+
+func TestClientRefreshLogsVerbosePortmapStates(t *testing.T) {
+	mapper := &fakeMapper{
+		probe: portmappertype.ProbeResult{UPnP: true, PMP: true},
+	}
+	var buf bytes.Buffer
+	c := NewForTest(mapper, telemetry.New(&buf, telemetry.LevelVerbose))
+
+	if changed := c.Refresh(time.Now()); changed {
+		t.Fatal("initial Refresh() changed = true, want false without mapping")
+	}
+	if got := buf.String(); !strings.Contains(got, "portmap=probing services=upnp,pmp") {
+		t.Fatalf("debug output = %q, want probing services line", got)
+	}
+
+	buf.Reset()
+	mapper.probe = portmappertype.ProbeResult{}
+	if changed := c.Refresh(time.Now()); changed {
+		t.Fatal("Refresh() changed = true, want false without mapping")
+	}
+	if got := buf.String(); !strings.Contains(got, "portmap=none") {
+		t.Fatalf("debug output = %q, want none line", got)
+	}
+
+	buf.Reset()
+	mapper.have = true
+	mapper.external = netip.MustParseAddrPort("198.51.100.10:54321")
+	c.mu.Lock()
+	c.mapType = "pcp"
+	c.mu.Unlock()
+	if changed := c.Refresh(time.Now()); !changed {
+		t.Fatal("Refresh() changed = false, want true when mapping appears")
+	}
+	if got := buf.String(); !strings.Contains(got, "portmap=pcp external=198.51.100.10:54321") {
+		t.Fatalf("debug output = %q, want concrete mapping type line", got)
+	}
+}
+
+func TestClientRefreshSuppressesPortmapLogsWithoutVerbose(t *testing.T) {
+	mapper := &fakeMapper{
+		probe: portmappertype.ProbeResult{UPnP: true, PMP: true},
+	}
+	var buf bytes.Buffer
+	c := NewForTest(mapper, telemetry.New(&buf, telemetry.LevelDefault))
+
+	c.Refresh(time.Now())
+	if got := buf.String(); got != "" {
+		t.Fatalf("debug output = %q, want empty outside verbose mode", got)
 	}
 }
 

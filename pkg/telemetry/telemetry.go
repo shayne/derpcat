@@ -36,3 +36,7 @@ func (e *Emitter) Debug(msg string) {
 	}
 	fmt.Fprintln(e.w, msg)
 }
+
+func (e *Emitter) DebugEnabled() bool {
+	return e != nil && e.level == LevelVerbose
+}

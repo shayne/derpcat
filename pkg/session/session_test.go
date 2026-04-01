@@ -23,6 +23,7 @@ import (
 	"github.com/shayne/derpcat/pkg/transport"
 	"go4.org/mem"
 	"tailscale.com/derp/derpserver"
+	"tailscale.com/net/portmapper/portmappertype"
 	"tailscale.com/tailcfg"
 	"tailscale.com/types/key"
 )
@@ -696,6 +697,10 @@ func (m *sessionFakePortmapMapper) SetLocalPort(p uint16) { m.localPort = p }
 
 func (m *sessionFakePortmapMapper) SetGatewayLookupFunc(func() (gw, myIP netip.Addr, ok bool)) {}
 
+func (m *sessionFakePortmapMapper) Probe(context.Context) (portmappertype.ProbeResult, error) {
+	return portmappertype.ProbeResult{}, nil
+}
+
 func (m *sessionFakePortmapMapper) HaveMapping() bool { return m.have }
 
 func (m *sessionFakePortmapMapper) GetCachedMappingOrStartCreatingOne() (netip.AddrPort, bool) {
@@ -727,6 +732,10 @@ func (m *sessionLifecyclePortmap) SetLocalPort(p uint16) {
 }
 
 func (m *sessionLifecyclePortmap) SetGatewayLookupFunc(func() (gw, myIP netip.Addr, ok bool)) {}
+
+func (m *sessionLifecyclePortmap) Probe(context.Context) (portmappertype.ProbeResult, error) {
+	return portmappertype.ProbeResult{}, nil
+}
 
 func (m *sessionLifecyclePortmap) HaveMapping() bool {
 	m.mu.Lock()
