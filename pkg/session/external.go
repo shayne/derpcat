@@ -179,12 +179,13 @@ func sendExternal(ctx context.Context, cfg SendConfig) error {
 		return err
 	}
 
+	localCandidates := publicProbeCandidates(ctx, probeConn, dm, pm)
 	claim := rendezvous.Claim{
 		Version:      tok.Version,
 		SessionID:    tok.SessionID,
 		DERPPublic:   derpPublicKeyRaw32(derpClient.PublicKey()),
 		QUICPublic:   clientIdentity.Public,
-		Candidates:   publicProbeCandidates(ctx, probeConn, dm, pm),
+		Candidates:   localCandidates,
 		Capabilities: tok.Capabilities,
 	}
 	claim.BearerMAC = rendezvous.ComputeBearerMAC(tok.BearerSecret, claim)
@@ -214,7 +215,7 @@ func sendExternal(ctx context.Context, cfg SendConfig) error {
 	}
 	transportCtx, transportCancel := context.WithCancel(ctx)
 	defer transportCancel()
-	transportManager, transportCleanup, err := startExternalTransportManager(transportCtx, probeConn, dm, derpClient, listenerDERP, pm, cfg.ForceRelay)
+	transportManager, transportCleanup, err := startExternalTransportManager(transportCtx, probeConn, dm, derpClient, listenerDERP, parseCandidateStrings(localCandidates), pm, cfg.ForceRelay)
 	if err != nil {
 		return err
 	}
@@ -311,11 +312,15 @@ func listenExternal(ctx context.Context, cfg ListenConfig) (string, error) {
 		if decision.Accept != nil {
 			decision.Accept.Candidates = publicProbeCandidates(ctx, session.probeConn, session.derpMap, publicSessionPortmap(session))
 		}
+		localCandidates := parseCandidateStrings(nil)
+		if decision.Accept != nil {
+			localCandidates = parseCandidateStrings(decision.Accept.Candidates)
+		}
 		if cfg.Emitter != nil {
 			cfg.Emitter.Debug("claim-accepted")
 		}
 		transportCtx, transportCancel := context.WithCancel(ctx)
-		transportManager, transportCleanup, err := startExternalTransportManager(transportCtx, session.probeConn, session.derpMap, session.derp, peerDERP, publicSessionPortmap(session), cfg.ForceRelay)
+		transportManager, transportCleanup, err := startExternalTransportManager(transportCtx, session.probeConn, session.derpMap, session.derp, peerDERP, localCandidates, publicSessionPortmap(session), cfg.ForceRelay)
 		if err != nil {
 			transportCancel()
 			return tok, err
@@ -324,6 +329,7 @@ func listenExternal(ctx context.Context, cfg ListenConfig) (string, error) {
 		defer transportCleanup()
 		pathEmitter.Watch(transportCtx, transportManager)
 		pathEmitter.Flush(transportManager)
+		seedAcceptedClaimCandidates(transportCtx, transportManager, *env.Claim)
 		adapter := quicpath.NewAdapter(transportManager.PeerDatagramConn(transportCtx))
 		defer adapter.Close()
 		quicListener, err := quic.Listen(adapter, quicpath.ServerTLSConfig(session.quicIdentity, env.Claim.QUICPublic), quicpath.DefaultQUICConfig())
@@ -382,6 +388,7 @@ func startExternalTransportManager(
 	dm *tailcfg.DERPMap,
 	derpClient *derpbind.Client,
 	peerDERP key.NodePublic,
+	localCandidates []net.Addr,
 	pm publicPortmap,
 	forceRelay bool,
 ) (*transport.Manager, func(), error) {
@@ -424,9 +431,7 @@ func startExternalTransportManager(
 	}
 	if !forceRelay {
 		cfg.DirectConn = conn
-		cfg.CandidateSource = func(ctx context.Context) []net.Addr {
-			return publicProbeAddrs(ctx, conn, dm, pm)
-		}
+		cfg.CandidateSource = publicCandidateSource(conn, dm, pm, localCandidates)
 	}
 
 	manager := newTransportManager(cfg)
@@ -592,7 +597,7 @@ func publicProbeCandidates(ctx context.Context, conn net.PacketConn, dm *tailcfg
 		if pm != nil {
 			mapped = pm.Snapshot
 		}
-		if gathered, err := gatherTraversalCandidates(ctx, dm, mapped); err == nil {
+		if gathered, err := gatherTraversalCandidates(ctx, conn, dm, mapped); err == nil {
 			for _, candidate := range gathered {
 				if addrPort, err := netip.ParseAddrPort(candidate); err == nil {
 					if !publicProbeCandidateAllowed(addrPort.Addr()) {
@@ -628,6 +633,19 @@ func publicProbeCandidateAllowed(ip netip.Addr) bool {
 func publicProbeAddrs(ctx context.Context, conn net.PacketConn, dm *tailcfg.DERPMap, pm publicPortmap) []net.Addr {
 	raw := publicProbeCandidates(ctx, conn, dm, pm)
 	return parseCandidateStrings(raw)
+}
+
+func publicCandidateSource(conn net.PacketConn, dm *tailcfg.DERPMap, pm publicPortmap, localCandidates []net.Addr) func(context.Context) []net.Addr {
+	if fakeTransportEnabled() {
+		return func(ctx context.Context) []net.Addr {
+			_ = dm
+			_ = pm
+			return publicProbeAddrs(ctx, conn, nil, nil)
+		}
+	}
+	return func(context.Context) []net.Addr {
+		return slices.Clone(localCandidates)
+	}
 }
 
 func newBoundPublicPortmap(conn net.PacketConn, emitter *telemetry.Emitter) publicPortmap {
@@ -698,6 +716,13 @@ func seedAcceptedDecisionCandidates(ctx context.Context, seeder remoteCandidateS
 	seeder.SeedRemoteCandidates(ctx, parseCandidateStrings(decision.Accept.Candidates))
 }
 
+func seedAcceptedClaimCandidates(ctx context.Context, seeder remoteCandidateSeeder, claim rendezvous.Claim) {
+	if seeder == nil || len(claim.Candidates) == 0 {
+		return
+	}
+	seeder.SeedRemoteCandidates(ctx, parseCandidateStrings(claim.Candidates))
+}
+
 func isTransportControlPayload(payload []byte) bool {
 	if len(payload) == 0 || payload[0] != '{' {
 		return false
@@ -739,7 +764,7 @@ func relayTransportAddr() net.Addr {
 }
 
 func fakeTransportCandidatesBlocked() bool {
-	if os.Getenv("DERPCAT_FAKE_TRANSPORT") != "1" {
+	if !fakeTransportEnabled() {
 		return false
 	}
 	raw := os.Getenv("DERPCAT_FAKE_TRANSPORT_ENABLE_DIRECT_AT")
@@ -751,4 +776,8 @@ func fakeTransportCandidatesBlocked() bool {
 		return false
 	}
 	return time.Now().Before(time.Unix(0, enableAt))
+}
+
+func fakeTransportEnabled() bool {
+	return os.Getenv("DERPCAT_FAKE_TRANSPORT") == "1"
 }

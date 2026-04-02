@@ -511,7 +511,10 @@ func TestPublicProbeCandidatesIncludesMappedCandidate(t *testing.T) {
 	t.Cleanup(func() {
 		gatherTraversalCandidates = prev
 	})
-	gatherTraversalCandidates = func(_ context.Context, _ *tailcfg.DERPMap, mappedFn func() (netip.AddrPort, bool)) ([]string, error) {
+	gatherTraversalCandidates = func(_ context.Context, gotConn net.PacketConn, _ *tailcfg.DERPMap, mappedFn func() (netip.AddrPort, bool)) ([]string, error) {
+		if gotConn != conn {
+			t.Fatalf("gatherTraversalCandidates() conn = %v, want live probe conn %v", gotConn, conn)
+		}
 		gotMapped, ok := mappedFn()
 		if !ok {
 			t.Fatal("gatherTraversalCandidates() mapped callback = false, want true")
@@ -541,7 +544,7 @@ func TestPublicProbeCandidatesSkipsTailscaleCGNATInInternetOnlyTestMode(t *testi
 	t.Cleanup(func() {
 		gatherTraversalCandidates = prev
 	})
-	gatherTraversalCandidates = func(context.Context, *tailcfg.DERPMap, func() (netip.AddrPort, bool)) ([]string, error) {
+	gatherTraversalCandidates = func(context.Context, net.PacketConn, *tailcfg.DERPMap, func() (netip.AddrPort, bool)) ([]string, error) {
 		return []string{
 			"100.64.0.11:5555",
 			"100.125.235.82:4242",
@@ -866,6 +869,29 @@ func TestSeedAcceptedDecisionCandidatesUsesAcceptCandidates(t *testing.T) {
 	}
 	if got := seeder.candidates[1].String(); got != "[2001:db8::10]:23456" {
 		t.Fatalf("second seeded candidate = %q, want %q", got, "[2001:db8::10]:23456")
+	}
+}
+
+func TestSeedAcceptedClaimCandidatesUsesClaimCandidates(t *testing.T) {
+	ctx := context.Background()
+	claim := rendezvous.Claim{
+		Candidates: []string{
+			"192.0.2.20:2345",
+			"not-an-addr",
+		},
+	}
+	seeder := &captureCandidateSeeder{}
+
+	seedAcceptedClaimCandidates(ctx, seeder, claim)
+
+	if seeder.calls != 1 {
+		t.Fatalf("SeedRemoteCandidates() calls = %d, want 1", seeder.calls)
+	}
+	if got := len(seeder.candidates); got != 1 {
+		t.Fatalf("seeded candidates = %#v, want 1 parsed candidate", seeder.candidates)
+	}
+	if got := seeder.candidates[0].String(); got != "192.0.2.20:2345" {
+		t.Fatalf("first seeded candidate = %q, want %q", got, "192.0.2.20:2345")
 	}
 }
 

@@ -2,22 +2,46 @@ package traversal
 
 import (
 	"context"
+	"errors"
+	"net"
 	"net/netip"
+	"sync"
+	"time"
 
 	"tailscale.com/net/netcheck"
 	"tailscale.com/net/netmon"
+	"tailscale.com/net/stun"
 	"tailscale.com/tailcfg"
 	"tailscale.com/types/logger"
 )
 
-func GatherCandidates(ctx context.Context, dm *tailcfg.DERPMap, mapped func() (netip.AddrPort, bool)) ([]string, error) {
+const stunReadInterval = 100 * time.Millisecond
+
+func GatherCandidates(ctx context.Context, conn net.PacketConn, dm *tailcfg.DERPMap, mapped func() (netip.AddrPort, bool)) ([]string, error) {
 	client := &netcheck.Client{
 		Logf:   logger.Discard,
 		NetMon: netmon.NewStatic(),
+		SendPacket: func(pkt []byte, dst netip.AddrPort) (int, error) {
+			if conn == nil {
+				return 0, errors.New("nil packet conn")
+			}
+			return conn.WriteTo(pkt, net.UDPAddrFromAddrPort(dst))
+		},
 	}
-	if err := client.Standalone(ctx, ":0"); err != nil {
-		return nil, err
+
+	readCtx, cancelRead := context.WithCancel(ctx)
+	var readWG sync.WaitGroup
+	if conn != nil {
+		readWG.Add(1)
+		go func() {
+			defer readWG.Done()
+			receiveSTUNPackets(readCtx, conn, client.ReceiveSTUNPacket)
+		}()
 	}
+	defer func() {
+		cancelRead()
+		readWG.Wait()
+	}()
 
 	report, err := client.GetReport(ctx, dm, nil)
 	if err != nil {
@@ -43,6 +67,38 @@ func gatherCandidates(v4, v6 []netip.AddrPort, mapped func() (netip.AddrPort, bo
 
 	mappedAddr, ok := mapped()
 	return appendMappedCandidate(candidates, mappedAddr, ok)
+}
+
+func receiveSTUNPackets(ctx context.Context, conn net.PacketConn, recv func([]byte, netip.AddrPort)) {
+	buf := make([]byte, 64<<10)
+	for {
+		if err := conn.SetReadDeadline(time.Now().Add(stunReadInterval)); err != nil {
+			return
+		}
+		n, addr, err := conn.ReadFrom(buf)
+		if err != nil {
+			if ctx.Err() != nil || errors.Is(err, net.ErrClosed) {
+				return
+			}
+			var netErr net.Error
+			if errors.As(err, &netErr) && netErr.Timeout() {
+				continue
+			}
+			continue
+		}
+		if !stun.Is(buf[:n]) {
+			continue
+		}
+		udpAddr, ok := addr.(*net.UDPAddr)
+		if !ok {
+			continue
+		}
+		addrPort, ok := netip.AddrFromSlice(udpAddr.IP)
+		if !ok {
+			continue
+		}
+		recv(append([]byte(nil), buf[:n]...), netip.AddrPortFrom(addrPort.Unmap(), uint16(udpAddr.Port)))
+	}
 }
 
 func appendMappedCandidate(candidates []string, mapped netip.AddrPort, ok bool) []string {

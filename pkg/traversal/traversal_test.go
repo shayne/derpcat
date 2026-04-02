@@ -6,6 +6,8 @@ import (
 	"net/netip"
 	"testing"
 	"time"
+
+	"tailscale.com/net/stun/stuntest"
 )
 
 func TestProbePromotesDirectPath(t *testing.T) {
@@ -56,8 +58,32 @@ func TestGatherCandidatesRejectsNilDERPMap(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 
-	if _, err := GatherCandidates(ctx, nil, nil); err == nil {
+	if _, err := GatherCandidates(ctx, nil, nil, nil); err == nil {
 		t.Fatal("GatherCandidates() error = nil, want non-nil")
+	}
+}
+
+func TestGatherCandidatesUsesProvidedProbeConnPort(t *testing.T) {
+	stunAddr, cleanup := stuntest.Serve(t)
+	defer cleanup()
+
+	conn, err := net.ListenPacket("udp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("ListenPacket() error = %v", err)
+	}
+	defer conn.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	got, err := GatherCandidates(ctx, conn, stuntest.DERPMapOf(stunAddr.String()), nil)
+	if err != nil {
+		t.Fatalf("GatherCandidates() error = %v", err)
+	}
+
+	want := conn.LocalAddr().String()
+	if !containsCandidate(got, want) {
+		t.Fatalf("GatherCandidates() = %v, want candidate %q from provided probe conn", got, want)
 	}
 }
 
@@ -107,4 +133,13 @@ func TestAppendMappedCandidateRejectsInvalidEndpoint(t *testing.T) {
 	if len(got) != 1 {
 		t.Fatalf("len(got) = %d, want 1", len(got))
 	}
+}
+
+func containsCandidate(candidates []string, want string) bool {
+	for _, candidate := range candidates {
+		if candidate == want {
+			return true
+		}
+	}
+	return false
 }
