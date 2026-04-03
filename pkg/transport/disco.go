@@ -7,6 +7,9 @@ import (
 	"io"
 	"net"
 	"time"
+
+	"golang.org/x/net/ipv6"
+	"tailscale.com/net/batching"
 )
 
 const (
@@ -14,6 +17,7 @@ const (
 	defaultEndpointRefreshInterval = 15 * time.Second
 	defaultDirectStaleTimeout      = 30 * time.Second
 	maxDirectPayloadSize           = 64 << 10
+	directReadBatchSize            = 64
 )
 
 var (
@@ -119,6 +123,22 @@ func (m *Manager) directReadLoop(ctx context.Context) {
 		return
 	}
 
+	if batchConn := m.directBatchConn(); batchConn != nil {
+		m.directBatchReadLoop(ctx, batchConn)
+		return
+	}
+	m.directPacketReadLoop(ctx)
+}
+
+func (m *Manager) directBatchConn() DirectBatchConn {
+	if m.cfg.DirectBatchConn != nil {
+		return m.cfg.DirectBatchConn
+	}
+	batchConn, _ := m.cfg.DirectConn.(DirectBatchConn)
+	return batchConn
+}
+
+func (m *Manager) directPacketReadLoop(ctx context.Context) {
 	bufLen := maxDirectPayloadSize
 	if len(discoProbePayload)+1 > bufLen {
 		bufLen = len(discoProbePayload) + 1
@@ -144,21 +164,60 @@ func (m *Manager) directReadLoop(ctx context.Context) {
 			}
 			continue
 		}
-		if n == len(discoProbePayload) && bytes.Equal(buf[:n], discoProbePayload) {
-			_, _ = m.cfg.DirectConn.WriteTo(discoAckPayload, addr)
-			continue
-		}
-		if n == len(discoAckPayload) && bytes.Equal(buf[:n], discoAckPayload) {
-			m.tryPromoteDirect(m.now(), addr)
-			continue
-		}
-		if !m.shouldAcceptDirectPayload(addr) {
-			m.directRecvRejects.Add(1)
-			continue
-		}
-		m.NoteDirectActivity(addr)
-		m.enqueuePeerDatagram(m.remotePeerAddr(), buf[:n])
+		m.handleDirectPacket(addr, buf[:n])
 	}
+}
+
+func (m *Manager) directBatchReadLoop(ctx context.Context, batchConn DirectBatchConn) {
+	msgs := make([]ipv6.Message, directReadBatchSize)
+	for i := range msgs {
+		msgs[i].Buffers = [][]byte{make([]byte, maxDirectPayloadSize)}
+		if controlSize := batching.MinControlMessageSize(); controlSize > 0 {
+			msgs[i].OOB = make([]byte, controlSize)
+		}
+	}
+
+	for {
+		if err := batchConn.SetReadDeadline(m.now().Add(m.discoveryInterval())); err != nil {
+			return
+		}
+		n, err := batchConn.ReadBatch(msgs, 0)
+		if err != nil {
+			if ctx.Err() != nil || isTerminalReadError(err) {
+				return
+			}
+			if isTimeout(err) {
+				continue
+			}
+			if !m.waitForNextDirectRead(ctx) {
+				return
+			}
+			continue
+		}
+		for i := 0; i < n; i++ {
+			if msgs[i].N == 0 {
+				continue
+			}
+			m.handleDirectPacket(msgs[i].Addr, msgs[i].Buffers[0][:msgs[i].N])
+		}
+	}
+}
+
+func (m *Manager) handleDirectPacket(addr net.Addr, payload []byte) {
+	if len(payload) == len(discoProbePayload) && bytes.Equal(payload, discoProbePayload) {
+		_, _ = m.cfg.DirectConn.WriteTo(discoAckPayload, addr)
+		return
+	}
+	if len(payload) == len(discoAckPayload) && bytes.Equal(payload, discoAckPayload) {
+		m.tryPromoteDirect(m.now(), addr)
+		return
+	}
+	if !m.shouldAcceptDirectPayload(addr) {
+		m.directRecvRejects.Add(1)
+		return
+	}
+	m.NoteDirectActivity(addr)
+	m.enqueuePeerDatagram(m.remotePeerAddr(), payload)
 }
 
 func (m *Manager) HandleDirectPacket(conn net.PacketConn, addr net.Addr, payload []byte) bool {

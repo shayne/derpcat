@@ -6,6 +6,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"golang.org/x/net/ipv6"
 )
 
 type Clock interface {
@@ -32,6 +34,7 @@ type ManagerConfig struct {
 	ReceiveRelay            func(context.Context) ([]byte, error)
 	RelayAddr               net.Addr
 	DirectConn              net.PacketConn
+	DirectBatchConn         DirectBatchConn
 	DisableDirectReads      bool
 	CandidateSource         func(context.Context) []net.Addr
 	Portmap                 Portmap
@@ -69,6 +72,11 @@ type Update struct {
 type Portmap interface {
 	Refresh(time.Time) bool
 	SnapshotAddrs() []net.Addr
+}
+
+type DirectBatchConn interface {
+	ReadBatch([]ipv6.Message, int) (int, error)
+	SetReadDeadline(time.Time) error
 }
 
 func NewManager(cfg ManagerConfig) *Manager {

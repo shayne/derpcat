@@ -1,6 +1,7 @@
 package quicpath
 
 import (
+	"context"
 	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/tls"
@@ -8,10 +9,15 @@ import (
 	"crypto/x509/pkix"
 	"encoding/pem"
 	"errors"
+	"fmt"
 	"math/big"
+	"os"
+	"path/filepath"
 	"time"
 
 	quic "github.com/quic-go/quic-go"
+	"github.com/quic-go/quic-go/qlog"
+	"github.com/quic-go/quic-go/qlogwriter"
 )
 
 const ALPN = "derpcat-quic/1"
@@ -34,6 +40,7 @@ func DefaultQUICConfig() *quic.Config {
 		MaxIncomingStreams:    MaxIncomingStreams,
 		MaxIncomingUniStreams: -1,
 		EnableDatagrams:       false,
+		Tracer:                tracerFromEnv(),
 	}
 }
 
@@ -152,4 +159,32 @@ func verifyPinnedPeer(expected [32]byte) func([][]byte, [][]*x509.Certificate) e
 		}
 		return nil
 	}
+}
+
+func qlogTracerFromEnv() func(context.Context, bool, quic.ConnectionID) qlogwriter.Trace {
+	dir := os.Getenv("DERPCAT_QLOG_DIR")
+	if dir == "" {
+		return nil
+	}
+	return func(_ context.Context, isClient bool, connID quic.ConnectionID) qlogwriter.Trace {
+		perspective := "server"
+		if isClient {
+			perspective = "client"
+		}
+		path := filepath.Join(dir, fmt.Sprintf("derpcat-%s-%s.qlog", connID, perspective))
+		f, err := os.Create(path)
+		if err != nil {
+			return nil
+		}
+		trace := qlogwriter.NewConnectionFileSeq(f, isClient, connID, []string{qlog.EventSchema})
+		go trace.Run()
+		return trace
+	}
+}
+
+func tracerFromEnv() func(context.Context, bool, quic.ConnectionID) qlogwriter.Trace {
+	if trace := metricsTracerFromEnv(); trace != nil {
+		return trace
+	}
+	return qlogTracerFromEnv()
 }

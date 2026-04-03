@@ -3,10 +3,13 @@ package transport
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net"
 	"slices"
 	"sync"
 	"time"
+
+	"golang.org/x/net/ipv6"
 )
 
 type packet struct {
@@ -316,6 +319,54 @@ func (c *fakePacketConn) waitForReadAttempts(n int, timeout time.Duration) bool 
 		c.mu.Unlock()
 		return false, waitCh
 	})
+}
+
+type fakeBatchPacketConn struct {
+	*fakePacketConn
+}
+
+func newFakeBatchPacketConn(local net.Addr) *fakeBatchPacketConn {
+	return &fakeBatchPacketConn{fakePacketConn: newFakePacketConn(local)}
+}
+
+func (c *fakeBatchPacketConn) ReadFrom([]byte) (int, net.Addr, error) {
+	return 0, nil, errors.New("single-packet reads are unsupported")
+}
+
+func (c *fakeBatchPacketConn) ReadBatch(msgs []ipv6.Message, _ int) (int, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	c.readAttempts++
+	if len(c.readErrors) > 0 {
+		err := c.readErrors[0]
+		c.readErrors = c.readErrors[1:]
+		c.signalLocked()
+		return 0, err
+	}
+	if c.closed {
+		return 0, net.ErrClosed
+	}
+	if len(c.reads) == 0 {
+		if !c.deadline.IsZero() && !c.clock.Now().Before(c.deadline) {
+			return 0, timeoutErr{}
+		}
+		return 0, timeoutErr{}
+	}
+
+	n := 0
+	for n < len(msgs) && len(c.reads) > 0 {
+		pkt := c.reads[0]
+		c.reads = c.reads[1:]
+		if len(msgs[n].Buffers) == 0 {
+			continue
+		}
+		msgs[n].N = copy(msgs[n].Buffers[0], pkt.payload)
+		msgs[n].Addr = cloneAddr(pkt.addr)
+		n++
+	}
+	c.signalLocked()
+	return n, nil
 }
 
 func (c *fakePacketConn) readAttemptsCount() int {

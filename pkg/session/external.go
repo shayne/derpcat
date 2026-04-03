@@ -25,6 +25,7 @@ import (
 	"github.com/shayne/derpcat/pkg/token"
 	"github.com/shayne/derpcat/pkg/transport"
 	"github.com/shayne/derpcat/pkg/traversal"
+	"tailscale.com/net/batching"
 	"tailscale.com/tailcfg"
 	"tailscale.com/types/key"
 )
@@ -219,7 +220,10 @@ func sendExternal(ctx context.Context, cfg SendConfig) error {
 	if err != nil {
 		return err
 	}
-	defer transportCleanup()
+	transportCleanupFn := transportCleanup
+	defer func() {
+		transportCleanupFn()
+	}()
 	pathEmitter.Watch(transportCtx, transportManager)
 	pathEmitter.Flush(transportManager)
 	seedAcceptedDecisionCandidates(transportCtx, transportManager, decision)
@@ -431,6 +435,7 @@ func startExternalTransportManager(
 	}
 	if !forceRelay {
 		cfg.DirectConn = conn
+		cfg.DirectBatchConn = publicDirectBatchConn(conn)
 		cfg.CandidateSource = publicCandidateSource(conn, dm, pm, localCandidates)
 	}
 
@@ -444,6 +449,19 @@ func startExternalTransportManager(
 		unsubscribe()
 		unsubscribePayload()
 	}, nil
+}
+
+func publicDirectBatchConn(conn net.PacketConn) transport.DirectBatchConn {
+	udpConn, ok := conn.(*net.UDPConn)
+	if !ok {
+		if batchConn, ok := conn.(transport.DirectBatchConn); ok {
+			return batchConn
+		}
+		return nil
+	}
+	batchConn := batching.TryUpgradeToConn(udpConn, "udp4", batching.IdealBatchSize)
+	directBatchConn, _ := batchConn.(transport.DirectBatchConn)
+	return directBatchConn
 }
 
 func waitForPeerAck(ctx context.Context, ch <-chan derpbind.Packet) error {

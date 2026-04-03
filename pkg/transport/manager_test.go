@@ -188,6 +188,58 @@ func TestManagerSeedsRemoteCandidatesWithoutWaitingForDiscoveryTick(t *testing.T
 	}
 }
 
+func TestManagerReadsBatchedDirectPayloadsFromBatchConn(t *testing.T) {
+	t.Helper()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	clock := newFakeClock(time.Unix(1700000013, 0))
+	direct := newFakeBatchPacketConn(&net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 9999})
+	direct.useClock(clock)
+
+	peerAddr := &net.UDPAddr{IP: net.IPv4(100, 64, 0, 13), Port: 31313}
+	mgr := NewManager(ManagerConfig{
+		DirectConn:         direct,
+		Clock:              clock,
+		DiscoveryInterval:  time.Second,
+		DirectStaleTimeout: 4 * time.Second,
+	})
+	mgr.mu.Lock()
+	mgr.state.noteCandidates(clock.Now(), []net.Addr{peerAddr})
+	mgr.state.current = PathDirect
+	mgr.state.bestEndpoint = peerAddr.String()
+	mgr.state.endpoints[peerAddr.String()] = peerAddr
+	mgr.mu.Unlock()
+
+	if err := mgr.Start(ctx); err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+
+	direct.enqueueRead([]byte("packet-1"), peerAddr)
+	direct.enqueueRead([]byte("packet-2"), peerAddr)
+
+	peerConn := mgr.PeerDatagramConn(ctx)
+	defer peerConn.Close()
+
+	payload1, _, err := peerConn.RecvDatagram(ctx)
+	if err != nil {
+		t.Fatalf("RecvDatagram() #1 error = %v", err)
+	}
+	payload2, _, err := peerConn.RecvDatagram(ctx)
+	if err != nil {
+		t.Fatalf("RecvDatagram() #2 error = %v", err)
+	}
+	if got := string(payload1); got != "packet-1" {
+		t.Fatalf("RecvDatagram() #1 payload = %q, want %q", got, "packet-1")
+	}
+	if got := string(payload2); got != "packet-2" {
+		t.Fatalf("RecvDatagram() #2 payload = %q, want %q", got, "packet-2")
+	}
+	peerConn.ReleaseDatagram(payload1)
+	peerConn.ReleaseDatagram(payload2)
+}
+
 func TestManagerKeepsActiveDirectPathWhenCandidateSetReplacesEndpoint(t *testing.T) {
 	t.Helper()
 

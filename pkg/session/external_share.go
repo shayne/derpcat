@@ -234,7 +234,10 @@ func openExternal(ctx context.Context, cfg OpenConfig, tok token.Token) error {
 	if err != nil {
 		return err
 	}
-	defer transportCleanup()
+	transportCleanupFn := transportCleanup
+	defer func() {
+		transportCleanupFn()
+	}()
 	pathEmitter.Watch(transportCtx, transportManager)
 	pathEmitter.Flush(transportManager)
 	seedAcceptedDecisionCandidates(transportCtx, transportManager, decision)
