@@ -1056,6 +1056,31 @@ func TestListenExternalNativeTCPOnCandidatesPrefersTailscaleCandidate(t *testing
 	}
 }
 
+func TestListenExternalNativeTCPOnCandidatesFallsBackWhenPreferredPortIsBusy(t *testing.T) {
+	busy, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("Listen() error = %v", err)
+	}
+	defer busy.Close()
+
+	busyPort := busy.Addr().(*net.TCPAddr).Port
+	ln, ok := listenExternalNativeTCPOnCandidates([]net.Addr{
+		&net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: busyPort},
+	}, nil)
+	if !ok {
+		t.Fatal("listenExternalNativeTCPOnCandidates() ok = false, want true")
+	}
+	defer ln.Close()
+
+	got := ln.Addr().(*net.TCPAddr)
+	if !got.IP.Equal(net.IPv4(127, 0, 0, 1)) {
+		t.Fatalf("listenExternalNativeTCPOnCandidates() IP = %v, want 127.0.0.1", got.IP)
+	}
+	if got.Port == busyPort {
+		t.Fatalf("listenExternalNativeTCPOnCandidates() port = %d, want fallback away from busy port %d", got.Port, busyPort)
+	}
+}
+
 type testAddrListener struct {
 	net.Listener
 	addr net.Addr

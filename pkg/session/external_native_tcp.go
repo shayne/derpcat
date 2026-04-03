@@ -87,6 +87,11 @@ func listenExternalNativeTCPOnCandidates(addrs []net.Addr, tlsConfig *tls.Config
 		}
 		ln, err := externalNativeTCPListen(addr, addrTLSConfig)
 		if err != nil {
+			if fallbackAddr := externalNativeTCPEphemeralPortAddr(addr); fallbackAddr != nil {
+				ln, err = externalNativeTCPListen(fallbackAddr, addrTLSConfig)
+			}
+		}
+		if err != nil {
 			continue
 		}
 		return ln, true
@@ -122,6 +127,16 @@ func externalNativeTCPAddrRank(addr net.Addr) int {
 		return 2
 	}
 	return 3
+}
+
+func externalNativeTCPEphemeralPortAddr(addr net.Addr) net.Addr {
+	tcpAddr, _, ok := externalNativeTCPAddr(addr)
+	if !ok || tcpAddr.Port == 0 {
+		return nil
+	}
+	out := *tcpAddr
+	out.Port = 0
+	return &out
 }
 
 func selectExternalNativeTCPResponseAddr(requestAddr, peerAddr net.Addr, localCandidates []net.Addr) net.Addr {
