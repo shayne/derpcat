@@ -96,6 +96,22 @@ func TestFetchMapParsesDERPMapJSON(t *testing.T) {
 	}
 }
 
+func TestFetchMapUsesStaticFallbackForPublicDERPMap(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	dm, err := FetchMap(ctx, PublicDERPMapURL)
+	if err != nil {
+		t.Fatalf("FetchMap() error = %v", err)
+	}
+	if dm == nil {
+		t.Fatal("FetchMap() = nil, want static DERP map")
+	}
+	if len(dm.Regions) == 0 {
+		t.Fatal("len(Regions) = 0, want static DERP regions")
+	}
+}
+
 func TestClientReceiveTimeoutDoesNotKillSession(t *testing.T) {
 	srv := newTestDERPServer(t)
 

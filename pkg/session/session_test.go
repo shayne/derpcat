@@ -3,6 +3,7 @@ package session
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"io"
@@ -18,6 +19,7 @@ import (
 	"time"
 
 	"github.com/shayne/derpcat/pkg/portmap"
+	"github.com/shayne/derpcat/pkg/quicpath"
 	"github.com/shayne/derpcat/pkg/rendezvous"
 	"github.com/shayne/derpcat/pkg/telemetry"
 	"github.com/shayne/derpcat/pkg/transport"
@@ -487,6 +489,10 @@ func TestExternalListenSendUsesNativeDirectQUICWhenBothSidesAreDirectReady(t *te
 	t.Setenv("DERPCAT_FAKE_TRANSPORT", "1")
 	t.Setenv("DERPCAT_FAKE_TRANSPORT_ENABLE_DIRECT_AT", "0")
 
+	prevTCPAddrAllowed := externalNativeTCPAddrAllowed
+	externalNativeTCPAddrAllowed = func(net.Addr) bool { return false }
+	t.Cleanup(func() { externalNativeTCPAddrAllowed = prevTCPAddrAllowed })
+
 	srv := newSessionTestDERPServer(t)
 	t.Setenv("DERPCAT_TEST_DERP_MAP_URL", srv.MapURL)
 	t.Setenv("DERPCAT_TEST_DERP_SERVER_URL", srv.DERPURL)
@@ -539,9 +545,138 @@ func TestExternalListenSendUsesNativeDirectQUICWhenBothSidesAreDirectReady(t *te
 	}
 }
 
+func TestExternalListenSendUsesNativeDirectTCPWhenAllowed(t *testing.T) {
+	t.Setenv("DERPCAT_FAKE_TRANSPORT", "1")
+	t.Setenv("DERPCAT_FAKE_TRANSPORT_ENABLE_DIRECT_AT", "0")
+
+	prevTCPAddrAllowed := externalNativeTCPAddrAllowed
+	externalNativeTCPAddrAllowed = func(net.Addr) bool { return true }
+	t.Cleanup(func() { externalNativeTCPAddrAllowed = prevTCPAddrAllowed })
+
+	srv := newSessionTestDERPServer(t)
+	t.Setenv("DERPCAT_TEST_DERP_MAP_URL", srv.MapURL)
+	t.Setenv("DERPCAT_TEST_DERP_SERVER_URL", srv.DERPURL)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	var listenerOut bytes.Buffer
+	var listenerStatus syncBuffer
+	var senderStatus syncBuffer
+
+	tokenSink := make(chan string, 1)
+	listenErr := make(chan error, 1)
+	go func() {
+		_, err := Listen(ctx, ListenConfig{
+			Emitter:       telemetry.New(&listenerStatus, telemetry.LevelVerbose),
+			TokenSink:     tokenSink,
+			StdioOut:      &listenerOut,
+			UsePublicDERP: true,
+		})
+		listenErr <- err
+	}()
+
+	token := <-tokenSink
+	sendErr := make(chan error, 1)
+	go func() {
+		sendErr <- Send(ctx, SendConfig{
+			Token:         token,
+			Emitter:       telemetry.New(&senderStatus, telemetry.LevelVerbose),
+			StdioIn:       bytes.NewReader([]byte("native-tcp-direct")),
+			UsePublicDERP: true,
+		})
+	}()
+
+	if err := <-listenErr; err != nil {
+		t.Fatalf("Listen() error = %v listener=%q sender=%q", err, listenerStatus.String(), senderStatus.String())
+	}
+	if err := <-sendErr; err != nil {
+		t.Fatalf("Send() error = %v listener=%q sender=%q", err, listenerStatus.String(), senderStatus.String())
+	}
+
+	if got := listenerOut.String(); got != "native-tcp-direct" {
+		t.Fatalf("listener output = %q, want %q", got, "native-tcp-direct")
+	}
+	if got := senderStatus.String(); !strings.Contains(got, "sender-tcp-direct") {
+		t.Fatalf("sender status = %q, want sender-tcp-direct", got)
+	}
+	if got := listenerStatus.String(); !strings.Contains(got, "listener-tcp-direct") {
+		t.Fatalf("listener status = %q, want listener-tcp-direct", got)
+	}
+	if got := listenerStatus.String(); !strings.Contains(got, "connected-direct") {
+		t.Fatalf("listener status = %q, want connected-direct", got)
+	}
+}
+
+func TestExternalListenSendUsesStripedNativeDirectTCPWhenRequested(t *testing.T) {
+	t.Setenv("DERPCAT_FAKE_TRANSPORT", "1")
+	t.Setenv("DERPCAT_FAKE_TRANSPORT_ENABLE_DIRECT_AT", "0")
+	t.Setenv("DERPCAT_NATIVE_TCP_CONNS", "4")
+
+	prevTCPAddrAllowed := externalNativeTCPAddrAllowed
+	externalNativeTCPAddrAllowed = func(net.Addr) bool { return true }
+	t.Cleanup(func() { externalNativeTCPAddrAllowed = prevTCPAddrAllowed })
+
+	srv := newSessionTestDERPServer(t)
+	t.Setenv("DERPCAT_TEST_DERP_MAP_URL", srv.MapURL)
+	t.Setenv("DERPCAT_TEST_DERP_SERVER_URL", srv.DERPURL)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	payload := bytes.Repeat([]byte("striped-native-tcp:"), 1<<15)
+	var listenerOut bytes.Buffer
+	var listenerStatus syncBuffer
+	var senderStatus syncBuffer
+
+	tokenSink := make(chan string, 1)
+	listenErr := make(chan error, 1)
+	go func() {
+		_, err := Listen(ctx, ListenConfig{
+			Emitter:       telemetry.New(&listenerStatus, telemetry.LevelVerbose),
+			TokenSink:     tokenSink,
+			StdioOut:      &listenerOut,
+			UsePublicDERP: true,
+		})
+		listenErr <- err
+	}()
+
+	token := <-tokenSink
+	sendErr := make(chan error, 1)
+	go func() {
+		sendErr <- Send(ctx, SendConfig{
+			Token:         token,
+			Emitter:       telemetry.New(&senderStatus, telemetry.LevelVerbose),
+			StdioIn:       bytes.NewReader(payload),
+			UsePublicDERP: true,
+		})
+	}()
+
+	if err := <-listenErr; err != nil {
+		t.Fatalf("Listen() error = %v listener=%q sender=%q", err, listenerStatus.String(), senderStatus.String())
+	}
+	if err := <-sendErr; err != nil {
+		t.Fatalf("Send() error = %v listener=%q sender=%q", err, listenerStatus.String(), senderStatus.String())
+	}
+
+	if !bytes.Equal(listenerOut.Bytes(), payload) {
+		t.Fatalf("listener output length = %d, want %d", listenerOut.Len(), len(payload))
+	}
+	if got := senderStatus.String(); !strings.Contains(got, "native-tcp-stripes=4") {
+		t.Fatalf("sender status = %q, want native-tcp-stripes=4", got)
+	}
+	if got := listenerStatus.String(); !strings.Contains(got, "native-tcp-stripes=4") {
+		t.Fatalf("listener status = %q, want native-tcp-stripes=4", got)
+	}
+}
+
 func TestExternalListenSendUsesNativeDirectQUICWhenDirectPromotionIsSlightlyDelayed(t *testing.T) {
 	t.Setenv("DERPCAT_FAKE_TRANSPORT", "1")
 	t.Setenv("DERPCAT_FAKE_TRANSPORT_ENABLE_DIRECT_AT", strconv.FormatInt(time.Now().Add(3*time.Second).UnixNano(), 10))
+
+	prevTCPAddrAllowed := externalNativeTCPAddrAllowed
+	externalNativeTCPAddrAllowed = func(net.Addr) bool { return false }
+	t.Cleanup(func() { externalNativeTCPAddrAllowed = prevTCPAddrAllowed })
 
 	srv := newSessionTestDERPServer(t)
 	t.Setenv("DERPCAT_TEST_DERP_MAP_URL", srv.MapURL)
@@ -737,6 +872,203 @@ func TestNewBoundPublicPortmapDoesNotSynchronouslyRefresh(t *testing.T) {
 	}
 	if got := fake.localPort; got != 4242 {
 		t.Fatalf("SetLocalPort() = %d, want 4242", got)
+	}
+}
+
+func TestExternalNativeQUICConnCountUsesEnvOverride(t *testing.T) {
+	t.Setenv("DERPCAT_NATIVE_QUIC_CONNS", "8")
+
+	if got := externalNativeQUICConnCount(); got != 8 {
+		t.Fatalf("externalNativeQUICConnCount() = %d, want 8", got)
+	}
+}
+
+func TestExternalNativeQUICConnCountIgnoresInvalidEnvOverride(t *testing.T) {
+	t.Setenv("DERPCAT_NATIVE_QUIC_CONNS", "0")
+
+	if got := externalNativeQUICConnCount(); got != defaultExternalNativeQUICConns {
+		t.Fatalf("externalNativeQUICConnCount() = %d, want %d", got, defaultExternalNativeQUICConns)
+	}
+}
+
+func TestExternalNativeQUICConnCountKeepsFakeTransportSingleConn(t *testing.T) {
+	t.Setenv("DERPCAT_FAKE_TRANSPORT", "1")
+	t.Setenv("DERPCAT_NATIVE_QUIC_CONNS", "8")
+
+	if got := externalNativeQUICConnCount(); got != 1 {
+		t.Fatalf("externalNativeQUICConnCount() = %d, want 1", got)
+	}
+}
+
+func TestExternalNativeTCPConnCountUsesEnvOverride(t *testing.T) {
+	t.Setenv("DERPCAT_NATIVE_TCP_CONNS", "4")
+
+	if got := externalNativeTCPConnCount(); got != 4 {
+		t.Fatalf("externalNativeTCPConnCount() = %d, want 4", got)
+	}
+}
+
+func TestExternalNativeTCPConnCountDefaultsToTwo(t *testing.T) {
+	t.Setenv("DERPCAT_NATIVE_TCP_CONNS", "")
+
+	if got := externalNativeTCPConnCount(); got != 2 {
+		t.Fatalf("externalNativeTCPConnCount() = %d, want 2", got)
+	}
+}
+
+func TestExternalNativeTCPConnCountIgnoresInvalidEnvOverride(t *testing.T) {
+	t.Setenv("DERPCAT_NATIVE_TCP_CONNS", "0")
+
+	if got := externalNativeTCPConnCount(); got != defaultExternalNativeTCPConns {
+		t.Fatalf("externalNativeTCPConnCount() = %d, want %d", got, defaultExternalNativeTCPConns)
+	}
+}
+
+func TestExternalNativeTCPAddrAllowedDefaultAcceptsRouteLocalAddressesOnly(t *testing.T) {
+	tests := []struct {
+		name string
+		addr net.Addr
+		want bool
+	}{
+		{name: "loopback", addr: &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 12345}, want: true},
+		{name: "private", addr: &net.UDPAddr{IP: net.IPv4(10, 0, 4, 2), Port: 12345}, want: true},
+		{name: "tailscale-cgnat", addr: &net.UDPAddr{IP: net.IPv4(100, 88, 145, 8), Port: 12345}, want: true},
+		{name: "public-internet", addr: &net.UDPAddr{IP: net.IPv4(203, 0, 113, 7), Port: 12345}, want: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := externalNativeTCPAddrAllowedDefault(tt.addr); got != tt.want {
+				t.Fatalf("externalNativeTCPAddrAllowedDefault(%v) = %v, want %v", tt.addr, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestListenExternalNativeTCPOnCandidatesPrefersTailscaleCandidate(t *testing.T) {
+	ln, ok := listenExternalNativeTCPOnCandidates([]net.Addr{
+		&net.UDPAddr{IP: net.IPv4(10, 0, 1, 254), Port: 12345},
+		&net.UDPAddr{IP: net.IPv4(100, 125, 235, 82), Port: 12345},
+	}, nil)
+	if !ok {
+		t.Fatal("listenExternalNativeTCPOnCandidates() ok = false, want true")
+	}
+	defer ln.Close()
+
+	got := ln.Addr().(*net.TCPAddr)
+	if got.IP.String() != "100.125.235.82" {
+		t.Fatalf("listenExternalNativeTCPOnCandidates() addr = %v, want 100.125.235.82", got)
+	}
+}
+
+func TestSelectExternalNativeTCPResponseAddrPrefersRequestRoute(t *testing.T) {
+	got := selectExternalNativeTCPResponseAddr(
+		&net.UDPAddr{IP: net.IPv4(100, 125, 235, 82), Port: 53600},
+		&net.UDPAddr{IP: net.IPv4(10, 0, 1, 254), Port: 61216},
+		[]net.Addr{
+			&net.UDPAddr{IP: net.IPv4(10, 0, 4, 2), Port: 41678},
+			&net.UDPAddr{IP: net.IPv4(100, 88, 145, 8), Port: 41678},
+		},
+	)
+	if got == nil {
+		t.Fatal("selectExternalNativeTCPResponseAddr() = nil, want 100.88.145.8:41678")
+	}
+	if got.String() != "100.88.145.8:41678" {
+		t.Fatalf("selectExternalNativeTCPResponseAddr() = %v, want 100.88.145.8:41678", got)
+	}
+}
+
+func TestConnectExternalNativeTCPConnsEstablishesStripedConnectionsWithBidirectionalFallback(t *testing.T) {
+	senderIdentity, err := quicpath.GenerateSessionIdentity()
+	if err != nil {
+		t.Fatalf("GenerateSessionIdentity(sender) error = %v", err)
+	}
+	listenerIdentity, err := quicpath.GenerateSessionIdentity()
+	if err != nil {
+		t.Fatalf("GenerateSessionIdentity(listener) error = %v", err)
+	}
+
+	senderListener, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("Listen(sender) error = %v", err)
+	}
+	defer senderListener.Close()
+	senderListener = tls.NewListener(senderListener, quicpath.ServerTLSConfig(senderIdentity, listenerIdentity.Public))
+
+	listenerListener, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("Listen(listener) error = %v", err)
+	}
+	defer listenerListener.Close()
+	listenerListener = tls.NewListener(listenerListener, quicpath.ServerTLSConfig(listenerIdentity, senderIdentity.Public))
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	senderResult := make(chan []net.Conn, 1)
+	senderErr := make(chan error, 1)
+	go func() {
+		conns, err := connectExternalNativeTCPConns(
+			ctx,
+			senderListener,
+			listenerListener.Addr(),
+			quicpath.ClientTLSConfig(senderIdentity, listenerIdentity.Public),
+			externalNativeTCPAuth{},
+			0,
+			4,
+		)
+		senderResult <- conns
+		senderErr <- err
+	}()
+
+	listenerResult := make(chan []net.Conn, 1)
+	listenerErr := make(chan error, 1)
+	go func() {
+		conns, err := connectExternalNativeTCPConns(
+			ctx,
+			listenerListener,
+			senderListener.Addr(),
+			quicpath.ClientTLSConfig(listenerIdentity, senderIdentity.Public),
+			externalNativeTCPAuth{},
+			25*time.Millisecond,
+			4,
+		)
+		listenerResult <- conns
+		listenerErr <- err
+	}()
+
+	senderConns := <-senderResult
+	defer closeExternalNativeTCPConns(senderConns)
+	if err := <-senderErr; err != nil {
+		t.Fatalf("connectExternalNativeTCPConns(sender) error = %v", err)
+	}
+	if got := len(senderConns); got != 4 {
+		t.Fatalf("connectExternalNativeTCPConns(sender) len = %d, want 4", got)
+	}
+
+	listenerConns := <-listenerResult
+	defer closeExternalNativeTCPConns(listenerConns)
+	if err := <-listenerErr; err != nil {
+		t.Fatalf("connectExternalNativeTCPConns(listener) error = %v", err)
+	}
+	if got := len(listenerConns); got != 4 {
+		t.Fatalf("connectExternalNativeTCPConns(listener) len = %d, want 4", got)
+	}
+
+	payload := []byte("x")
+	for i := range senderConns {
+		if _, err := senderConns[i].Write(payload); err != nil {
+			t.Fatalf("senderConns[%d].Write() error = %v", i, err)
+		}
+	}
+	for i := range listenerConns {
+		var got [1]byte
+		if _, err := io.ReadFull(listenerConns[i], got[:]); err != nil {
+			t.Fatalf("listenerConns[%d] ReadFull() error = %v", i, err)
+		}
+		if got[0] != payload[0] {
+			t.Fatalf("listenerConns[%d] payload = %q, want %q", i, got[:], payload)
+		}
 	}
 }
 

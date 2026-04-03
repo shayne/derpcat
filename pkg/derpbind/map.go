@@ -6,12 +6,17 @@ import (
 	"fmt"
 	"net/http"
 
+	"tailscale.com/net/dnsfallback"
 	"tailscale.com/tailcfg"
 )
 
 const PublicDERPMapURL = "https://controlplane.tailscale.com/derpmap/default"
 
 func FetchMap(ctx context.Context, url string) (*tailcfg.DERPMap, error) {
+	if url == PublicDERPMapURL {
+		return dnsfallback.GetDERPMap(), nil
+	}
+
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return nil, err
