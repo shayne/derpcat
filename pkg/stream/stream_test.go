@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"net"
+	"strings"
 	"testing"
 	"time"
 )
@@ -91,6 +92,45 @@ func TestStdioAttachmentWrapsReadersAndWriters(t *testing.T) {
 	}
 }
 
+func TestStdioAttachmentPreservesWriterToFastPath(t *testing.T) {
+	src := &writerToReader{payload: "writer-to"}
+	a := NewStdioAttachment(src, io.Discard)
+
+	var got bytes.Buffer
+	n, err := io.Copy(&got, a)
+	if err != nil {
+		t.Fatalf("Copy() error = %v", err)
+	}
+	if n != int64(len("writer-to")) {
+		t.Fatalf("Copy() = %d, want %d", n, len("writer-to"))
+	}
+	if got.String() != "writer-to" {
+		t.Fatalf("Copy() output = %q, want writer-to", got.String())
+	}
+	if !src.writeToCalled {
+		t.Fatal("Copy() did not use source WriteTo fast path")
+	}
+}
+
+func TestStdioAttachmentPreservesReaderFromFastPath(t *testing.T) {
+	dst := &readerFromWriter{}
+	a := NewStdioAttachment(strings.NewReader("ignored"), dst)
+
+	n, err := io.Copy(a, &readOnlyReader{Reader: strings.NewReader("reader-from")})
+	if err != nil {
+		t.Fatalf("Copy() error = %v", err)
+	}
+	if n != int64(len("reader-from")) {
+		t.Fatalf("Copy() = %d, want %d", n, len("reader-from"))
+	}
+	if dst.String() != "reader-from" {
+		t.Fatalf("Copy() output = %q, want reader-from", dst.String())
+	}
+	if !dst.readFromCalled {
+		t.Fatal("Copy() did not use destination ReadFrom fast path")
+	}
+}
+
 func TestListenOnceAndConnectRoundTrip(t *testing.T) {
 	probe, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -151,4 +191,33 @@ func TestListenOnceAndConnectRoundTrip(t *testing.T) {
 	if string(buf) != "ping" {
 		t.Fatalf("buf = %q, want ping", buf)
 	}
+}
+
+type writerToReader struct {
+	payload       string
+	writeToCalled bool
+}
+
+func (r *writerToReader) Read([]byte) (int, error) {
+	return 0, io.EOF
+}
+
+func (r *writerToReader) WriteTo(w io.Writer) (int64, error) {
+	r.writeToCalled = true
+	n, err := io.WriteString(w, r.payload)
+	return int64(n), err
+}
+
+type readerFromWriter struct {
+	bytes.Buffer
+	readFromCalled bool
+}
+
+func (w *readerFromWriter) ReadFrom(r io.Reader) (int64, error) {
+	w.readFromCalled = true
+	return w.Buffer.ReadFrom(r)
+}
+
+type readOnlyReader struct {
+	io.Reader
 }

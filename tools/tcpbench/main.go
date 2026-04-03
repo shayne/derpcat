@@ -17,7 +17,7 @@ import (
 	"time"
 )
 
-const usage = "usage: tcpbench send <addr> <bytes> | tcpbench send-stdin <addr> | tcpbench send-tls <addr> | tcpbench listen-tls <addr>"
+const usage = "usage: tcpbench send <addr> <bytes> | tcpbench send-stdin <addr> | tcpbench recv <addr> | tcpbench recv-discard <addr> | tcpbench listen-send <addr> <bytes> | tcpbench listen-send-stdin <addr> | tcpbench send-tls <addr> | tcpbench listen-tls <addr>"
 
 func main() {
 	if err := run(os.Args[1:], os.Stdout); err != nil {
@@ -50,6 +50,30 @@ func run(args []string, stdout io.Writer) error {
 			return errors.New(usage)
 		}
 		n, err = sendFromReader(args[1], os.Stdin)
+	case "recv":
+		if len(args) != 2 {
+			return errors.New(usage)
+		}
+		n, err = receiveToWriter(args[1], os.Stdout)
+	case "recv-discard":
+		if len(args) != 2 {
+			return errors.New(usage)
+		}
+		n, err = receiveToWriter(args[1], io.Discard)
+	case "listen-send":
+		if len(args) != 3 {
+			return errors.New(usage)
+		}
+		bytesToSend, parseErr := strconv.ParseInt(args[2], 10, 64)
+		if parseErr != nil || bytesToSend < 0 {
+			return errors.New(usage)
+		}
+		n, err = listenAndSend(args[1], bytesToSend)
+	case "listen-send-stdin":
+		if len(args) != 2 {
+			return errors.New(usage)
+		}
+		n, err = listenAndSendFromReader(args[1], os.Stdin)
 	case "send-tls":
 		if len(args) != 2 {
 			return errors.New(usage)
@@ -188,6 +212,68 @@ func receiveFromListener(ln net.Listener, dst io.Writer) (int64, error) {
 	defer conn.Close()
 
 	return io.Copy(dst, conn)
+}
+
+func receiveToWriter(addr string, dst io.Writer) (int64, error) {
+	conn, err := net.Dial("tcp4", addr)
+	if err != nil {
+		return 0, err
+	}
+	defer conn.Close()
+
+	return io.Copy(dst, conn)
+}
+
+func listenAndSend(addr string, bytesToSend int64) (int64, error) {
+	ln, err := net.Listen("tcp4", addr)
+	if err != nil {
+		return 0, err
+	}
+	defer ln.Close()
+
+	conn, err := ln.Accept()
+	if err != nil {
+		return 0, err
+	}
+	defer conn.Close()
+
+	buf := make([]byte, 1<<20)
+	var sent int64
+	for sent < bytesToSend {
+		n := int64(len(buf))
+		if remaining := bytesToSend - sent; remaining < n {
+			n = remaining
+		}
+		wrote, err := conn.Write(buf[:n])
+		sent += int64(wrote)
+		if err != nil {
+			return sent, err
+		}
+	}
+	if tcpConn, ok := conn.(*net.TCPConn); ok {
+		_ = tcpConn.CloseWrite()
+	}
+	return sent, nil
+}
+
+func listenAndSendFromReader(addr string, src io.Reader) (int64, error) {
+	ln, err := net.Listen("tcp4", addr)
+	if err != nil {
+		return 0, err
+	}
+	defer ln.Close()
+
+	conn, err := ln.Accept()
+	if err != nil {
+		return 0, err
+	}
+	defer conn.Close()
+
+	n, err := writeFromReader(conn, src)
+	if tcpConn, ok := conn.(*net.TCPConn); ok {
+		_ = tcpConn.CloseWrite()
+	}
+	return n, err
 }
 
 func generateSelfSignedCert() (tls.Certificate, error) {

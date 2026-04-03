@@ -76,15 +76,17 @@ type envelope struct {
 }
 
 type quicModeRequest struct {
-	NativeDirect bool   `json:"native_direct"`
-	NativeTCP    bool   `json:"native_tcp,omitempty"`
-	DirectAddr   string `json:"direct_addr,omitempty"`
+	NativeDirect   bool   `json:"native_direct"`
+	NativeTCP      bool   `json:"native_tcp,omitempty"`
+	DirectAddr     string `json:"direct_addr,omitempty"`
+	NativeTCPConns int    `json:"native_tcp_conns,omitempty"`
 }
 
 type quicModeResponse struct {
-	NativeDirect bool   `json:"native_direct"`
-	NativeTCP    bool   `json:"native_tcp,omitempty"`
-	DirectAddr   string `json:"direct_addr,omitempty"`
+	NativeDirect   bool   `json:"native_direct"`
+	NativeTCP      bool   `json:"native_tcp,omitempty"`
+	DirectAddr     string `json:"direct_addr,omitempty"`
+	NativeTCPConns int    `json:"native_tcp_conns,omitempty"`
 }
 
 type quicModeAck struct {
@@ -208,7 +210,7 @@ func sendExternal(ctx context.Context, cfg SendConfig) error {
 		return err
 	}
 
-	localCandidates := publicProbeCandidates(ctx, probeConn, dm, pm)
+	localCandidates := publicInitialProbeCandidates(probeConn, pm)
 	parsedLocalCandidates := parseCandidateStrings(localCandidates)
 	claim := rendezvous.Claim{
 		Version:      tok.Version,
@@ -492,7 +494,7 @@ func listenExternal(ctx context.Context, cfg ListenConfig) (string, error) {
 		}
 
 		if decision.Accept != nil {
-			decision.Accept.Candidates = publicProbeCandidates(ctx, session.probeConn, session.derpMap, publicSessionPortmap(session))
+			decision.Accept.Candidates = publicInitialProbeCandidates(session.probeConn, publicSessionPortmap(session))
 		}
 		localCandidates := parseCandidateStrings(nil)
 		if decision.Accept != nil {
@@ -807,8 +809,13 @@ func requestExternalQUICMode(
 	defer unsubscribe()
 
 	if err := sendEnvelope(ctx, client, peerDERP, envelope{
-		Type:        envelopeQUICModeReq,
-		QUICModeReq: &quicModeRequest{NativeDirect: true, NativeTCP: localTCPListener != nil, DirectAddr: localTCPAddr},
+		Type: envelopeQUICModeReq,
+		QUICModeReq: &quicModeRequest{
+			NativeDirect:   true,
+			NativeTCP:      localTCPListener != nil,
+			DirectAddr:     localTCPAddr,
+			NativeTCPConns: externalNativeTCPConnCount(),
+		},
 	}); err != nil {
 		return false, nil, nil, err
 	}
@@ -845,7 +852,7 @@ func requestExternalQUICMode(
 		if externalNativeTCPUseBearerAuth(localTCPListener.Addr(), addr) {
 			tcpTLSConfig = nil
 		}
-		connCount := externalNativeTCPConnCount()
+		connCount := externalNativeTCPHandshakeConnCount(resp.NativeTCPConns, externalNativeTCPConnCount())
 		if connCount > 1 {
 			nativeTCPConns, err = connectExternalNativeTCPConns(modeCtx, localTCPListener, addr, tcpTLSConfig, nativeTCPAuth, 0, connCount)
 			if err == nil && emitter != nil {
@@ -991,9 +998,10 @@ func acceptExternalQUICMode(
 	if err := sendEnvelope(ctx, client, peerDERP, envelope{
 		Type: envelopeQUICModeResp,
 		QUICModeResp: &quicModeResponse{
-			NativeDirect: nativeQUIC,
-			NativeTCP:    nativeTCPListener != nil && nativeTCPPeerAddr != nil,
-			DirectAddr:   quicModeDirectAddrString(nativeQUICModeResponseAddr(nativeQUICAddr, nativeTCPAddr, nativeTCPListener != nil && nativeTCPPeerAddr != nil)),
+			NativeDirect:   nativeQUIC,
+			NativeTCP:      nativeTCPListener != nil && nativeTCPPeerAddr != nil,
+			DirectAddr:     quicModeDirectAddrString(nativeQUICModeResponseAddr(nativeQUICAddr, nativeTCPAddr, nativeTCPListener != nil && nativeTCPPeerAddr != nil)),
+			NativeTCPConns: externalNativeTCPHandshakeConnCount(req.NativeTCPConns, externalNativeTCPConnCount()),
 		},
 	}); err != nil {
 		if nativeTCPListener != nil {
@@ -1013,6 +1021,7 @@ func acceptExternalQUICMode(
 		nativeTCPConnCh chan nativeTCPResult
 		nativeTCPCancel context.CancelFunc
 	)
+	nativeTCPConnCount := externalNativeTCPHandshakeConnCount(req.NativeTCPConns, externalNativeTCPConnCount())
 	if nativeTCPListener != nil && nativeTCPPeerAddr != nil {
 		nativeTCPCtx, cancel := context.WithCancel(ctx)
 		nativeTCPCancel = cancel
@@ -1022,7 +1031,7 @@ func acceptExternalQUICMode(
 			tcpTLSConfig = nil
 		}
 		go func() {
-			connCount := externalNativeTCPConnCount()
+			connCount := nativeTCPConnCount
 			if connCount > 1 {
 				conns, err := connectExternalNativeTCPConns(nativeTCPCtx, nativeTCPListener, nativeTCPPeerAddr, tcpTLSConfig, nativeTCPAuth, externalNativeTCPDialFallbackDelay, connCount)
 				if err == nil && emitter != nil {
@@ -1316,36 +1325,16 @@ func decodeEnvelope(payload []byte) (envelope, error) {
 }
 
 func publicProbeCandidates(ctx context.Context, conn net.PacketConn, dm *tailcfg.DERPMap, pm publicPortmap) []string {
+	candidates := publicInitialProbeCandidates(conn, pm)
 	if fakeTransportCandidatesBlocked() {
 		return nil
 	}
 	if conn == nil {
 		return nil
 	}
-	udpAddr, ok := conn.LocalAddr().(*net.UDPAddr)
-	if !ok {
-		return nil
-	}
-	port := udpAddr.Port
-	seen := map[string]struct{}{}
-	add := func(ip netip.Addr) {
-		if !publicProbeCandidateAllowed(ip) {
-			return
-		}
-		candidate := net.JoinHostPort(ip.String(), strconv.Itoa(port))
+	seen := make(map[string]struct{}, len(candidates))
+	for _, candidate := range candidates {
 		seen[candidate] = struct{}{}
-	}
-
-	addrs, _ := net.InterfaceAddrs()
-	for _, addr := range addrs {
-		prefix, err := netip.ParsePrefix(addr.String())
-		if err != nil {
-			continue
-		}
-		ip := prefix.Addr()
-		if ip.IsLoopback() || ip.IsPrivate() || ip.IsGlobalUnicast() {
-			add(ip)
-		}
 	}
 
 	if dm != nil {
@@ -1362,6 +1351,56 @@ func publicProbeCandidates(ctx context.Context, conn net.PacketConn, dm *tailcfg
 					seen[addrPort.String()] = struct{}{}
 				}
 			}
+		}
+	}
+
+	candidates = candidates[:0]
+	for candidate := range seen {
+		candidates = append(candidates, candidate)
+	}
+	slices.Sort(candidates)
+	if len(candidates) > rendezvous.MaxClaimCandidates {
+		candidates = candidates[:rendezvous.MaxClaimCandidates]
+	}
+	return candidates
+}
+
+func publicInitialProbeCandidates(conn net.PacketConn, pm publicPortmap) []string {
+	if fakeTransportCandidatesBlocked() {
+		return nil
+	}
+	if conn == nil {
+		return nil
+	}
+	udpAddr, ok := conn.LocalAddr().(*net.UDPAddr)
+	if !ok {
+		return nil
+	}
+	port := udpAddr.Port
+	seen := map[string]struct{}{}
+	add := func(ip netip.Addr, port int) {
+		if !publicProbeCandidateAllowed(ip) {
+			return
+		}
+		candidate := net.JoinHostPort(ip.String(), strconv.Itoa(port))
+		seen[candidate] = struct{}{}
+	}
+
+	addrs, _ := net.InterfaceAddrs()
+	for _, addr := range addrs {
+		prefix, err := netip.ParsePrefix(addr.String())
+		if err != nil {
+			continue
+		}
+		ip := prefix.Addr()
+		if ip.IsLoopback() || ip.IsPrivate() || ip.IsGlobalUnicast() {
+			add(ip, port)
+		}
+	}
+
+	if pm != nil {
+		if mapped, ok := pm.Snapshot(); ok && mapped.IsValid() {
+			add(mapped.Addr(), int(mapped.Port()))
 		}
 	}
 
@@ -1399,7 +1438,11 @@ func publicCandidateSource(conn net.PacketConn, dm *tailcfg.DERPMap, pm publicPo
 			return publicProbeAddrs(ctx, conn, nil, nil)
 		}
 	}
-	return func(context.Context) []net.Addr {
+	return func(ctx context.Context) []net.Addr {
+		candidates := publicProbeAddrs(ctx, conn, dm, pm)
+		if len(candidates) > 0 {
+			return candidates
+		}
 		return slices.Clone(localCandidates)
 	}
 }

@@ -50,6 +50,16 @@ func externalNativeTCPConnCount() int {
 	return defaultExternalNativeTCPConns
 }
 
+func externalNativeTCPHandshakeConnCount(peerCount, localCount int) int {
+	if localCount < 1 {
+		localCount = 1
+	}
+	if peerCount < 1 || peerCount >= localCount {
+		return localCount
+	}
+	return peerCount
+}
+
 func listenExternalNativeTCP(addr net.Addr, tlsConfig *tls.Config) (net.Listener, error) {
 	tcpAddr, network, ok := externalNativeTCPAddr(addr)
 	if !ok {

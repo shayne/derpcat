@@ -781,6 +781,69 @@ func TestPublicProbeCandidatesIncludesMappedCandidate(t *testing.T) {
 	}
 }
 
+func TestPublicInitialProbeCandidatesDoesNotSynchronouslyGatherTraversalCandidates(t *testing.T) {
+	conn := &stubPacketConn{localAddr: &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 4242}}
+	mapped := netip.MustParseAddrPort("198.51.100.10:54321")
+	pm := &sessionLifecyclePortmap{have: true, snapshot: mapped}
+
+	called := false
+	prev := gatherTraversalCandidates
+	gatherTraversalCandidates = func(context.Context, net.PacketConn, *tailcfg.DERPMap, func() (netip.AddrPort, bool)) ([]string, error) {
+		called = true
+		return []string{"203.0.113.10:4242"}, nil
+	}
+	t.Cleanup(func() {
+		gatherTraversalCandidates = prev
+	})
+
+	got := publicInitialProbeCandidates(conn, pm)
+	if called {
+		t.Fatal("publicInitialProbeCandidates() synchronously called gatherTraversalCandidates")
+	}
+	if !containsString(got, "127.0.0.1:4242") {
+		t.Fatalf("publicInitialProbeCandidates() = %v, want local socket candidate", got)
+	}
+	if !containsString(got, mapped.String()) {
+		t.Fatalf("publicInitialProbeCandidates() = %v, want mapped candidate %q", got, mapped)
+	}
+	if containsString(got, "203.0.113.10:4242") {
+		t.Fatalf("publicInitialProbeCandidates() = %v, want no gathered traversal candidate", got)
+	}
+}
+
+func TestPublicCandidateSourceRefreshesDynamicProbeCandidatesForRealSessions(t *testing.T) {
+	ctx := context.Background()
+	conn := &stubPacketConn{localAddr: &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 4242}}
+	localCandidates := []net.Addr{&net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 4242}}
+
+	call := 0
+	prev := gatherTraversalCandidates
+	gatherTraversalCandidates = func(context.Context, net.PacketConn, *tailcfg.DERPMap, func() (netip.AddrPort, bool)) ([]string, error) {
+		call++
+		if call == 1 {
+			return []string{"203.0.113.10:4242"}, nil
+		}
+		return []string{"203.0.113.11:4242"}, nil
+	}
+	t.Cleanup(func() {
+		gatherTraversalCandidates = prev
+	})
+
+	source := publicCandidateSource(conn, &tailcfg.DERPMap{}, nil, localCandidates)
+	first := source(ctx)
+	second := source(ctx)
+
+	if !containsAddrString(first, "203.0.113.10:4242") {
+		t.Fatalf("first publicCandidateSource() = %v, want refreshed candidate 203.0.113.10:4242", first)
+	}
+	if containsAddrString(first, "203.0.113.11:4242") {
+		t.Fatalf("first publicCandidateSource() = %v, want no second refresh candidate", first)
+	}
+	if !containsAddrString(second, "203.0.113.11:4242") {
+		t.Fatalf("second publicCandidateSource() = %v, want refreshed candidate 203.0.113.11:4242", second)
+	}
+}
+
 func TestPublicProbeCandidatesSkipsTailscaleCGNATInInternetOnlyTestMode(t *testing.T) {
 	t.Setenv("DERPCAT_TEST_DISABLE_TAILSCALE_CANDIDATES", "1")
 
@@ -921,6 +984,26 @@ func TestExternalNativeTCPConnCountIgnoresInvalidEnvOverride(t *testing.T) {
 
 	if got := externalNativeTCPConnCount(); got != defaultExternalNativeTCPConns {
 		t.Fatalf("externalNativeTCPConnCount() = %d, want %d", got, defaultExternalNativeTCPConns)
+	}
+}
+
+func TestExternalNativeTCPHandshakeConnCountNegotiatesMinimumPositive(t *testing.T) {
+	t.Parallel()
+
+	if got := externalNativeTCPHandshakeConnCount(1, 2); got != 1 {
+		t.Fatalf("externalNativeTCPHandshakeConnCount(1, 2) = %d, want 1", got)
+	}
+	if got := externalNativeTCPHandshakeConnCount(4, 2); got != 2 {
+		t.Fatalf("externalNativeTCPHandshakeConnCount(4, 2) = %d, want 2", got)
+	}
+	if got := externalNativeTCPHandshakeConnCount(0, 2); got != 2 {
+		t.Fatalf("externalNativeTCPHandshakeConnCount(0, 2) = %d, want 2", got)
+	}
+	if got := externalNativeTCPHandshakeConnCount(-1, 2); got != 2 {
+		t.Fatalf("externalNativeTCPHandshakeConnCount(-1, 2) = %d, want 2", got)
+	}
+	if got := externalNativeTCPHandshakeConnCount(2, 0); got != 1 {
+		t.Fatalf("externalNativeTCPHandshakeConnCount(2, 0) = %d, want 1", got)
 	}
 }
 
@@ -1291,6 +1374,15 @@ func (m *sessionLifecyclePortmap) Close() error {
 func containsString(values []string, target string) bool {
 	for _, value := range values {
 		if value == target {
+			return true
+		}
+	}
+	return false
+}
+
+func containsAddrString(values []net.Addr, target string) bool {
+	for _, value := range values {
+		if value != nil && value.String() == target {
 			return true
 		}
 	}

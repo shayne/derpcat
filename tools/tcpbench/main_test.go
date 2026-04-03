@@ -149,6 +149,186 @@ func TestReceiveFromListenerWritesAllBytes(t *testing.T) {
 	}
 }
 
+func TestReceiveToWriterReadsAllBytes(t *testing.T) {
+	t.Parallel()
+
+	ln, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("Listen() error = %v", err)
+	}
+	defer ln.Close()
+
+	sendDone := make(chan error, 1)
+	go func() {
+		conn, err := ln.Accept()
+		if err != nil {
+			sendDone <- err
+			return
+		}
+		defer conn.Close()
+
+		_, err = conn.Write([]byte("hello recv"))
+		sendDone <- err
+	}()
+
+	var got bytes.Buffer
+	n, err := receiveToWriter(ln.Addr().String(), &got)
+	if err != nil {
+		t.Fatalf("receiveToWriter() error = %v", err)
+	}
+	if n != int64(len("hello recv")) {
+		t.Fatalf("receiveToWriter() = %d, want %d", n, len("hello recv"))
+	}
+	if err := <-sendDone; err != nil {
+		t.Fatalf("server send error = %v", err)
+	}
+	if got.String() != "hello recv" {
+		t.Fatalf("receiveToWriter() output = %q, want %q", got.String(), "hello recv")
+	}
+}
+
+func TestRunRecvDiscardPrintsTransferMetrics(t *testing.T) {
+	t.Parallel()
+
+	ln, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("Listen() error = %v", err)
+	}
+	defer ln.Close()
+
+	sendDone := make(chan error, 1)
+	go func() {
+		conn, err := ln.Accept()
+		if err != nil {
+			sendDone <- err
+			return
+		}
+		defer conn.Close()
+
+		_, err = conn.Write([]byte("discard me"))
+		sendDone <- err
+	}()
+
+	var got bytes.Buffer
+	if err := run([]string{"recv-discard", ln.Addr().String()}, &got); err != nil {
+		t.Fatalf("run(recv-discard) error = %v", err)
+	}
+	if err := <-sendDone; err != nil {
+		t.Fatalf("server send error = %v", err)
+	}
+	if !bytes.Contains(got.Bytes(), []byte("bytes=10 ")) {
+		t.Fatalf("run(recv-discard) output = %q, want bytes=10", got.String())
+	}
+}
+
+func TestListenAndSendWritesAllBytes(t *testing.T) {
+	t.Parallel()
+
+	probe, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("Listen() error = %v", err)
+	}
+	addr := probe.Addr().String()
+	if err := probe.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+
+	sendDone := make(chan struct {
+		n   int64
+		err error
+	}, 1)
+	go func() {
+		n, err := listenAndSend(addr, int64(len("hello listen-send")))
+		sendDone <- struct {
+			n   int64
+			err error
+		}{n: n, err: err}
+	}()
+
+	var conn net.Conn
+	deadline := time.Now().Add(time.Second)
+	for {
+		conn, err = net.Dial("tcp4", addr)
+		if err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("Dial() error = %v", err)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	defer conn.Close()
+
+	payload, err := io.ReadAll(conn)
+	if err != nil {
+		t.Fatalf("ReadAll() error = %v", err)
+	}
+	result := <-sendDone
+	if result.err != nil {
+		t.Fatalf("listenAndSend() error = %v", result.err)
+	}
+	if result.n != int64(len("hello listen-send")) {
+		t.Fatalf("listenAndSend() = %d, want %d", result.n, len("hello listen-send"))
+	}
+	if len(payload) != len("hello listen-send") {
+		t.Fatalf("received bytes = %d, want %d", len(payload), len("hello listen-send"))
+	}
+}
+
+func TestListenAndSendFromReaderWritesAllBytes(t *testing.T) {
+	t.Parallel()
+
+	probe, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("Listen() error = %v", err)
+	}
+	addr := probe.Addr().String()
+	if err := probe.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+
+	sendDone := make(chan struct {
+		n   int64
+		err error
+	}, 1)
+	go func() {
+		n, err := listenAndSendFromReader(addr, bytes.NewReader([]byte("hello listen-send-stdin")))
+		sendDone <- struct {
+			n   int64
+			err error
+		}{n: n, err: err}
+	}()
+
+	var conn net.Conn
+	deadline := time.Now().Add(time.Second)
+	for {
+		conn, err = net.Dial("tcp4", addr)
+		if err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("Dial() error = %v", err)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	defer conn.Close()
+
+	payload, err := io.ReadAll(conn)
+	if err != nil {
+		t.Fatalf("ReadAll() error = %v", err)
+	}
+	result := <-sendDone
+	if result.err != nil {
+		t.Fatalf("listenAndSendFromReader() error = %v", result.err)
+	}
+	if result.n != int64(len("hello listen-send-stdin")) {
+		t.Fatalf("listenAndSendFromReader() = %d, want %d", result.n, len("hello listen-send-stdin"))
+	}
+	if string(payload) != "hello listen-send-stdin" {
+		t.Fatalf("received payload = %q, want %q", string(payload), "hello listen-send-stdin")
+	}
+}
+
 func mustTestCertificate(t *testing.T) ([]byte, []byte) {
 	t.Helper()
 
