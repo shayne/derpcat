@@ -9,6 +9,13 @@ func TestDefaultQUICConfigUsesConservativeInitialPacketSize(t *testing.T) {
 	}
 }
 
+func TestDefaultQUICConfigKeepsPathMTUDiscoveryEnabled(t *testing.T) {
+	cfg := DefaultQUICConfig()
+	if cfg.DisablePathMTUDiscovery {
+		t.Fatal("DisablePathMTUDiscovery = true, want false")
+	}
+}
+
 func TestDefaultQUICConfigEnablesQlogTracerFromEnv(t *testing.T) {
 	t.Setenv("DERPCAT_QLOG_DIR", t.TempDir())
 

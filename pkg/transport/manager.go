@@ -49,6 +49,7 @@ type ManagerConfig struct {
 type Manager struct {
 	mu                    sync.Mutex
 	discoveryMu           sync.Mutex
+	wg                    sync.WaitGroup
 	cfg                   ManagerConfig
 	candidateSourceBase   func(context.Context) []net.Addr
 	state                 pathState
@@ -108,15 +109,35 @@ func (m *Manager) Start(ctx context.Context) error {
 	m.started = true
 	m.mu.Unlock()
 
-	go m.discoveryLoop(ctx)
-	go m.receiveControlLoop(ctx)
+	m.wg.Add(1)
+	go func() {
+		defer m.wg.Done()
+		m.discoveryLoop(ctx)
+	}()
+	m.wg.Add(1)
+	go func() {
+		defer m.wg.Done()
+		m.receiveControlLoop(ctx)
+	}()
 	if m.cfg.ReceiveRelay != nil {
-		go m.relayReadLoop(ctx)
+		m.wg.Add(1)
+		go func() {
+			defer m.wg.Done()
+			m.relayReadLoop(ctx)
+		}()
 	}
 	if !m.cfg.DisableDirectReads {
-		go m.directReadLoop(ctx)
+		m.wg.Add(1)
+		go func() {
+			defer m.wg.Done()
+			m.directReadLoop(ctx)
+		}()
 	}
 	return nil
+}
+
+func (m *Manager) Wait() {
+	m.wg.Wait()
 }
 
 func (m *Manager) PathState() Path {

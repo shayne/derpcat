@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
@@ -9,6 +10,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	quic "github.com/quic-go/quic-go"
@@ -16,8 +18,17 @@ import (
 )
 
 const listenUsage = "usage: quicbench listen [addr]"
-const sendUsage = "usage: quicbench send <addr> <bytes>"
+const sendUsage = "usage: quicbench send [--reverse] [--streams N] [--connections N] <addr> <bytes>"
 const copyBufferSize = 256 << 10
+const requestHeaderSize = 13
+
+type sendArgs struct {
+	addr        string
+	bytesToSend int64
+	reverse     bool
+	streams     int
+	connections int
+}
 
 func main() {
 	if err := run(os.Args[1:], os.Stdout, os.Stderr); err != nil {
@@ -41,14 +52,11 @@ func run(args []string, stdout, stderr io.Writer) error {
 		}
 		return runListen(addr, stdout, stderr)
 	case "send":
-		if len(args) != 3 {
-			return errors.New(sendUsage)
-		}
-		n, err := parseByteCount(args[2])
+		parsed, err := parseSendArgs(args[1:])
 		if err != nil {
 			return err
 		}
-		return runSend(args[1], n, stdout)
+		return runSend(parsed, stdout)
 	default:
 		return fmt.Errorf("unknown command %q", args[0])
 	}
@@ -77,7 +85,8 @@ func runListen(addr string, stdout, stderr io.Writer) error {
 	if err != nil {
 		return err
 	}
-	defer conn.CloseWithError(0, "")
+	conns := []*quic.Conn{conn}
+	defer closeQUICConns(conns)
 
 	stream, err := conn.AcceptStream(context.Background())
 	if err != nil {
@@ -85,55 +94,300 @@ func runListen(addr string, stdout, stderr io.Writer) error {
 	}
 	defer stream.Close()
 
-	buf := make([]byte, copyBufferSize)
-	started := time.Now()
-	n, err := io.CopyBuffer(io.Discard, stream, buf)
+	req, err := readBenchRequest(stream)
 	if err != nil {
 		return err
+	}
+	for len(conns) < req.connections {
+		conn, err := listener.Accept(context.Background())
+		if err != nil {
+			return err
+		}
+		conns = append(conns, conn)
+	}
+
+	started := time.Now()
+	var n int64
+	if req.reverse {
+		n, err = runListenReverseStreams(conns, req)
+		if err != nil {
+			return err
+		}
+		if n != req.bytesToSend {
+			return fmt.Errorf("sent %d bytes, want %d", n, req.bytesToSend)
+		}
+	} else {
+		n, err = runListenForwardStreams(conns, req)
+		if err != nil {
+			return err
+		}
 	}
 	elapsed := time.Since(started)
 	fmt.Fprintf(stdout, "bytes=%d duration=%s mbps=%.2f\n", n, elapsed, throughputMbps(n, elapsed))
 	return nil
 }
 
-func runSend(addr string, bytesToSend int64, stdout io.Writer) error {
+func runSend(cfg sendArgs, stdout io.Writer) error {
 	udpConn, err := net.ListenPacket("udp4", "0.0.0.0:0")
 	if err != nil {
 		return err
 	}
 	defer udpConn.Close()
 
-	serverAddr, err := net.ResolveUDPAddr("udp4", addr)
+	serverAddr, err := net.ResolveUDPAddr("udp4", cfg.addr)
 	if err != nil {
 		return err
 	}
-	conn, err := quic.Dial(context.Background(), udpConn, serverAddr, quicpath.DefaultClientTLSConfig(), quicpath.DefaultQUICConfig())
+	transport := &quic.Transport{Conn: udpConn}
+	defer transport.Close()
+
+	conn, err := transport.Dial(context.Background(), serverAddr, quicpath.DefaultClientTLSConfig(), quicpath.DefaultQUICConfig())
 	if err != nil {
 		return err
 	}
-	defer conn.CloseWithError(0, "")
+	conns := []*quic.Conn{conn}
+	defer closeQUICConns(conns)
 
 	stream, err := conn.OpenStreamSync(context.Background())
 	if err != nil {
 		return err
 	}
-
-	buf := make([]byte, copyBufferSize)
-	src := io.LimitReader(zeroReader{}, bytesToSend)
-	started := time.Now()
-	n, err := io.CopyBuffer(stream, src, buf)
-	if err != nil {
+	if err := writeBenchRequest(stream, cfg); err != nil {
 		return err
 	}
 	if err := stream.Close(); err != nil {
 		return err
 	}
-	if n != bytesToSend {
-		return fmt.Errorf("sent %d bytes, want %d", n, bytesToSend)
+	for len(conns) < cfg.connections {
+		conn, err := transport.Dial(context.Background(), serverAddr, quicpath.DefaultClientTLSConfig(), quicpath.DefaultQUICConfig())
+		if err != nil {
+			return err
+		}
+		conns = append(conns, conn)
+	}
+
+	started := time.Now()
+	var n int64
+	if cfg.reverse {
+		n, err = runSendReverseStreams(conns, cfg)
+		if err != nil {
+			return err
+		}
+	} else {
+		n, err = runSendForwardStreams(conns, cfg)
+		if err != nil {
+			return err
+		}
+		if n != cfg.bytesToSend {
+			return fmt.Errorf("sent %d bytes, want %d", n, cfg.bytesToSend)
+		}
 	}
 	elapsed := time.Since(started)
 	fmt.Fprintf(stdout, "bytes=%d duration=%s mbps=%.2f\n", n, elapsed, throughputMbps(n, elapsed))
 	return nil
+}
+
+func parseSendArgs(args []string) (sendArgs, error) {
+	cfg := sendArgs{streams: 1, connections: 1}
+	for len(args) > 0 {
+		switch args[0] {
+		case "--reverse":
+			cfg.reverse = true
+			args = args[1:]
+		case "--streams":
+			if len(args) < 2 {
+				return sendArgs{}, errors.New(sendUsage)
+			}
+			streams, err := strconv.Atoi(args[1])
+			if err != nil || streams < 1 {
+				return sendArgs{}, errors.New(sendUsage)
+			}
+			cfg.streams = streams
+			args = args[2:]
+		case "--connections":
+			if len(args) < 2 {
+				return sendArgs{}, errors.New(sendUsage)
+			}
+			connections, err := strconv.Atoi(args[1])
+			if err != nil || connections < 1 {
+				return sendArgs{}, errors.New(sendUsage)
+			}
+			cfg.connections = connections
+			args = args[2:]
+		default:
+			goto positional
+		}
+	}
+positional:
+	if len(args) != 2 {
+		return sendArgs{}, errors.New(sendUsage)
+	}
+	cfg.addr = args[0]
+	n, err := parseByteCount(args[1])
+	if err != nil {
+		return sendArgs{}, err
+	}
+	cfg.bytesToSend = n
+	return cfg, nil
+}
+
+func writeBenchRequest(stream io.Writer, cfg sendArgs) error {
+	var header [requestHeaderSize]byte
+	if cfg.reverse {
+		header[0] = 1
+	}
+	binary.BigEndian.PutUint64(header[1:], uint64(cfg.bytesToSend))
+	binary.BigEndian.PutUint16(header[9:], uint16(cfg.streams))
+	binary.BigEndian.PutUint16(header[11:], uint16(cfg.connections))
+	_, err := stream.Write(header[:])
+	return err
+}
+
+func readBenchRequest(stream io.Reader) (sendArgs, error) {
+	var header [requestHeaderSize]byte
+	if _, err := io.ReadFull(stream, header[:]); err != nil {
+		return sendArgs{}, err
+	}
+	streams := int(binary.BigEndian.Uint16(header[9:]))
+	if streams < 1 {
+		return sendArgs{}, errors.New("invalid stream count")
+	}
+	connections := int(binary.BigEndian.Uint16(header[11:]))
+	if connections < 1 {
+		return sendArgs{}, errors.New("invalid connection count")
+	}
+	return sendArgs{
+		bytesToSend: int64(binary.BigEndian.Uint64(header[1:])),
+		reverse:     header[0] == 1,
+		streams:     streams,
+		connections: connections,
+	}, nil
+}
+
+func runListenForwardStreams(conns []*quic.Conn, cfg sendArgs) (int64, error) {
+	return drainIncomingStreams(conns, cfg.streams)
+}
+
+func runListenReverseStreams(conns []*quic.Conn, cfg sendArgs) (int64, error) {
+	streams := make([]*quic.Stream, 0, len(conns)*cfg.streams)
+	for _, conn := range conns {
+		for range cfg.streams {
+			stream, err := conn.OpenStreamSync(context.Background())
+			if err != nil {
+				return 0, err
+			}
+			streams = append(streams, stream)
+		}
+	}
+	return transferFixedStreams(streams, cfg.bytesToSend)
+}
+
+func runSendForwardStreams(conns []*quic.Conn, cfg sendArgs) (int64, error) {
+	streams := make([]*quic.Stream, 0, len(conns)*cfg.streams)
+	for _, conn := range conns {
+		for range cfg.streams {
+			stream, err := conn.OpenStreamSync(context.Background())
+			if err != nil {
+				return 0, err
+			}
+			streams = append(streams, stream)
+		}
+	}
+	return transferFixedStreams(streams, cfg.bytesToSend)
+}
+
+func runSendReverseStreams(conns []*quic.Conn, cfg sendArgs) (int64, error) {
+	return drainIncomingStreams(conns, cfg.streams)
+}
+
+func drainIncomingStreams(conns []*quic.Conn, streamCount int) (int64, error) {
+	type streamResult struct {
+		n   int64
+		err error
+	}
+	streams := make([]*quic.Stream, 0, len(conns)*streamCount)
+	for _, conn := range conns {
+		for range streamCount {
+			stream, err := conn.AcceptStream(context.Background())
+			if err != nil {
+				return 0, err
+			}
+			streams = append(streams, stream)
+		}
+	}
+	results := make(chan streamResult, len(streams))
+	var wg sync.WaitGroup
+	for _, stream := range streams {
+		wg.Add(1)
+		go func(stream *quic.Stream) {
+			defer wg.Done()
+			n, err := io.CopyBuffer(io.Discard, stream, make([]byte, copyBufferSize))
+			_ = stream.Close()
+			results <- streamResult{n: n, err: err}
+		}(stream)
+	}
+	wg.Wait()
+	close(results)
+
+	var total int64
+	for result := range results {
+		if result.err != nil {
+			return 0, result.err
+		}
+		total += result.n
+	}
+	return total, nil
+}
+
+func transferFixedStreams(streams []*quic.Stream, bytesToSend int64) (int64, error) {
+	type streamResult struct {
+		n   int64
+		err error
+	}
+	results := make(chan streamResult, len(streams))
+	var wg sync.WaitGroup
+	for i, stream := range streams {
+		bytesToSend := bytesForStream(bytesToSend, len(streams), i)
+		wg.Add(1)
+		go func(stream *quic.Stream, bytesToSend int64) {
+			defer wg.Done()
+			n, err := io.CopyBuffer(stream, io.LimitReader(zeroReader{}, bytesToSend), make([]byte, copyBufferSize))
+			if closeErr := stream.Close(); err == nil {
+				err = closeErr
+			} else {
+				_ = stream.Close()
+			}
+			if err == nil && n != bytesToSend {
+				err = fmt.Errorf("sent %d bytes, want %d", n, bytesToSend)
+			}
+			results <- streamResult{n: n, err: err}
+		}(stream, bytesToSend)
+	}
+	wg.Wait()
+	close(results)
+
+	var total int64
+	for result := range results {
+		if result.err != nil {
+			return 0, result.err
+		}
+		total += result.n
+	}
+	return total, nil
+}
+
+func closeQUICConns(conns []*quic.Conn) {
+	for _, conn := range conns {
+		_ = conn.CloseWithError(0, "")
+	}
+}
+
+func bytesForStream(total int64, streamCount, index int) int64 {
+	base := total / int64(streamCount)
+	if int64(index) < total%int64(streamCount) {
+		return base + 1
+	}
+	return base
 }
 
 func parseByteCount(value string) (int64, error) {

@@ -128,6 +128,13 @@ dump_remote_logs() {
   remote "echo '--- remote err'; sed -n '1,160p' '${remote_base}.err' 2>/dev/null || true; echo '--- remote out'; sed -n '1,160p' '${remote_base}.out' 2>/dev/null || true; echo '--- remote sender err'; sed -n '1,160p' '${remote_base}.sender.err' 2>/dev/null || true; echo '--- remote sender out'; sed -n '1,160p' '${remote_base}.sender.out' 2>/dev/null || true"
 }
 
+dump_local_sender_logs() {
+  echo '--- local sender err'
+  sed -n '1,160p' "${tmp}/local-sender.err" 2>/dev/null || true
+  echo '--- local sender out'
+  sed -n '1,160p' "${tmp}/local-sender.out" 2>/dev/null || true
+}
+
 mise run build
 mise run build-linux-amd64
 scp dist/derpcat-linux-amd64 "${remote_user}@${target}:${remote_upload}"
@@ -151,6 +158,7 @@ if [[ "${remote_output}" != "${payload_local_to_remote}" ]]; then
   echo "remote output mismatch" >&2
   printf 'want=%q\n' "${payload_local_to_remote}" >&2
   printf ' got=%q\n' "${remote_output}" >&2
+  dump_local_sender_logs >&2
   dump_remote_logs >&2
   exit 1
 fi

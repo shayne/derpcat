@@ -15,17 +15,21 @@ import (
 )
 
 type quicMetricsSummary struct {
-	Events              uint64  `json:"events"`
-	MetricsEvents       uint64  `json:"metrics_events"`
-	PacketLostEvents    uint64  `json:"packet_lost_events"`
-	SpuriousLossEvents  uint64  `json:"spurious_loss_events"`
-	MaxCongestionWindow int     `json:"max_congestion_window"`
-	MaxBytesInFlight    int     `json:"max_bytes_in_flight"`
-	MaxPacketsInFlight  int     `json:"max_packets_in_flight"`
-	MaxSmoothedRTTMS    float64 `json:"max_smoothed_rtt_ms"`
-	MaxLatestRTTMS      float64 `json:"max_latest_rtt_ms"`
-	MaxMinRTTMS         float64 `json:"max_min_rtt_ms"`
-	MaxMTU              uint64  `json:"max_mtu"`
+	Events                    uint64  `json:"events"`
+	MetricsEvents             uint64  `json:"metrics_events"`
+	SlowStartEvents           uint64  `json:"slow_start_events"`
+	CongestionAvoidanceEvents uint64  `json:"congestion_avoidance_events"`
+	RecoveryEvents            uint64  `json:"recovery_events"`
+	ApplicationLimitedEvents  uint64  `json:"application_limited_events"`
+	PacketLostEvents          uint64  `json:"packet_lost_events"`
+	SpuriousLossEvents        uint64  `json:"spurious_loss_events"`
+	MaxCongestionWindow       int     `json:"max_congestion_window"`
+	MaxBytesInFlight          int     `json:"max_bytes_in_flight"`
+	MaxPacketsInFlight        int     `json:"max_packets_in_flight"`
+	MaxSmoothedRTTMS          float64 `json:"max_smoothed_rtt_ms"`
+	MaxLatestRTTMS            float64 `json:"max_latest_rtt_ms"`
+	MaxMinRTTMS               float64 `json:"max_min_rtt_ms"`
+	MaxMTU                    uint64  `json:"max_mtu"`
 }
 
 type quicMetricsTrace struct {
@@ -86,6 +90,12 @@ func (t *quicMetricsTrace) recordEvent(ev qlogwriter.Event) {
 		if event != nil {
 			t.recordMetricsUpdatedLocked(*event)
 		}
+	case qlog.CongestionStateUpdated:
+		t.recordCongestionStateUpdatedLocked(event.State)
+	case *qlog.CongestionStateUpdated:
+		if event != nil {
+			t.recordCongestionStateUpdatedLocked(event.State)
+		}
 	case qlog.PacketLost:
 		t.summary.PacketLostEvents++
 	case *qlog.PacketLost:
@@ -108,6 +118,19 @@ func (t *quicMetricsTrace) recordEvent(ev qlogwriter.Event) {
 				t.summary.MaxMTU = v
 			}
 		}
+	}
+}
+
+func (t *quicMetricsTrace) recordCongestionStateUpdatedLocked(state qlog.CongestionState) {
+	switch state {
+	case qlog.CongestionStateSlowStart:
+		t.summary.SlowStartEvents++
+	case qlog.CongestionStateCongestionAvoidance:
+		t.summary.CongestionAvoidanceEvents++
+	case qlog.CongestionStateRecovery:
+		t.summary.RecoveryEvents++
+	case qlog.CongestionStateApplicationLimited:
+		t.summary.ApplicationLimitedEvents++
 	}
 }
 

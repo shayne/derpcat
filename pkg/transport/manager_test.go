@@ -1419,6 +1419,39 @@ func TestManagerCanceledStartCanBeRetried(t *testing.T) {
 	}
 }
 
+func TestManagerWaitReturnsAfterCancelWhileDirectReadLoopIsBlocked(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+
+	direct := newFakePacketConn(&net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 1234})
+	mgr := NewManager(ManagerConfig{
+		DirectConn:        direct,
+		DiscoveryInterval: 100 * time.Millisecond,
+	})
+	if err := mgr.Start(ctx); err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+	if !direct.waitForReadAttempts(1, time.Second) {
+		t.Fatal("manager did not enter the direct read loop")
+	}
+
+	cancel()
+	if err := direct.SetReadDeadline(time.Now()); err != nil {
+		t.Fatalf("SetReadDeadline() error = %v", err)
+	}
+
+	done := make(chan struct{})
+	go func() {
+		mgr.Wait()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("Wait() did not return after cancel and direct read wakeup")
+	}
+}
+
 func TestManagerExposesDirectPathSnapshot(t *testing.T) {
 	t.Helper()
 
