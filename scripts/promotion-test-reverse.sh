@@ -16,6 +16,9 @@ fi
 if [[ -n "${DERPCAT_NATIVE_QUIC_CONNS:-}" ]]; then
   remote_env+=(DERPCAT_NATIVE_QUIC_CONNS="${DERPCAT_NATIVE_QUIC_CONNS}")
 fi
+if [[ -n "${DERPCAT_NATIVE_TCP_CONNS:-}" ]]; then
+  remote_env+=(DERPCAT_NATIVE_TCP_CONNS="${DERPCAT_NATIVE_TCP_CONNS}")
+fi
 
 remote() {
   ssh "${remote_user}@${target}" "${remote_env[@]}" 'bash -se' <<<"$1"
