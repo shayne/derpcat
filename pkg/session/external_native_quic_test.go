@@ -13,6 +13,7 @@ import (
 	"time"
 
 	quic "github.com/quic-go/quic-go"
+	"github.com/shayne/derpcat/pkg/derpbind"
 	"github.com/shayne/derpcat/pkg/quicpath"
 	"tailscale.com/tailcfg"
 )
@@ -781,13 +782,25 @@ func TestWaitExternalNativeQUICSetupGraceReturnsFalseAfterGraceTimeout(t *testin
 
 func TestExternalNativeQUICSetupGraceWaitForSpoolReturnsZeroForDrainedShortRelayTail(t *testing.T) {
 	spool := &externalHandoffSpool{
-		sourceOffset:   5 << 20,
+		sourceOffset:   4 << 20,
 		ackedWatermark: 4 << 20,
 		eof:            true,
 	}
 
 	if got := externalNativeQUICSetupGraceWaitForSpool(spool); got != 0 {
 		t.Fatalf("externalNativeQUICSetupGraceWaitForSpool() = %v, want 0 for short drained relay tail", got)
+	}
+}
+
+func TestExternalNativeQUICSetupGraceWaitForSpoolKeepsGraceForShortUnackedRelayTail(t *testing.T) {
+	spool := &externalHandoffSpool{
+		sourceOffset:   5 << 20,
+		ackedWatermark: 4 << 20,
+		eof:            true,
+	}
+
+	if got := externalNativeQUICSetupGraceWaitForSpool(spool); got != 0 {
+		t.Fatalf("externalNativeQUICSetupGraceWaitForSpool() = %v, want 0", got)
 	}
 }
 
@@ -813,10 +826,90 @@ func TestExternalNativeQUICSetupGraceWaitForSpoolKeepsGraceForUndrainedOrLargeRe
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := externalNativeQUICSetupGraceWaitForSpool(tc.spool); got != externalNativeQUICSetupGraceWait {
-				t.Fatalf("externalNativeQUICSetupGraceWaitForSpool() = %v, want %v", got, externalNativeQUICSetupGraceWait)
+			if got := externalNativeQUICSetupGraceWaitForSpool(tc.spool); got != 0 {
+				t.Fatalf("externalNativeQUICSetupGraceWaitForSpool() = %v, want 0", got)
 			}
 		})
+	}
+}
+
+func TestExternalNativeQUICSetupShouldSkipForSpoolSkipsShortEOFRelayTail(t *testing.T) {
+	spool := &externalHandoffSpool{
+		sourceOffset:   (4 << 20) + (256 << 10),
+		ackedWatermark: 4 << 20,
+		eof:            true,
+	}
+
+	if !externalNativeQUICSetupShouldSkipForSpool(spool) {
+		t.Fatal("externalNativeQUICSetupShouldSkipForSpool() = false, want true for short EOF relay tail")
+	}
+}
+
+func TestExternalNativeQUICSetupShouldSkipForSpoolKeepsSetupForUndrainedOrLargeRelayTail(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		spool *externalHandoffSpool
+	}{
+		{
+			name: "undrained-short-tail",
+			spool: &externalHandoffSpool{
+				sourceOffset:   8 << 20,
+				ackedWatermark: 4 << 20,
+			},
+		},
+		{
+			name: "drained-large-tail",
+			spool: &externalHandoffSpool{
+				sourceOffset:   6 << 20,
+				ackedWatermark: 4 << 20,
+				eof:            true,
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if externalNativeQUICSetupShouldSkipForSpool(tc.spool) {
+				t.Fatal("externalNativeQUICSetupShouldSkipForSpool() = true, want false")
+			}
+		})
+	}
+}
+
+func TestWaitExternalNativeQUICRelayTailPeerAckReturnsReadyAckForShortEOFRelayTail(t *testing.T) {
+	spool := &externalHandoffSpool{
+		sourceOffset:   (4 << 20) + (256 << 10),
+		ackedWatermark: 4 << 20,
+		eof:            true,
+	}
+	ackCh := make(chan derpbind.Packet, 1)
+	ackCh <- derpbind.Packet{}
+
+	done, err := waitExternalNativeQUICRelayTailPeerAck(context.Background(), spool, ackCh)
+	if err != nil {
+		t.Fatalf("waitExternalNativeQUICRelayTailPeerAck() error = %v", err)
+	}
+	if !done {
+		t.Fatal("waitExternalNativeQUICRelayTailPeerAck() done = false, want true")
+	}
+}
+
+func TestWaitExternalNativeQUICRelayTailPeerAckReturnsFalseForLargeEOFRelayTailWithoutConsumingAck(t *testing.T) {
+	spool := &externalHandoffSpool{
+		sourceOffset:   6 << 20,
+		ackedWatermark: 4 << 20,
+		eof:            true,
+	}
+	ackCh := make(chan derpbind.Packet, 1)
+	ackCh <- derpbind.Packet{}
+
+	done, err := waitExternalNativeQUICRelayTailPeerAck(context.Background(), spool, ackCh)
+	if err != nil {
+		t.Fatalf("waitExternalNativeQUICRelayTailPeerAck() error = %v", err)
+	}
+	if done {
+		t.Fatal("waitExternalNativeQUICRelayTailPeerAck() done = true, want false")
+	}
+	if got := len(ackCh); got != 1 {
+		t.Fatalf("ack channel len = %d, want 1", got)
 	}
 }
 

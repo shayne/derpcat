@@ -47,8 +47,10 @@ const (
 const externalNativeQUICWait = 5 * time.Second
 const externalNativeQUICConnectWait = externalNativeQUICWait
 const externalNativeQUICNackWait = 1 * time.Second
-const externalNativeQUICSetupGraceWait = 750 * time.Millisecond
-const externalNativeQUICSetupShortRelayTailBytes = 8 << 20
+const externalNativeQUICSetupGraceWait = 0
+const externalNativeQUICSetupSkipRelayTailBytes = 256 << 10
+const externalNativeQUICRelayTailPeerAckWait = 250 * time.Millisecond
+const externalPublicCandidateRefreshWait = 250 * time.Millisecond
 const externalCopyBufferSize = 256 << 10
 const defaultExternalNativeQUICConns = 4
 const externalClaimRetryInterval = 250 * time.Millisecond
@@ -438,6 +440,22 @@ func runExternalSendStream(
 			break
 		}
 
+		if externalNativeQUICSetupShouldSkipForSpool(spool) {
+			externalTransferTracef("sender-native-quic-setup-skip short-relay-tail acked=%d", spool.AckedWatermark())
+			transportManager.StopDirect()
+			if err := <-relayErrCh; err != nil {
+				return err
+			}
+			if err := waitForPeerAck(ctx, ackCh); err != nil {
+				return err
+			}
+			if err := quicConn.CloseWithError(0, ""); err != nil {
+				return err
+			}
+			pathEmitter.Complete(transportManager)
+			return nil
+		}
+
 		if relayErr, relayDone := waitExternalNativeQUICSetupGrace(relayErrCh, externalNativeQUICSetupGraceWaitForSpool(spool)); relayDone {
 			externalTransferTracef("sender-native-quic-setup-skip relay-complete err=%v acked=%d", relayErr, spool.AckedWatermark())
 			if relayErr != nil {
@@ -559,18 +577,37 @@ func runExternalSendStream(
 			pathEmitter.Complete(transportManager)
 			return nil
 		}
-		defer nativeQUICSetup.session.Close()
-
 		close(relayStopCh)
 		if err := <-relayErrCh; err != nil {
+			closeExternalNativeQUICSendSetupResult(nativeQUICSetup)
 			return err
 		}
 		externalTransferTracef("sender-relay-carrier-stopped acked=%d", spool.AckedWatermark())
+		if relayComplete, err := waitExternalNativeQUICRelayTailPeerAck(ctx, spool, ackCh); err != nil {
+			closeExternalNativeQUICSendSetupResult(nativeQUICSetup)
+			return err
+		} else if relayComplete {
+			externalTransferTracef("sender-native-quic-skip relay-peer-ack-complete acked=%d", spool.AckedWatermark())
+			closeExternalNativeQUICSendSetupResult(nativeQUICSetup)
+			if err := quicConn.CloseWithError(0, ""); err != nil {
+				return err
+			}
+			externalTransferTracef("sender-close-relay-quic-complete")
+			externalTransferTracef("sender-transport-cancel")
+			transportCancel()
+			externalTransferTracef("sender-transport-wait-start")
+			transportManager.Wait()
+			externalTransferTracef("sender-transport-wait-complete")
+			pathEmitter.Complete(transportManager)
+			return nil
+		}
 		if spool.Done() {
 			externalTransferTracef("sender-native-quic-skip relay-complete acked=%d", spool.AckedWatermark())
+			closeExternalNativeQUICSendSetupResult(nativeQUICSetup)
 			break
 		}
 		if err := spool.RewindTo(spool.AckedWatermark()); err != nil {
+			closeExternalNativeQUICSendSetupResult(nativeQUICSetup)
 			return err
 		}
 		pathEmitter.Emit(StateDirect)
@@ -579,9 +616,11 @@ func runExternalSendStream(
 		}
 		externalTransferTracef("sender-native-quic-copy-start conns=%d acked=%d", len(nativeQUICSetup.streams), spool.AckedWatermark())
 		if err := sendExternalHandoffCarriers(ctx, nativeQUICSetup.streams, spool); err != nil {
+			closeExternalNativeQUICSendSetupResult(nativeQUICSetup)
 			return err
 		}
 		externalTransferTracef("sender-native-quic-copy-complete")
+		closeExternalNativeQUICSendSetupResult(nativeQUICSetup)
 
 		if err := quicConn.CloseWithError(0, ""); err != nil {
 			return err
@@ -1794,17 +1833,59 @@ func waitExternalNativeQUICSetupGrace(relayErrCh <-chan error, graceWait time.Du
 }
 
 func externalNativeQUICSetupGraceWaitForSpool(spool *externalHandoffSpool) time.Duration {
+	return 0
+}
+
+func externalNativeQUICSetupShouldSkipForSpool(spool *externalHandoffSpool) bool {
 	if spool == nil {
-		return externalNativeQUICSetupGraceWait
+		return false
 	}
+
 	spool.mu.Lock()
-	sourceEOF := spool.eof
-	relayTailBytes := spool.sourceOffset - spool.ackedWatermark
-	spool.mu.Unlock()
-	if sourceEOF && relayTailBytes >= 0 && relayTailBytes <= externalNativeQUICSetupShortRelayTailBytes {
-		return 0
+	defer spool.mu.Unlock()
+
+	if !spool.eof {
+		externalTransferTracef(
+			"sender-native-quic-setup-skip-check eof=%v source=%d read=%d acked=%d tail=%d cutoff=%d skip=false",
+			spool.eof,
+			spool.sourceOffset,
+			spool.readOffset,
+			spool.ackedWatermark,
+			spool.sourceOffset-spool.ackedWatermark,
+			externalNativeQUICSetupSkipRelayTailBytes,
+		)
+		return false
 	}
-	return externalNativeQUICSetupGraceWait
+	tail := spool.sourceOffset - spool.ackedWatermark
+	skip := tail <= externalNativeQUICSetupSkipRelayTailBytes
+	externalTransferTracef(
+		"sender-native-quic-setup-skip-check eof=%v source=%d read=%d acked=%d tail=%d cutoff=%d skip=%v",
+		spool.eof,
+		spool.sourceOffset,
+		spool.readOffset,
+		spool.ackedWatermark,
+		tail,
+		externalNativeQUICSetupSkipRelayTailBytes,
+		skip,
+	)
+	return skip
+}
+
+func waitExternalNativeQUICRelayTailPeerAck(ctx context.Context, spool *externalHandoffSpool, ackCh <-chan derpbind.Packet) (bool, error) {
+	if !externalNativeQUICSetupShouldSkipForSpool(spool) {
+		return false, nil
+	}
+
+	ackCtx, cancel := context.WithTimeout(ctx, externalNativeQUICRelayTailPeerAckWait)
+	defer cancel()
+
+	if err := waitForPeerAck(ackCtx, ackCh); err != nil {
+		if errors.Is(err, context.DeadlineExceeded) {
+			return false, nil
+		}
+		return false, err
+	}
+	return true, nil
 }
 
 func selectExternalQUICModeResponseAddr(peerAddr net.Addr, localCandidates []net.Addr) net.Addr {
@@ -2229,7 +2310,10 @@ func publicCandidateSource(
 		}
 	}
 	return func(ctx context.Context) []net.Addr {
-		candidates := publicProbeAddrsFromSTUNPackets(ctx, conn, dm, pm, stunPackets)
+		probeCtx, cancel := context.WithTimeout(ctx, externalPublicCandidateRefreshWait)
+		defer cancel()
+
+		candidates := publicProbeAddrsFromSTUNPackets(probeCtx, conn, dm, pm, stunPackets)
 		if len(candidates) > 0 {
 			return candidates
 		}

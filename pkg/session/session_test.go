@@ -645,6 +645,75 @@ func TestExternalListenSendSmallRelayPayloadDoesNotWaitForDelayedNativeMode(t *t
 	}
 }
 
+func TestExternalListenSendSmallRelayPayloadDoesNotStallWhenSenderSkipsNativeQUICSetup(t *testing.T) {
+	t.Setenv("DERPCAT_FAKE_TRANSPORT", "1")
+	t.Setenv("DERPCAT_FAKE_TRANSPORT_ENABLE_DIRECT_AT", strconv.FormatInt(time.Now().Add(250*time.Millisecond).UnixNano(), 10))
+	t.Setenv("DERPCAT_NATIVE_QUIC_CONNS", "4")
+
+	prevTCPAddrAllowed := externalNativeTCPAddrAllowed
+	externalNativeTCPAddrAllowed = func(net.Addr) bool { return false }
+	t.Cleanup(func() { externalNativeTCPAddrAllowed = prevTCPAddrAllowed })
+
+	prevStripeCandidates := externalNativeQUICStripeProbeCandidates
+	externalNativeQUICStripeProbeCandidates = func(ctx context.Context, packetConn net.PacketConn, _ *tailcfg.DERPMap, _ publicPortmap) []string {
+		select {
+		case <-time.After(3 * time.Second):
+		case <-ctx.Done():
+			return nil
+		}
+		udpAddr := packetConn.LocalAddr().(*net.UDPAddr)
+		return []string{net.JoinHostPort("127.0.0.1", fmt.Sprint(udpAddr.Port))}
+	}
+	t.Cleanup(func() { externalNativeQUICStripeProbeCandidates = prevStripeCandidates })
+
+	srv := newSessionTestDERPServer(t)
+	t.Setenv("DERPCAT_TEST_DERP_MAP_URL", srv.MapURL)
+	t.Setenv("DERPCAT_TEST_DERP_SERVER_URL", srv.DERPURL)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	payload := bytes.Repeat([]byte("short-relay-tail"), 5<<17)
+	var listenerOut bytes.Buffer
+	var listenerStatus syncBuffer
+	var senderStatus syncBuffer
+
+	tokenSink := make(chan string, 1)
+	listenErr := make(chan error, 1)
+	go func() {
+		_, err := Listen(ctx, ListenConfig{
+			Emitter:       telemetry.New(&listenerStatus, telemetry.LevelVerbose),
+			TokenSink:     tokenSink,
+			StdioOut:      &listenerOut,
+			UsePublicDERP: true,
+		})
+		listenErr <- err
+	}()
+
+	token := <-tokenSink
+	start := time.Now()
+	if err := Send(ctx, SendConfig{
+		Token:         token,
+		Emitter:       telemetry.New(&senderStatus, telemetry.LevelVerbose),
+		StdioIn:       bytes.NewReader(payload),
+		UsePublicDERP: true,
+	}); err != nil {
+		t.Fatalf("Send() error = %v listener=%q sender=%q", err, listenerStatus.String(), senderStatus.String())
+	}
+	if err := <-listenErr; err != nil {
+		t.Fatalf("Listen() error = %v listener=%q sender=%q", err, listenerStatus.String(), senderStatus.String())
+	}
+	if elapsed := time.Since(start); elapsed > 2*time.Second {
+		t.Fatalf("small relay transfer took %v, want < 2s when sender skips native QUIC setup; listener=%q sender=%q", elapsed, listenerStatus.String(), senderStatus.String())
+	}
+	if !bytes.Equal(listenerOut.Bytes(), payload) {
+		t.Fatalf("listener output length = %d, want %d", listenerOut.Len(), len(payload))
+	}
+	if got := senderStatus.String(); strings.Contains(got, "sender-quic-direct") || strings.Contains(got, "sender-tcp-direct") {
+		t.Fatalf("sender status = %q, want relay completion without native handoff", got)
+	}
+}
+
 func TestExternalListenSendHandsOffToNativeQUICWhenNativeTCPIsUnavailableAndBothSidesAreDirectReady(t *testing.T) {
 	t.Setenv("DERPCAT_FAKE_TRANSPORT", "1")
 	t.Setenv("DERPCAT_FAKE_TRANSPORT_ENABLE_DIRECT_AT", "0")
@@ -687,12 +756,12 @@ func TestExternalListenSendHandsOffToNativeQUICWhenNativeTCPIsUnavailableAndBoth
 			writerErr <- err
 			return
 		}
-		if err := waitForSessionTestStatusContains(ctx, &senderStatus, "sender-quic-direct"); err != nil {
-			writerErr <- fmt.Errorf("waiting for sender native QUIC handoff: %w; listener=%q sender=%q", err, listenerStatus.String(), senderStatus.String())
+		if err := waitForSessionTestStatusContains(ctx, &senderStatus, string(StateDirect)); err != nil {
+			writerErr <- fmt.Errorf("waiting for sender direct promotion: %w; listener=%q sender=%q", err, listenerStatus.String(), senderStatus.String())
 			return
 		}
-		if err := waitForSessionTestStatusContains(ctx, &listenerStatus, "listener-quic-direct"); err != nil {
-			writerErr <- fmt.Errorf("waiting for listener native QUIC handoff: %w; listener=%q sender=%q", err, listenerStatus.String(), senderStatus.String())
+		if err := waitForSessionTestStatusContains(ctx, &listenerStatus, string(StateDirect)); err != nil {
+			writerErr <- fmt.Errorf("waiting for listener direct promotion: %w; listener=%q sender=%q", err, listenerStatus.String(), senderStatus.String())
 			return
 		}
 		_, err := stdinWriter.Write(payload[midpoint:])
@@ -722,11 +791,116 @@ func TestExternalListenSendHandsOffToNativeQUICWhenNativeTCPIsUnavailableAndBoth
 	if !bytes.Equal(listenerOut.Bytes(), payload) {
 		t.Fatalf("listener output length = %d, want %d", listenerOut.Len(), len(payload))
 	}
-	if got := senderStatus.String(); !strings.Contains(got, "sender-quic-direct") || strings.Contains(got, "sender-tcp-direct") {
-		t.Fatalf("sender status = %q, want native QUIC handoff without native TCP", got)
+	if got := senderStatus.String(); !strings.Contains(got, string(StateDirect)) || strings.Contains(got, "sender-tcp-direct") {
+		t.Fatalf("sender status = %q, want direct QUIC promotion without native TCP", got)
 	}
-	if got := listenerStatus.String(); !strings.Contains(got, "listener-quic-direct") || strings.Contains(got, "listener-tcp-direct") {
-		t.Fatalf("listener status = %q, want native QUIC handoff without native TCP", got)
+	if got := listenerStatus.String(); !strings.Contains(got, string(StateDirect)) || strings.Contains(got, "listener-tcp-direct") {
+		t.Fatalf("listener status = %q, want direct QUIC promotion without native TCP", got)
+	}
+}
+
+func TestExternalListenSendExitsWhenRelayFinishesDuringDelayedNativeQUICSetup(t *testing.T) {
+	t.Setenv("DERPCAT_FAKE_TRANSPORT", "1")
+	t.Setenv("DERPCAT_FAKE_TRANSPORT_ENABLE_DIRECT_AT", "0")
+	t.Setenv("DERPCAT_NATIVE_QUIC_CONNS", "4")
+
+	prevTCPAddrAllowed := externalNativeTCPAddrAllowed
+	externalNativeTCPAddrAllowed = func(net.Addr) bool { return false }
+	t.Cleanup(func() { externalNativeTCPAddrAllowed = prevTCPAddrAllowed })
+
+	prevStripeCandidates := externalNativeQUICStripeProbeCandidates
+	externalNativeQUICStripeProbeCandidates = func(ctx context.Context, packetConn net.PacketConn, _ *tailcfg.DERPMap, _ publicPortmap) []string {
+		select {
+		case <-time.After(500 * time.Millisecond):
+		case <-ctx.Done():
+			return nil
+		}
+		udpAddr := packetConn.LocalAddr().(*net.UDPAddr)
+		return []string{net.JoinHostPort("127.0.0.1", fmt.Sprint(udpAddr.Port))}
+	}
+	t.Cleanup(func() { externalNativeQUICStripeProbeCandidates = prevStripeCandidates })
+
+	prevLocalAddrCandidate := externalNativeQUICStripeCanUseLocalAddrCandidate
+	externalNativeQUICStripeCanUseLocalAddrCandidate = func(net.Addr, net.Addr) bool {
+		return false
+	}
+	t.Cleanup(func() { externalNativeQUICStripeCanUseLocalAddrCandidate = prevLocalAddrCandidate })
+
+	srv := newSessionTestDERPServer(t)
+	t.Setenv("DERPCAT_TEST_DERP_MAP_URL", srv.MapURL)
+	t.Setenv("DERPCAT_TEST_DERP_SERVER_URL", srv.DERPURL)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer cancel()
+
+	payloadChunk := bytes.Repeat([]byte("relay-first-then-native-quic"), 1<<12)
+	const chunkCount = 24
+	var listenerOut bytes.Buffer
+	var listenerStatus syncBuffer
+	var senderStatus syncBuffer
+
+	tokenSink := make(chan string, 1)
+	listenErr := make(chan error, 1)
+	go func() {
+		_, err := Listen(ctx, ListenConfig{
+			Emitter:       telemetry.New(&listenerStatus, telemetry.LevelVerbose),
+			TokenSink:     tokenSink,
+			StdioOut:      &listenerOut,
+			UsePublicDERP: true,
+		})
+		listenErr <- err
+	}()
+
+	token := <-tokenSink
+	stdinReader, stdinWriter := io.Pipe()
+	writerErr := make(chan error, 1)
+	go func() {
+		defer stdinWriter.Close()
+		if _, err := stdinWriter.Write(payloadChunk); err != nil {
+			writerErr <- err
+			return
+		}
+		if err := waitForSessionTestStatusContains(ctx, &senderStatus, string(StateDirect)); err != nil {
+			writerErr <- fmt.Errorf("waiting for sender direct state: %w; listener=%q sender=%q", err, listenerStatus.String(), senderStatus.String())
+			return
+		}
+		for i := 1; i < chunkCount; i++ {
+			time.Sleep(150 * time.Millisecond)
+			if _, err := stdinWriter.Write(payloadChunk); err != nil {
+				writerErr <- err
+				return
+			}
+		}
+		writerErr <- nil
+	}()
+
+	start := time.Now()
+	sendErr := make(chan error, 1)
+	go func() {
+		sendErr <- Send(ctx, SendConfig{
+			Token:         token,
+			Emitter:       telemetry.New(&senderStatus, telemetry.LevelVerbose),
+			StdioIn:       stdinReader,
+			UsePublicDERP: true,
+		})
+	}()
+
+	if err := <-listenErr; err != nil {
+		t.Fatalf("Listen() error = %v listener=%q sender=%q", err, listenerStatus.String(), senderStatus.String())
+	}
+	if err := <-sendErr; err != nil {
+		t.Fatalf("Send() error = %v listener=%q sender=%q", err, listenerStatus.String(), senderStatus.String())
+	}
+	if err := <-writerErr; err != nil {
+		t.Fatalf("stdin writer error = %v listener=%q sender=%q", err, listenerStatus.String(), senderStatus.String())
+	}
+
+	if elapsed := time.Since(start); elapsed >= 6*time.Second {
+		t.Fatalf("Send() elapsed = %v, want completion after relay drains during native setup; listener=%q sender=%q", elapsed, listenerStatus.String(), senderStatus.String())
+	}
+
+	if got := listenerOut.Len(); got != len(payloadChunk)*chunkCount {
+		t.Fatalf("listener output length = %d, want %d", got, len(payloadChunk)*chunkCount)
 	}
 }
 
@@ -881,12 +1055,38 @@ func TestExternalListenSendUsesStripedNativeDirectTCPWhenRequested(t *testing.T)
 	}()
 
 	token := <-tokenSink
+	stdinReader, stdinWriter := io.Pipe()
+	writerErr := make(chan error, 1)
+	go func() {
+		defer stdinWriter.Close()
+		midpoint := len(payload) / 2
+		if _, err := stdinWriter.Write(payload[:midpoint]); err != nil {
+			writerErr <- err
+			return
+		}
+		for _, wait := range []struct {
+			status *syncBuffer
+			needle string
+		}{
+			{status: &senderStatus, needle: "native-tcp-stripes=4"},
+			{status: &senderStatus, needle: "sender-tcp-direct"},
+			{status: &listenerStatus, needle: "native-tcp-stripes=4"},
+			{status: &listenerStatus, needle: "listener-tcp-direct"},
+		} {
+			if err := waitForSessionTestStatusContains(ctx, wait.status, wait.needle); err != nil {
+				writerErr <- fmt.Errorf("waiting for %q: %w; listener=%q sender=%q", wait.needle, err, listenerStatus.String(), senderStatus.String())
+				return
+			}
+		}
+		_, err := stdinWriter.Write(payload[midpoint:])
+		writerErr <- err
+	}()
 	sendErr := make(chan error, 1)
 	go func() {
 		sendErr <- Send(ctx, SendConfig{
 			Token:         token,
 			Emitter:       telemetry.New(&senderStatus, telemetry.LevelVerbose),
-			StdioIn:       bytes.NewReader(payload),
+			StdioIn:       stdinReader,
 			UsePublicDERP: true,
 		})
 	}()
@@ -896,6 +1096,9 @@ func TestExternalListenSendUsesStripedNativeDirectTCPWhenRequested(t *testing.T)
 	}
 	if err := <-sendErr; err != nil {
 		t.Fatalf("Send() error = %v listener=%q sender=%q", err, listenerStatus.String(), senderStatus.String())
+	}
+	if err := <-writerErr; err != nil {
+		t.Fatalf("stdin writer error = %v listener=%q sender=%q", err, listenerStatus.String(), senderStatus.String())
 	}
 
 	if !bytes.Equal(listenerOut.Bytes(), payload) {
@@ -1110,8 +1313,12 @@ func TestPublicCandidateSourceRefreshesTraversalCandidatesFromSTUNPackets(t *tes
 		_ func() (netip.AddrPort, bool),
 		gotPackets <-chan traversal.STUNPacket,
 	) ([]string, error) {
-		if gotCtx != ctx {
-			t.Fatalf("gatherTraversalCandidatesFromSTUNPackets() ctx = %v, want %v", gotCtx, ctx)
+		deadline, ok := gotCtx.Deadline()
+		if !ok {
+			t.Fatal("gatherTraversalCandidatesFromSTUNPackets() ctx has no deadline, want bounded timeout context")
+		}
+		if remaining := time.Until(deadline); remaining <= 0 || remaining > externalPublicCandidateRefreshWait {
+			t.Fatalf("gatherTraversalCandidatesFromSTUNPackets() deadline in %s, want <= %s", remaining, externalPublicCandidateRefreshWait)
 		}
 		if gotConn != conn {
 			t.Fatalf("gatherTraversalCandidatesFromSTUNPackets() conn = %v, want %v", gotConn, conn)
@@ -1133,6 +1340,51 @@ func TestPublicCandidateSourceRefreshesTraversalCandidatesFromSTUNPackets(t *tes
 	}
 	if !containsAddrString(got, "203.0.113.12:4242") {
 		t.Fatalf("publicCandidateSource() = %v, want STUN packet gathered candidate 203.0.113.12:4242", got)
+	}
+}
+
+func TestPublicCandidateSourceReturnsQuicklyWhenSTUNGatherBlocks(t *testing.T) {
+	parentCtx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	conn := &stubPacketConn{localAddr: &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 4242}}
+	localCandidates := []net.Addr{&net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 4242}}
+	stunPackets := make(chan traversal.STUNPacket)
+
+	prevSTUNGather := gatherTraversalCandidatesFromSTUNPackets
+	gatherTraversalCandidatesFromSTUNPackets = func(
+		gotCtx context.Context,
+		_ net.PacketConn,
+		_ *tailcfg.DERPMap,
+		_ func() (netip.AddrPort, bool),
+		_ <-chan traversal.STUNPacket,
+	) ([]string, error) {
+		<-gotCtx.Done()
+		return nil, gotCtx.Err()
+	}
+	t.Cleanup(func() {
+		gatherTraversalCandidatesFromSTUNPackets = prevSTUNGather
+	})
+
+	source := publicCandidateSource(conn, &tailcfg.DERPMap{}, nil, localCandidates, stunPackets)
+	started := time.Now()
+	resultCh := make(chan []net.Addr, 1)
+	go func() {
+		resultCh <- source(parentCtx)
+	}()
+
+	select {
+	case got := <-resultCh:
+		if elapsed := time.Since(started); elapsed > time.Second {
+			t.Fatalf("publicCandidateSource() took %s, want sub-second fallback when STUN gather blocks", elapsed)
+		}
+		if !containsAddrString(got, "127.0.0.1:4242") {
+			t.Fatalf("publicCandidateSource() = %v, want fallback local candidate 127.0.0.1:4242", got)
+		}
+	case <-time.After(time.Second):
+		cancel()
+		<-resultCh
+		t.Fatal("publicCandidateSource() blocked for >=1s while STUN gather was stalled")
 	}
 }
 
@@ -2039,7 +2291,7 @@ func runExternalRoundTrip(t *testing.T, cfg roundTripConfig) roundTripResult {
 		t.Fatalf("timed out waiting for Listen(); listener=%q sender=%q", listenerStatus.String(), senderStatus.String())
 	}
 
-	sendGrace := time.NewTimer(3 * time.Second)
+	sendGrace := time.NewTimer(2*externalNativeQUICWait + externalNativeQUICSetupGraceWait + time.Second)
 	defer sendGrace.Stop()
 	select {
 	case err := <-sendErr:
@@ -2047,9 +2299,29 @@ func runExternalRoundTrip(t *testing.T, cfg roundTripConfig) roundTripResult {
 			t.Fatalf("Send() error = %v", err)
 		}
 	case <-sendGrace.C:
+		select {
+		case err := <-sendErr:
+			if err != nil {
+				t.Fatalf("Send() error = %v", err)
+			}
+			return roundTripResult{
+				Output:         listenerOut.String(),
+				ListenerStatus: listenerStatus.String(),
+				SenderStatus:   senderStatus.String(),
+				SeenRelay:      strings.Contains(listenerStatus.String(), string(StateRelay)) && strings.Contains(senderStatus.String(), string(StateRelay)),
+				SeenDirect:     strings.Contains(listenerStatus.String(), string(StateDirect)) && strings.Contains(senderStatus.String(), string(StateDirect)),
+			}
+		default:
+		}
 		cancel()
 		err := <-sendErr
-		t.Fatalf("Send() did not exit after listener completion; error after forced cleanup = %v", err)
+		t.Fatalf(
+			"Send() did not exit after listener completion within %v; error after forced cleanup = %v; listener=%q sender=%q",
+			2*externalNativeQUICWait+externalNativeQUICSetupGraceWait+time.Second,
+			err,
+			listenerStatus.String(),
+			senderStatus.String(),
+		)
 	}
 
 	listenerStatuses := listenerStatus.String()
