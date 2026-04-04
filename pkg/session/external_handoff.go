@@ -2,6 +2,7 @@ package session
 
 import (
 	"bytes"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
@@ -212,4 +213,67 @@ func (s *externalHandoffSpool) Close() error {
 		return removeErr
 	}
 	return nil
+}
+
+func writeExternalHandoffChunkFrame(w io.Writer, chunk externalHandoffChunk) error {
+	if chunk.Offset < 0 {
+		return fmt.Errorf("external handoff chunk offset %d is negative", chunk.Offset)
+	}
+	if len(chunk.Payload) > int(^uint32(0)) {
+		return fmt.Errorf("external handoff chunk payload length %d exceeds uint32", len(chunk.Payload))
+	}
+	if err := binary.Write(w, binary.BigEndian, chunk.TransferID); err != nil {
+		return err
+	}
+	if err := binary.Write(w, binary.BigEndian, chunk.Offset); err != nil {
+		return err
+	}
+	if err := binary.Write(w, binary.BigEndian, uint32(len(chunk.Payload))); err != nil {
+		return err
+	}
+	_, err := w.Write(chunk.Payload)
+	return err
+}
+
+func readExternalHandoffChunkFrame(r io.Reader, maxPayload int) (externalHandoffChunk, error) {
+	var chunk externalHandoffChunk
+	if err := binary.Read(r, binary.BigEndian, &chunk.TransferID); err != nil {
+		return externalHandoffChunk{}, err
+	}
+	if err := binary.Read(r, binary.BigEndian, &chunk.Offset); err != nil {
+		return externalHandoffChunk{}, err
+	}
+	if chunk.Offset < 0 {
+		return externalHandoffChunk{}, fmt.Errorf("external handoff chunk offset %d is negative", chunk.Offset)
+	}
+	var payloadLen uint32
+	if err := binary.Read(r, binary.BigEndian, &payloadLen); err != nil {
+		return externalHandoffChunk{}, err
+	}
+	if maxPayload < 0 || int64(payloadLen) > int64(maxPayload) {
+		return externalHandoffChunk{}, fmt.Errorf("external handoff chunk payload length %d exceeds max %d", payloadLen, maxPayload)
+	}
+	chunk.Payload = make([]byte, payloadLen)
+	if _, err := io.ReadFull(r, chunk.Payload); err != nil {
+		return externalHandoffChunk{}, err
+	}
+	return chunk, nil
+}
+
+func writeExternalHandoffWatermarkFrame(w io.Writer, watermark int64) error {
+	if watermark < 0 {
+		return fmt.Errorf("external handoff watermark %d is negative", watermark)
+	}
+	return binary.Write(w, binary.BigEndian, watermark)
+}
+
+func readExternalHandoffWatermarkFrame(r io.Reader) (int64, error) {
+	var watermark int64
+	if err := binary.Read(r, binary.BigEndian, &watermark); err != nil {
+		return 0, err
+	}
+	if watermark < 0 {
+		return 0, fmt.Errorf("external handoff watermark %d is negative", watermark)
+	}
+	return watermark, nil
 }

@@ -2,6 +2,7 @@ package session
 
 import (
 	"bytes"
+	"encoding/binary"
 	"errors"
 	"io"
 	"strings"
@@ -123,5 +124,53 @@ func TestExternalHandoffSenderReturnsEOFAfterSourceDrainedAndAcked(t *testing.T)
 	}
 	if _, err := spool.NextChunk(); !errors.Is(err, io.EOF) {
 		t.Fatalf("NextChunk() error = %v, want EOF", err)
+	}
+}
+
+func TestExternalHandoffChunkFrameRoundTrip(t *testing.T) {
+	var buf bytes.Buffer
+	want := externalHandoffChunk{TransferID: 42, Offset: 9, Payload: []byte("payload")}
+
+	if err := writeExternalHandoffChunkFrame(&buf, want); err != nil {
+		t.Fatal(err)
+	}
+	got, err := readExternalHandoffChunkFrame(&buf, 1<<20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.TransferID != want.TransferID || got.Offset != want.Offset || string(got.Payload) != string(want.Payload) {
+		t.Fatalf("decoded chunk = %+v, want %+v", got, want)
+	}
+}
+
+func TestExternalHandoffWatermarkFrameRoundTrip(t *testing.T) {
+	var buf bytes.Buffer
+	if err := writeExternalHandoffWatermarkFrame(&buf, 99); err != nil {
+		t.Fatal(err)
+	}
+	got, err := readExternalHandoffWatermarkFrame(&buf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != 99 {
+		t.Fatalf("watermark = %d, want 99", got)
+	}
+}
+
+func TestExternalHandoffChunkFrameRejectsOversizedPayload(t *testing.T) {
+	var buf bytes.Buffer
+	if err := binary.Write(&buf, binary.BigEndian, uint64(42)); err != nil {
+		t.Fatal(err)
+	}
+	if err := binary.Write(&buf, binary.BigEndian, int64(0)); err != nil {
+		t.Fatal(err)
+	}
+	if err := binary.Write(&buf, binary.BigEndian, uint32(9)); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := readExternalHandoffChunkFrame(&buf, 8)
+	if err == nil {
+		t.Fatal("readExternalHandoffChunkFrame() error = nil, want oversized payload rejection")
 	}
 }
