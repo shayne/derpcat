@@ -8,6 +8,8 @@ Use the checked-in harnesses first:
 
 - `REMOTE_HOST=my-server.example.com mise run promotion-1g`
 - `./scripts/promotion-test.sh my-server.example.com 1024`
+- `./scripts/promotion-test-reverse.sh my-server.example.com 1024`
+- `./scripts/promotion-matrix-no-tailscale.sh 1024`
 - `./scripts/smoke-remote.sh my-server.example.com`
 - `./scripts/smoke-remote-share.sh my-server.example.com`
 
@@ -22,6 +24,17 @@ Measure raw network capacity separately before blaming tunnel overhead.
 - then the matching `derpcat listen/send` or `share/open` path
 
 Keep source payload size, host pair, and direction fixed when comparing variants. Record duration, throughput, final path state, and whether the session upgraded from `connected-relay` to `connected-direct`.
+
+For no-Tailscale route verification, run 3x averaged 1 GiB transfers in both directions for:
+
+- Mac -> `ktzlxc`
+- `ktzlxc` -> Mac
+- Mac -> `hetz`
+- `hetz` -> Mac
+- Mac -> `pve1`
+- `pve1` -> Mac
+
+Use `DERPCAT_TEST_DISABLE_TAILSCALE_CANDIDATES=1 ./scripts/promotion-matrix-no-tailscale.sh 1024` to ensure those runs do not advertise `100.64.0.0/10` or `fd7a:115c:a1e0::/48` candidates. For `pve1`, same-LAN private routing is expected in that mode because `pve1` and this Mac are on the same LAN.
 
 ## Cleanup Guardrails
 
