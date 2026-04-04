@@ -57,6 +57,7 @@ var (
 
 var gatherTraversalCandidates = traversal.GatherCandidates
 var gatherTraversalCandidatesFromSTUNPackets = traversal.GatherCandidatesFromSTUNPackets
+var publicInterfaceAddrs = net.InterfaceAddrs
 var publicSessionPortmaps sync.Map
 var newPublicPortmap = func(emitter *telemetry.Emitter) publicPortmap {
 	return portmap.New(emitter)
@@ -1703,7 +1704,7 @@ func publicInitialProbeCandidates(conn net.PacketConn, pm publicPortmap) []strin
 		seen[candidate] = struct{}{}
 	}
 
-	addrs, _ := net.InterfaceAddrs()
+	addrs, _ := publicInterfaceAddrs()
 	for _, addr := range addrs {
 		prefix, err := netip.ParsePrefix(addr.String())
 		if err != nil {
