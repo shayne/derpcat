@@ -44,6 +44,8 @@ const (
 )
 
 const externalNativeQUICWait = 5 * time.Second
+const externalNativeQUICConnectWait = externalNativeQUICWait
+const externalNativeQUICNackWait = 1 * time.Second
 const externalCopyBufferSize = 256 << 10
 const defaultExternalNativeQUICConns = 4
 const externalClaimRetryInterval = 250 * time.Millisecond
@@ -386,10 +388,6 @@ func runExternalSendStream(
 			closeExternalNativeTCPConns(modeResult.nativeTCPConns)
 			return err
 		}
-		if spool.Done() {
-			closeExternalNativeTCPConns(modeResult.nativeTCPConns)
-			break
-		}
 		if err := spool.RewindTo(spool.AckedWatermark()); err != nil {
 			closeExternalNativeTCPConns(modeResult.nativeTCPConns)
 			return err
@@ -428,6 +426,9 @@ func runExternalSendStream(
 			externalNativeQUICConnCount(),
 		)
 		if err != nil {
+			if spool.Done() {
+				break
+			}
 			return err
 		}
 		defer nativeQUICSession.Close()
@@ -566,10 +567,63 @@ func runExternalListenStream(
 			}
 		}
 	case err := <-relayErrCh:
-		nativeDirectModeCancel()
-		closeExternalNativeTCPConns(waitExternalNativeDirectModeResult(nativeDirectModeCh).nativeTCPConns)
 		if err != nil {
+			nativeDirectModeCancel()
+			closeExternalNativeTCPConns(waitExternalNativeDirectModeResult(nativeDirectModeCh).nativeTCPConns)
 			return err
+		}
+		modeResult := waitExternalNativeDirectModeResult(nativeDirectModeCh)
+		if modeResult.err != nil {
+			closeExternalNativeTCPConns(modeResult.nativeTCPConns)
+			return modeResult.err
+		}
+		if len(modeResult.nativeTCPConns) > 0 {
+			pathEmitter.Emit(StateDirect)
+			if cfg.Emitter != nil {
+				cfg.Emitter.Debug("listener-tcp-direct")
+				cfg.Emitter.Debug("tcp-accepted")
+			}
+			if err := receiveExternalHandoffNativeTCPConns(ctx, modeResult.nativeTCPConns, rx); err != nil {
+				closeExternalNativeTCPConns(modeResult.nativeTCPConns)
+				return err
+			}
+			closeExternalNativeTCPConns(modeResult.nativeTCPConns)
+			break
+		}
+		if modeResult.nativeQUIC && modeResult.nativeQUICAddr != nil {
+			if relayConn != nil {
+				_ = relayConn.CloseWithError(0, "")
+			}
+			if closeRelayQUIC != nil {
+				closeRelayQUIC()
+			}
+			transportCancel()
+			transportManager.Wait()
+			_ = probeConn.SetDeadline(time.Time{})
+
+			nativeQUICSession, nativeQUICStreams, err := acceptExternalNativeQUICStripedConns(
+				ctx,
+				probeConn,
+				modeResult.nativeQUICAddr,
+				dm,
+				cfg.Emitter,
+				clientTLSConfig,
+				serverTLSConfig,
+				externalNativeQUICConnCount(),
+			)
+			if err != nil {
+				return err
+			}
+			defer nativeQUICSession.Close()
+			defer closeExternalNativeQUICStreams(nativeQUICStreams)
+
+			pathEmitter.Emit(StateDirect)
+			if cfg.Emitter != nil {
+				cfg.Emitter.Debug("listener-quic-direct")
+			}
+			if err := receiveExternalHandoffNativeQUICStreams(ctx, nativeQUICStreams, rx); err != nil {
+				return err
+			}
 		}
 	}
 
@@ -1030,6 +1084,17 @@ func requestExternalQUICMode(
 	defer cancel()
 	resp, err := receiveQUICModeResponse(modeCtx, modeCh)
 	if err != nil || (!resp.NativeDirect && !resp.NativeTCP) {
+		if errors.Is(err, context.Canceled) {
+			nackCtx, nackCancel := context.WithTimeout(context.Background(), externalNativeQUICNackWait)
+			_ = sendEnvelope(nackCtx, client, peerDERP, envelope{
+				Type: envelopeQUICModeAck,
+				QUICModeAck: &quicModeAck{
+					NativeDirect: false,
+					NativeTCP:    false,
+				},
+			})
+			nackCancel()
+		}
 		if emitter != nil {
 			emitter.Debug("sender-tcp-response=none")
 		}
@@ -1119,6 +1184,11 @@ func acceptExternalQUICMode(
 	modeCtx, cancel := context.WithTimeout(ctx, externalNativeQUICWait)
 	defer cancel()
 
+	ackCh, unsubscribeAck := client.SubscribeLossless(func(pkt derpbind.Packet) bool {
+		return pkt.From == peerDERP && isQUICModeAckPayload(pkt.Payload)
+	})
+	defer unsubscribeAck()
+
 	req, err := receiveQUICModeRequest(modeCtx, modeCh)
 	if err != nil {
 		if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, net.ErrClosed) {
@@ -1166,7 +1236,10 @@ func acceptExternalQUICMode(
 		}
 	}
 	if req.NativeDirect && !forceRelay && nativeTCPListener == nil {
-		peerDirectAddr, ok := waitForExternalDirectAddr(ctx, manager, externalNativeQUICWait)
+		peerDirectAddr, ok, aborted := waitForExternalDirectAddrOrModeAbort(ctx, manager, ackCh, externalNativeQUICWait)
+		if aborted {
+			return false, nil, nil
+		}
 		if ok {
 			nativeQUIC = true
 			nativeQUICAddr = selectExternalQUICModeResponseAddr(peerDirectAddr, localCandidates)
@@ -1197,10 +1270,6 @@ func acceptExternalQUICMode(
 	if emitter != nil && nativeTCPListener != nil && !nativeQUIC {
 		emitter.Debug("listener-tcp-selected=" + quicModeDirectAddrString(nativeTCPAddr))
 	}
-	ackCh, unsubscribeAck := client.SubscribeLossless(func(pkt derpbind.Packet) bool {
-		return pkt.From == peerDERP && isQUICModeAckPayload(pkt.Payload)
-	})
-	defer unsubscribeAck()
 	if err := sendEnvelope(ctx, client, peerDERP, envelope{
 		Type: envelopeQUICModeResp,
 		QUICModeResp: &quicModeResponse{
@@ -1379,8 +1448,18 @@ func receiveQUICModeAck(ctx context.Context, ch <-chan derpbind.Packet) (quicMod
 }
 
 func waitForExternalDirectAddr(ctx context.Context, manager *transport.Manager, timeout time.Duration) (net.Addr, bool) {
+	addr, ok, _ := waitForExternalDirectAddrOrModeAbort(ctx, manager, nil, timeout)
+	return addr, ok
+}
+
+func waitForExternalDirectAddrOrModeAbort(
+	ctx context.Context,
+	manager *transport.Manager,
+	modeAckCh <-chan derpbind.Packet,
+	timeout time.Duration,
+) (net.Addr, bool, bool) {
 	if manager == nil {
-		return nil, false
+		return nil, false, false
 	}
 	timer := time.NewTimer(timeout)
 	defer timer.Stop()
@@ -1389,13 +1468,25 @@ func waitForExternalDirectAddr(ctx context.Context, manager *transport.Manager, 
 
 	for {
 		if addr, ok := manager.DirectAddr(); ok && addr != nil {
-			return cloneSessionAddr(addr), true
+			return cloneSessionAddr(addr), true, false
 		}
 		select {
 		case <-ctx.Done():
-			return nil, false
+			return nil, false, false
+		case pkt, ok := <-modeAckCh:
+			if !ok {
+				return nil, false, true
+			}
+			ackEnv, err := decodeEnvelope(pkt.Payload)
+			if err == nil &&
+				ackEnv.Type == envelopeQUICModeAck &&
+				ackEnv.QUICModeAck != nil &&
+				!ackEnv.QUICModeAck.NativeDirect &&
+				!ackEnv.QUICModeAck.NativeTCP {
+				return nil, false, true
+			}
 		case <-timer.C:
-			return nil, false
+			return nil, false, false
 		case <-ticker.C:
 		}
 	}

@@ -1155,6 +1155,22 @@ func TestExternalNativeQUICConnCountKeepsFakeTransportSingleConn(t *testing.T) {
 	}
 }
 
+func TestExternalNativeQUICConnCountForPeerKeepsStripingForPublicPeer(t *testing.T) {
+	peerAddr := &net.UDPAddr{IP: net.IPv4(203, 0, 113, 7), Port: 3478}
+
+	if got := externalNativeQUICConnCountForPeer(peerAddr, 4); got != 4 {
+		t.Fatalf("externalNativeQUICConnCountForPeer() = %d, want 4", got)
+	}
+}
+
+func TestExternalNativeQUICConnCountForPeerKeepsStripingForRouteLocalPeer(t *testing.T) {
+	peerAddr := &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 3478}
+
+	if got := externalNativeQUICConnCountForPeer(peerAddr, 4); got != 4 {
+		t.Fatalf("externalNativeQUICConnCountForPeer() = %d, want 4", got)
+	}
+}
+
 func TestExternalNativeTCPConnCountUsesEnvOverride(t *testing.T) {
 	t.Setenv("DERPCAT_NATIVE_TCP_CONNS", "4")
 
@@ -1199,7 +1215,7 @@ func TestExternalNativeTCPHandshakeConnCountNegotiatesMinimumPositive(t *testing
 	}
 }
 
-func TestExternalNativeTCPAddrAllowedDefaultAcceptsRouteLocalAddressesOnly(t *testing.T) {
+func TestExternalNativeTCPAddrAllowedDefaultAcceptsRouteLocalAndPublicAddresses(t *testing.T) {
 	tests := []struct {
 		name string
 		addr net.Addr
@@ -1208,7 +1224,7 @@ func TestExternalNativeTCPAddrAllowedDefaultAcceptsRouteLocalAddressesOnly(t *te
 		{name: "loopback", addr: &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 12345}, want: true},
 		{name: "private", addr: &net.UDPAddr{IP: net.IPv4(10, 0, 4, 2), Port: 12345}, want: true},
 		{name: "tailscale-cgnat", addr: &net.UDPAddr{IP: net.IPv4(100, 88, 145, 8), Port: 12345}, want: true},
-		{name: "public-internet", addr: &net.UDPAddr{IP: net.IPv4(203, 0, 113, 7), Port: 12345}, want: false},
+		{name: "public-internet", addr: &net.UDPAddr{IP: net.IPv4(203, 0, 113, 7), Port: 12345}, want: true},
 	}
 
 	for _, tt := range tests {
@@ -1363,6 +1379,23 @@ func TestSelectExternalNativeTCPResponseAddrPrefersSamePrivateSubnetAsRequest(t 
 	}
 	if got.String() != "10.0.4.184:53246" {
 		t.Fatalf("selectExternalNativeTCPResponseAddr() = %v, want 10.0.4.184:53246", got)
+	}
+}
+
+func TestSelectExternalNativeTCPResponseAddrPrefersPublicPeerRouteOverPrivateRequestRoute(t *testing.T) {
+	got := selectExternalNativeTCPResponseAddr(
+		&net.UDPAddr{IP: net.IPv4(10, 0, 1, 254), Port: 54321},
+		&net.UDPAddr{IP: net.IPv4(203, 0, 113, 9), Port: 4433},
+		[]net.Addr{
+			&net.UDPAddr{IP: net.IPv4(172, 17, 0, 1), Port: 45000},
+			&net.UDPAddr{IP: net.IPv4(198, 51, 100, 10), Port: 45001},
+		},
+	)
+	if got == nil {
+		t.Fatal("selectExternalNativeTCPResponseAddr() = nil, want 198.51.100.10:45001")
+	}
+	if got.String() != "198.51.100.10:45001" {
+		t.Fatalf("selectExternalNativeTCPResponseAddr() = %v, want 198.51.100.10:45001", got)
 	}
 }
 

@@ -39,7 +39,10 @@ func externalNativeTCPAddrAllowedDefault(addr net.Addr) bool {
 	if !ok {
 		return false
 	}
-	return ip.IsLoopback() || ip.IsPrivate() || publicProbeTailscaleCGNATPrefix.Contains(ip) || publicProbeTailscaleULAPrefix.Contains(ip)
+	if ip.IsLoopback() || ip.IsPrivate() || publicProbeTailscaleCGNATPrefix.Contains(ip) || publicProbeTailscaleULAPrefix.Contains(ip) {
+		return true
+	}
+	return ip.IsGlobalUnicast()
 }
 
 func externalNativeTCPConnCount() int {
@@ -175,7 +178,7 @@ func selectExternalNativeTCPRouteAddr(peerAddr net.Addr, localCandidates []net.A
 	bestPrefixBits := -1
 	bestRank := 0
 	for idx, candidate := range localCandidates {
-		if !externalNativeTCPAddrAllowed(candidate) || !externalNativeQUICStripeCanUseLocalAddrCandidate(candidate, peerAddr) {
+		if !externalNativeTCPAddrAllowed(candidate) || !externalNativeTCPRouteCanUseLocalAddrCandidate(candidate, peerAddr) {
 			continue
 		}
 		rank := externalNativeTCPAddrRank(candidate)
@@ -194,6 +197,13 @@ func selectExternalNativeTCPRouteAddr(peerAddr net.Addr, localCandidates []net.A
 		return cloneSessionAddr(localCandidates[bestIdx])
 	}
 	return nil
+}
+
+func externalNativeTCPRouteCanUseLocalAddrCandidate(localAddr, peerAddr net.Addr) bool {
+	if externalNativeQUICStripeCanUseLocalAddrCandidate(localAddr, peerAddr) {
+		return true
+	}
+	return externalNativeTCPAddrIsPublic(localAddr) && externalNativeTCPAddrIsPublic(peerAddr)
 }
 
 func externalNativeTCPSharedPrefixBits(peerAddr, candidate net.Addr) int {
@@ -237,6 +247,17 @@ func externalNativeTCPAddrIsTailscale(addr net.Addr) bool {
 		return false
 	}
 	return publicProbeTailscaleCGNATPrefix.Contains(ip) || publicProbeTailscaleULAPrefix.Contains(ip)
+}
+
+func externalNativeTCPAddrIsPublic(addr net.Addr) bool {
+	ip, ok := sessionAddrIP(addr)
+	if !ok {
+		return false
+	}
+	if ip.IsLoopback() || ip.IsPrivate() || publicProbeTailscaleCGNATPrefix.Contains(ip) || publicProbeTailscaleULAPrefix.Contains(ip) {
+		return false
+	}
+	return ip.IsGlobalUnicast()
 }
 
 func dialExternalNativeTCP(ctx context.Context, addr net.Addr, tlsConfig *tls.Config, auth externalNativeTCPAuth) (net.Conn, error) {

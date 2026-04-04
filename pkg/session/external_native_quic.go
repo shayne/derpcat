@@ -101,6 +101,7 @@ func dialExternalNativeQUICStripedConns(
 	serverTLS *tls.Config,
 	connCount int,
 ) (*externalNativeQUICStripedSession, error) {
+	connCount = externalNativeQUICConnCountForPeer(peerAddr, connCount)
 	if connCount < 1 {
 		return nil, errors.New("native QUIC connection count must be positive")
 	}
@@ -287,6 +288,7 @@ func acceptExternalNativeQUICStripedConns(
 	serverTLS *tls.Config,
 	connCount int,
 ) (*externalNativeQUICStripedSession, []*quic.Stream, error) {
+	connCount = externalNativeQUICConnCountForPeer(peerAddr, connCount)
 	if connCount < 1 {
 		return nil, nil, errors.New("native QUIC connection count must be positive")
 	}
@@ -604,6 +606,35 @@ func externalNativeQUICStripeShouldReusePrimaryPacketConn(peerAddr net.Addr) boo
 	)
 }
 
+func externalNativeQUICConnCountForPeer(peerAddr net.Addr, connCount int) int {
+	if connCount <= 1 {
+		return connCount
+	}
+	if externalNativeTCPAddrIsPublic(peerAddr) {
+		return connCount
+	}
+	peerUDPAddr, ok := peerAddr.(*net.UDPAddr)
+	if !ok || peerUDPAddr == nil {
+		return 1
+	}
+	peerIP, ok := netip.AddrFromSlice(peerUDPAddr.IP)
+	if !ok {
+		return 1
+	}
+	localUDPAddr, ok := externalNativeQUICStripeLocalBindAddr(peerAddr).(*net.UDPAddr)
+	if !ok || localUDPAddr == nil {
+		return 1
+	}
+	localIP, ok := netip.AddrFromSlice(localUDPAddr.IP)
+	if !ok {
+		return 1
+	}
+	if externalNativeQUICStripeSameRouteLocalPrefix(localIP.Unmap(), peerIP.Unmap()) {
+		return connCount
+	}
+	return 1
+}
+
 func externalNativeQUICStripeSameRouteLocalPrefix(localIP, peerIP netip.Addr) bool {
 	for _, prefix := range []netip.Prefix{
 		netip.MustParsePrefix("127.0.0.0/8"),
@@ -703,7 +734,7 @@ func dialOrAcceptExternalNativeQUICConnsWithRole(
 		return nil, nil, err
 	}
 
-	connectCtx, cancel := context.WithCancel(ctx)
+	connectCtx, cancel := context.WithTimeout(ctx, externalNativeQUICConnectWait)
 	firstConn, dialRemainder, err := dialOrAcceptExternalNativeQUICConnOnTransport(
 		connectCtx,
 		transport,

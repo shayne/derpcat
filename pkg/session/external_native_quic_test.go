@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"sync"
 	"testing"
 	"time"
 
@@ -107,6 +108,104 @@ func TestExternalNativeQUICTransfersWhenOnlyListenerDialPathWorks(t *testing.T) 
 		t.Fatalf("stream payload = %q, want %q", got, "listener-dial-native-quic")
 	}
 	close(streamReadDone)
+
+	if err := <-senderErr; err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestExternalNativeQUICTransfersAllowSlowPrimaryHandshake(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	rawSenderPacketConn, err := net.ListenPacket("udp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rawSenderPacketConn.Close()
+	senderPacketConn := &slowWriteOncePacketConn{
+		PacketConn: rawSenderPacketConn,
+		delay:      1500 * time.Millisecond,
+	}
+
+	listenerPacketConn, err := net.ListenPacket("udp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listenerPacketConn.Close()
+
+	senderIdentity, err := quicpath.GenerateSessionIdentity()
+	if err != nil {
+		t.Fatal(err)
+	}
+	listenerIdentity, err := quicpath.GenerateSessionIdentity()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	payload := []byte("slow-primary-native-quic")
+	listenerDone := make(chan struct{})
+	senderErr := make(chan error, 1)
+	go func() {
+		quicTransport, quicConn, err := dialOrAcceptExternalNativeQUICConn(
+			ctx,
+			senderPacketConn,
+			cloneSessionAddr(listenerPacketConn.LocalAddr()),
+			quicpath.ClientTLSConfig(senderIdentity, listenerIdentity.Public),
+			quicpath.ServerTLSConfig(senderIdentity, listenerIdentity.Public),
+		)
+		if err != nil {
+			senderErr <- err
+			return
+		}
+		defer quicTransport.Close()
+		defer quicConn.CloseWithError(0, "")
+
+		streamConn, err := quicConn.OpenStreamSync(ctx)
+		if err != nil {
+			senderErr <- err
+			return
+		}
+		if _, err := streamConn.Write(payload); err != nil {
+			senderErr <- err
+			return
+		}
+		if err := streamConn.Close(); err != nil {
+			senderErr <- err
+			return
+		}
+		<-listenerDone
+		senderErr <- nil
+	}()
+
+	quicTransport, quicConn, streamConn, err := acceptExternalNativeQUICStream(
+		ctx,
+		listenerPacketConn,
+		cloneSessionAddr(rawSenderPacketConn.LocalAddr()),
+		quicpath.ClientTLSConfig(listenerIdentity, senderIdentity.Public),
+		quicpath.ServerTLSConfig(listenerIdentity, senderIdentity.Public),
+	)
+	if err != nil {
+		select {
+		case senderSideErr := <-senderErr:
+			t.Fatalf("acceptExternalNativeQUICStream() error = %v; sender error = %v", err, senderSideErr)
+		default:
+		}
+		t.Fatal(err)
+	}
+	defer quicTransport.Close()
+	defer quicConn.CloseWithError(0, "")
+	defer streamConn.Close()
+
+	got, err := io.ReadAll(streamConn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, payload) {
+		close(listenerDone)
+		t.Fatalf("stream payload = %q, want %q", got, payload)
+	}
+	close(listenerDone)
 
 	if err := <-senderErr; err != nil {
 		t.Fatal(err)
@@ -907,4 +1006,17 @@ func TestExternalNativeQUICStripeLocalBindAddrUsesPeerRouteIP(t *testing.T) {
 	if got := udpAddr.Port; got != 0 {
 		t.Fatalf("bind addr port = %d, want 0", got)
 	}
+}
+
+type slowWriteOncePacketConn struct {
+	net.PacketConn
+	delay     time.Duration
+	delayOnce sync.Once
+}
+
+func (c *slowWriteOncePacketConn) WriteTo(p []byte, addr net.Addr) (int, error) {
+	c.delayOnce.Do(func() {
+		time.Sleep(c.delay)
+	})
+	return c.PacketConn.WriteTo(p, addr)
 }
