@@ -120,10 +120,10 @@ func externalNativeTCPAddrRank(addr net.Addr) int {
 	if publicProbeTailscaleCGNATPrefix.Contains(ip) || publicProbeTailscaleULAPrefix.Contains(ip) {
 		return 0
 	}
-	if ip.IsLoopback() {
+	if ip.IsPrivate() {
 		return 1
 	}
-	if ip.IsPrivate() {
+	if ip.IsLoopback() {
 		return 2
 	}
 	return 3
@@ -140,12 +140,42 @@ func externalNativeTCPEphemeralPortAddr(addr net.Addr) net.Addr {
 }
 
 func selectExternalNativeTCPResponseAddr(requestAddr, peerAddr net.Addr, localCandidates []net.Addr) net.Addr {
-	if requestAddr != nil {
-		if addr := selectExternalQUICModeResponseAddr(requestAddr, localCandidates); addr != nil {
+	if externalNativeTCPRequestAddrAllowed(requestAddr, peerAddr, localCandidates) {
+		if addr := selectExternalNativeTCPRouteAddr(requestAddr, localCandidates); addr != nil {
 			return addr
 		}
 	}
-	return selectExternalQUICModeResponseAddr(peerAddr, localCandidates)
+	return selectExternalNativeTCPRouteAddr(peerAddr, localCandidates)
+}
+
+func externalNativeTCPRequestAddrAllowed(requestAddr, peerAddr net.Addr, localCandidates []net.Addr) bool {
+	requestIP, ok := sessionAddrIP(requestAddr)
+	if !ok {
+		return false
+	}
+	if !requestIP.IsLoopback() {
+		return true
+	}
+	peerIP, ok := sessionAddrIP(peerAddr)
+	if ok && peerIP.IsLoopback() {
+		return true
+	}
+	for _, candidate := range localCandidates {
+		ip, ok := sessionAddrIP(candidate)
+		if ok && !ip.IsLoopback() {
+			return false
+		}
+	}
+	return len(localCandidates) > 0
+}
+
+func selectExternalNativeTCPRouteAddr(peerAddr net.Addr, localCandidates []net.Addr) net.Addr {
+	for _, candidate := range localCandidates {
+		if externalNativeTCPAddrAllowed(candidate) && externalNativeQUICStripeCanUseLocalAddrCandidate(candidate, peerAddr) {
+			return cloneSessionAddr(candidate)
+		}
+	}
+	return nil
 }
 
 func externalNativeTCPUseBearerAuth(localAddr, peerAddr net.Addr) bool {

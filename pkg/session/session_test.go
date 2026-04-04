@@ -1056,6 +1056,34 @@ func TestListenExternalNativeTCPOnCandidatesPrefersTailscaleCandidate(t *testing
 	}
 }
 
+func TestListenExternalNativeTCPOnCandidatesPrefersPrivateCandidateOverLoopback(t *testing.T) {
+	prevListen := externalNativeTCPListen
+	externalNativeTCPListen = func(addr net.Addr, _ *tls.Config) (net.Listener, error) {
+		tcpAddr, _, ok := externalNativeTCPAddr(addr)
+		if !ok {
+			return nil, errors.New("native tcp direct address unavailable")
+		}
+		return &testAddrListener{addr: tcpAddr}, nil
+	}
+	t.Cleanup(func() {
+		externalNativeTCPListen = prevListen
+	})
+
+	ln, ok := listenExternalNativeTCPOnCandidates([]net.Addr{
+		&net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 12345},
+		&net.UDPAddr{IP: net.IPv4(10, 0, 4, 184), Port: 12345},
+	}, nil)
+	if !ok {
+		t.Fatal("listenExternalNativeTCPOnCandidates() ok = false, want true")
+	}
+	defer ln.Close()
+
+	got := ln.Addr().(*net.TCPAddr)
+	if got.IP.String() != "10.0.4.184" {
+		t.Fatalf("listenExternalNativeTCPOnCandidates() addr = %v, want 10.0.4.184", got)
+	}
+}
+
 func TestListenExternalNativeTCPOnCandidatesFallsBackWhenPreferredPortIsBusy(t *testing.T) {
 	busy, err := net.Listen("tcp4", "127.0.0.1:0")
 	if err != nil {
@@ -1112,6 +1140,20 @@ func TestSelectExternalNativeTCPResponseAddrPrefersRequestRoute(t *testing.T) {
 	}
 	if got.String() != "100.88.145.8:41678" {
 		t.Fatalf("selectExternalNativeTCPResponseAddr() = %v, want 100.88.145.8:41678", got)
+	}
+}
+
+func TestSelectExternalNativeTCPResponseAddrRejectsLoopbackRequestWithoutLoopbackPeerRoute(t *testing.T) {
+	got := selectExternalNativeTCPResponseAddr(
+		&net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 53600},
+		&net.UDPAddr{IP: net.IPv4(68, 20, 14, 192), Port: 61216},
+		[]net.Addr{
+			&net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 41678},
+			&net.UDPAddr{IP: net.IPv4(192, 168, 1, 143), Port: 41678},
+		},
+	)
+	if got != nil {
+		t.Fatalf("selectExternalNativeTCPResponseAddr() = %v, want nil", got)
 	}
 }
 
