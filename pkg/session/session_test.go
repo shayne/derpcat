@@ -1434,6 +1434,7 @@ func TestExternalRoundTripUsesSessionPortmapLifecycle(t *testing.T) {
 	go func() {
 		_, err := Listen(ctx, ListenConfig{
 			Emitter:       telemetry.New(&bytes.Buffer{}, telemetry.LevelSilent),
+			ForceRelay:    true,
 			TokenSink:     listenerReady,
 			StdioOut:      &listenerOut,
 			UsePublicDERP: true,
@@ -1446,6 +1447,7 @@ func TestExternalRoundTripUsesSessionPortmapLifecycle(t *testing.T) {
 	go func() {
 		sendErr <- Send(ctx, SendConfig{
 			Token:         token,
+			ForceRelay:    true,
 			StdioIn:       &senderIn,
 			Emitter:       telemetry.New(&bytes.Buffer{}, telemetry.LevelSilent),
 			UsePublicDERP: true,
