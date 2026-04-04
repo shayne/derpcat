@@ -134,6 +134,18 @@ func (e *transportPathEmitter) Emit(state State) {
 	if e.closed {
 		return
 	}
+	switch state {
+	case StateDirect:
+		if e.last == transport.PathDirect {
+			return
+		}
+		e.last = transport.PathDirect
+	case StateRelay:
+		if e.last == transport.PathRelay {
+			return
+		}
+		e.last = transport.PathRelay
+	}
 	e.emitter.Status(string(state))
 }
 

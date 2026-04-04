@@ -5,6 +5,7 @@ import (
 	"crypto/tls"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/netip"
@@ -61,14 +62,28 @@ func (s *externalNativeQUICStripedSession) Close() {
 }
 
 func (s *externalNativeQUICStripedSession) OpenStreams(ctx context.Context) ([]io.WriteCloser, error) {
-	if s.primaryStream != nil {
-		return []io.WriteCloser{s.primaryStream}, nil
+	streams, err := s.OpenReadWriteStreams(ctx)
+	if err != nil {
+		return nil, err
 	}
-	streams := make([]io.WriteCloser, 0, len(s.conns))
+	writers := make([]io.WriteCloser, 0, len(streams))
+	for _, stream := range streams {
+		writers = append(writers, stream)
+	}
+	return writers, nil
+}
+
+func (s *externalNativeQUICStripedSession) OpenReadWriteStreams(ctx context.Context) ([]io.ReadWriteCloser, error) {
+	if s.primaryStream != nil {
+		return []io.ReadWriteCloser{s.primaryStream}, nil
+	}
+	streams := make([]io.ReadWriteCloser, 0, len(s.conns))
 	for _, conn := range s.conns {
 		stream, err := conn.OpenStreamSync(ctx)
 		if err != nil {
-			closeExternalStripedWriters(streams)
+			for _, stream := range streams {
+				_ = stream.Close()
+			}
 			return nil, err
 		}
 		streams = append(streams, stream)
@@ -103,7 +118,7 @@ func dialExternalNativeQUICStripedConns(
 			return nil, err
 		}
 		if emitter != nil {
-			emitter.Debug("native-quic-stripes=4")
+			emitter.Debug(fmt.Sprintf("native-quic-stripes=%d", len(conns)))
 		}
 		return &externalNativeQUICStripedSession{
 			packetConns: []net.PacketConn{packetConn},
@@ -176,7 +191,13 @@ func dialExternalNativeQUICStripedConns(
 		}
 		return session, nil
 	}
-	if len(peerSetup.CandidateSets) != connCount-1 {
+	stripeCount := min(len(localPacketConns), len(peerSetup.CandidateSets))
+	if stripeCount < len(localPacketConns) {
+		closeExternalNativeQUICStripePacketConns(localPacketConns[stripeCount:], localPortmaps[stripeCount:])
+		localPacketConns = localPacketConns[:stripeCount]
+		localPortmaps = localPortmaps[:stripeCount]
+	}
+	if stripeCount == 0 {
 		closeExternalNativeQUICStripePacketConns(localPacketConns, localPortmaps)
 		if emitter != nil {
 			emitter.Debug("native-quic-primary-fallback=stripe-setup-size")
@@ -250,7 +271,7 @@ func dialExternalNativeQUICStripedConns(
 	session.transports = append(session.transports, extraTransports...)
 	session.conns = append(session.conns, extraConns...)
 	if emitter != nil {
-		emitter.Debug("native-quic-stripes=4")
+		emitter.Debug(fmt.Sprintf("native-quic-stripes=%d", len(session.conns)))
 	}
 
 	return session, nil
@@ -288,7 +309,7 @@ func acceptExternalNativeQUICStripedConns(
 			conns:       conns,
 		}
 		if emitter != nil {
-			emitter.Debug("native-quic-stripes=4")
+			emitter.Debug(fmt.Sprintf("native-quic-stripes=%d", len(conns)))
 		}
 		streams := make([]*quic.Stream, 0, len(conns))
 		for _, conn := range conns {
@@ -354,7 +375,8 @@ func acceptExternalNativeQUICStripedConns(
 			}
 			return session, []*quic.Stream{stream}, nil
 		}
-		if len(peerSetup.CandidateSets) != connCount-1 {
+		stripeCount := min(connCount-1, len(peerSetup.CandidateSets))
+		if stripeCount == 0 {
 			if emitter != nil {
 				emitter.Debug("native-quic-primary-fallback=stripe-setup-size")
 			}
@@ -379,6 +401,12 @@ func acceptExternalNativeQUICStripedConns(
 				return nil, nil, streamErr
 			}
 			return session, []*quic.Stream{stream}, nil
+		}
+		if stripeCount < len(localPacketConns) {
+			closeExternalNativeQUICStripePacketConns(localPacketConns[stripeCount:], localPortmaps[stripeCount:])
+			localPacketConns = localPacketConns[:stripeCount]
+			localPortmaps = localPortmaps[:stripeCount]
+			localCandidateSets = localCandidateSets[:stripeCount]
 		}
 
 		_ = controlStream.SetDeadline(time.Now().Add(externalNativeQUICWait))
@@ -460,7 +488,7 @@ func acceptExternalNativeQUICStripedConns(
 		session.transports = append(session.transports, extraTransports...)
 		session.conns = append(session.conns, extraConns...)
 		if emitter != nil {
-			emitter.Debug("native-quic-stripes=4")
+			emitter.Debug(fmt.Sprintf("native-quic-stripes=%d", len(session.conns)))
 		}
 	}
 

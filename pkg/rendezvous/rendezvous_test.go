@@ -96,7 +96,7 @@ func TestGateAcceptsAtExpiryBoundaryAndRejectsAfter(t *testing.T) {
 	}
 }
 
-func TestGateRejectsSecondClaim(t *testing.T) {
+func TestGateAcceptIsIdempotentForDuplicateClaimFromSamePeer(t *testing.T) {
 	now := time.Unix(1_700_000_000, 0).UTC()
 	tok := testToken(now)
 	gate := NewGate(tok)
@@ -105,6 +105,32 @@ func TestGateRejectsSecondClaim(t *testing.T) {
 	if _, err := gate.Accept(now, claim); err != nil {
 		t.Fatalf("first Accept() error = %v", err)
 	}
+	decision, err := gate.Accept(now, claim)
+	if err != nil {
+		t.Fatalf("second Accept() error = %v", err)
+	}
+	if !decision.Accepted {
+		t.Fatalf("Accepted = false, want true")
+	}
+	if decision.Accept == nil {
+		t.Fatalf("Accept = nil, want structured accept info")
+	}
+	if got, want := decision.Accept.SessionID, tok.SessionID; got != want {
+		t.Fatalf("Accept.SessionID = %x, want %x", got, want)
+	}
+}
+
+func TestGateRejectsSecondClaimFromDifferentPeer(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0).UTC()
+	tok := testToken(now)
+	gate := NewGate(tok)
+
+	claim := testClaim(tok)
+	if _, err := gate.Accept(now, claim); err != nil {
+		t.Fatalf("first Accept() error = %v", err)
+	}
+	claim.DERPPublic[0]++
+	claim.BearerMAC = ComputeBearerMAC(tok.BearerSecret, claim)
 	decision, err := gate.Accept(now, claim)
 	if !errors.Is(err, ErrClaimed) {
 		t.Fatalf("second Accept() error = %v, want ErrClaimed", err)

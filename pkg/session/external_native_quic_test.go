@@ -438,6 +438,126 @@ func TestExternalNativeQUICStripedTransferFallsBackToPrimaryWhenExtraStripeCandi
 	}
 }
 
+func TestExternalNativeQUICStripedTransferNegotiatesAsymmetricStripeCounts(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	prevStripeCandidates := externalNativeQUICStripeProbeCandidates
+	defer func() {
+		externalNativeQUICStripeProbeCandidates = prevStripeCandidates
+	}()
+	externalNativeQUICStripeProbeCandidates = func(_ context.Context, packetConn net.PacketConn, _ *tailcfg.DERPMap, _ publicPortmap) []string {
+		udpAddr := packetConn.LocalAddr().(*net.UDPAddr)
+		return []string{net.JoinHostPort("127.0.0.1", fmt.Sprint(udpAddr.Port))}
+	}
+	prevLocalAddrCandidate := externalNativeQUICStripeCanUseLocalAddrCandidate
+	defer func() {
+		externalNativeQUICStripeCanUseLocalAddrCandidate = prevLocalAddrCandidate
+	}()
+	externalNativeQUICStripeCanUseLocalAddrCandidate = func(net.Addr, net.Addr) bool {
+		return false
+	}
+
+	senderPacketConn, err := net.ListenPacket("udp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer senderPacketConn.Close()
+
+	listenerPacketConn, err := net.ListenPacket("udp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listenerPacketConn.Close()
+
+	senderIdentity, err := quicpath.GenerateSessionIdentity()
+	if err != nil {
+		t.Fatal(err)
+	}
+	listenerIdentity, err := quicpath.GenerateSessionIdentity()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	payload := bytes.Repeat([]byte("asymmetric-native-quic-stripes"), 4096)
+	listenerDone := make(chan struct{})
+	senderErr := make(chan error, 1)
+	go func() {
+		session, err := dialExternalNativeQUICStripedConns(
+			ctx,
+			senderPacketConn,
+			cloneSessionAddr(listenerPacketConn.LocalAddr()),
+			nil,
+			nil,
+			quicpath.ClientTLSConfig(senderIdentity, listenerIdentity.Public),
+			quicpath.ServerTLSConfig(senderIdentity, listenerIdentity.Public),
+			8,
+		)
+		if err != nil {
+			senderErr <- err
+			return
+		}
+		defer session.Close()
+		if len(session.conns) != 4 {
+			senderErr <- fmt.Errorf("sender conn count = %d, want 4", len(session.conns))
+			return
+		}
+
+		writers, err := session.OpenStreams(ctx)
+		if err != nil {
+			senderErr <- err
+			return
+		}
+		if err := sendExternalStripedCopy(ctx, bytes.NewReader(payload), writers, 32<<10); err != nil {
+			senderErr <- err
+			return
+		}
+		<-listenerDone
+		senderErr <- nil
+	}()
+
+	session, streams, err := acceptExternalNativeQUICStripedConns(
+		ctx,
+		listenerPacketConn,
+		cloneSessionAddr(senderPacketConn.LocalAddr()),
+		nil,
+		nil,
+		quicpath.ClientTLSConfig(listenerIdentity, senderIdentity.Public),
+		quicpath.ServerTLSConfig(listenerIdentity, senderIdentity.Public),
+		4,
+	)
+	if err != nil {
+		select {
+		case senderSideErr := <-senderErr:
+			t.Fatalf("acceptExternalNativeQUICStripedConns() error = %v; sender error = %v", err, senderSideErr)
+		default:
+		}
+		t.Fatal(err)
+	}
+	defer session.Close()
+	defer closeExternalNativeQUICStreams(streams)
+	if len(session.conns) != 4 {
+		t.Fatalf("listener conn count = %d, want 4", len(session.conns))
+	}
+
+	readers := make([]io.ReadCloser, 0, len(streams))
+	for _, stream := range streams {
+		readers = append(readers, stream)
+	}
+
+	var got bytes.Buffer
+	if err := receiveExternalStripedCopy(ctx, &got, readers, 32<<10); err != nil {
+		t.Fatal(err)
+	}
+	close(listenerDone)
+	if err := <-senderErr; err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got.Bytes(), payload) {
+		t.Fatalf("payload mismatch: got %d bytes, want %d", got.Len(), len(payload))
+	}
+}
+
 func TestDialExternalNativeQUICStripedConnsFallsBackToControlStreamWhenPeerSetupDecodeFails(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()

@@ -19,9 +19,9 @@ const MaxClaimCandidates = 32
 const MaxCandidateLength = 128
 
 type Gate struct {
-	mu      sync.Mutex
-	token   token.Token
-	claimed bool
+	mu    sync.Mutex
+	token token.Token
+	claim *Claim
 }
 
 func NewGate(tok token.Token) *Gate {
@@ -38,7 +38,18 @@ func (g *Gate) Accept(now time.Time, claim Claim) (Decision, error) {
 			Reject:   &RejectInfo{Code: RejectExpired, Reason: "token expired"},
 		}, token.ErrExpired
 	}
-	if g.claimed {
+	if g.claim != nil {
+		if sameClaim(*g.claim, claim) {
+			return Decision{
+				Accepted: true,
+				Accept: &AcceptInfo{
+					Version:      g.token.Version,
+					SessionID:    g.token.SessionID,
+					Candidates:   append([]string(nil), claim.Candidates...),
+					Capabilities: claim.Capabilities,
+				},
+			}, nil
+		}
 		return Decision{
 			Accepted: false,
 			Reject:   &RejectInfo{Code: RejectClaimed, Reason: "session already claimed"},
@@ -75,7 +86,9 @@ func (g *Gate) Accept(now time.Time, claim Claim) (Decision, error) {
 		}, ErrDenied
 	}
 
-	g.claimed = true
+	stored := claim
+	stored.Candidates = append([]string(nil), claim.Candidates...)
+	g.claim = &stored
 	return Decision{
 		Accepted: true,
 		Accept: &AcceptInfo{
@@ -85,6 +98,24 @@ func (g *Gate) Accept(now time.Time, claim Claim) (Decision, error) {
 			Capabilities: claim.Capabilities,
 		},
 	}, nil
+}
+
+func sameClaim(a, b Claim) bool {
+	if a.Version != b.Version ||
+		a.SessionID != b.SessionID ||
+		a.BearerMAC != b.BearerMAC ||
+		a.DERPPublic != b.DERPPublic ||
+		a.QUICPublic != b.QUICPublic ||
+		a.Capabilities != b.Capabilities ||
+		len(a.Candidates) != len(b.Candidates) {
+		return false
+	}
+	for i := range a.Candidates {
+		if a.Candidates[i] != b.Candidates[i] {
+			return false
+		}
+	}
+	return true
 }
 
 func validBearerMAC(secret [32]byte, claim Claim) bool {

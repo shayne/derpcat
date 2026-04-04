@@ -128,7 +128,7 @@ func shareExternal(ctx context.Context, cfg ShareConfig) (string, error) {
 			continue
 		}
 
-		if decision.Accept != nil {
+		if decision.Accept != nil && !cfg.ForceRelay {
 			decision.Accept.Candidates = publicProbeCandidates(ctx, session.probeConn, session.derpMap, publicSessionPortmap(session))
 		}
 		localCandidates := parseCandidateStrings(nil)
@@ -201,7 +201,10 @@ func openExternal(ctx context.Context, cfg OpenConfig, tok token.Token) error {
 		return err
 	}
 
-	localCandidates := publicProbeCandidates(ctx, probeConn, dm, pm)
+	var localCandidates []string
+	if !cfg.ForceRelay {
+		localCandidates = publicProbeCandidates(ctx, probeConn, dm, pm)
+	}
 	claim := rendezvous.Claim{
 		Version:      tok.Version,
 		SessionID:    tok.SessionID,
@@ -211,11 +214,7 @@ func openExternal(ctx context.Context, cfg OpenConfig, tok token.Token) error {
 		Capabilities: tok.Capabilities,
 	}
 	claim.BearerMAC = rendezvous.ComputeBearerMAC(tok.BearerSecret, claim)
-	if err := sendEnvelope(ctx, derpClient, listenerDERP, envelope{Type: envelopeClaim, Claim: &claim}); err != nil {
-		return err
-	}
-
-	decision, err := receiveDecision(ctx, derpClient, listenerDERP)
+	decision, err := sendClaimAndReceiveDecision(ctx, derpClient, listenerDERP, claim)
 	if err != nil {
 		return err
 	}
