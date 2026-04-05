@@ -61,12 +61,13 @@ func emitStatus(emitter *telemetry.Emitter, state State) {
 }
 
 type transportPathEmitter struct {
-	mu      sync.Mutex
-	emitter *telemetry.Emitter
-	last    transport.Path
-	closed  bool
-	cancel  context.CancelFunc
-	done    chan struct{}
+	mu                      sync.Mutex
+	emitter                 *telemetry.Emitter
+	last                    transport.Path
+	closed                  bool
+	suppressRelayRegression bool
+	cancel                  context.CancelFunc
+	done                    chan struct{}
 }
 
 func newTransportPathEmitter(emitter *telemetry.Emitter) *transportPathEmitter {
@@ -84,6 +85,9 @@ func (e *transportPathEmitter) Handle(path transport.Path) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	if e.closed || path == e.last {
+		return
+	}
+	if path == transport.PathRelay && e.suppressRelayRegression && e.last == transport.PathDirect {
 		return
 	}
 	e.last = path
@@ -141,12 +145,33 @@ func (e *transportPathEmitter) Emit(state State) {
 		}
 		e.last = transport.PathDirect
 	case StateRelay:
+		if e.suppressRelayRegression && e.last == transport.PathDirect {
+			return
+		}
 		if e.last == transport.PathRelay {
 			return
 		}
 		e.last = transport.PathRelay
 	}
 	e.emitter.Status(string(state))
+}
+
+func (e *transportPathEmitter) SuppressRelayRegression() {
+	if e == nil {
+		return
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.suppressRelayRegression = true
+}
+
+func (e *transportPathEmitter) ResumeRelayRegression() {
+	if e == nil {
+		return
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.suppressRelayRegression = false
 }
 
 func (e *transportPathEmitter) Complete(manager *transport.Manager) {

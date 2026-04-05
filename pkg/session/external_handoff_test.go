@@ -106,6 +106,53 @@ func TestExternalHandoffSenderBackpressuresWhenUnackedWindowExceedsLimit(t *test
 	}
 }
 
+func TestExternalHandoffSpoolDoesNotReadAheadPastAckWindow(t *testing.T) {
+	sourceReader := newBlockingSecondReadSource([]byte("abcd"), []byte("efgh"))
+	spool, err := newExternalHandoffSpool(sourceReader, 4, 4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		sourceReader.Release()
+		if err := spool.Close(); err != nil {
+			t.Fatal(err)
+		}
+	}()
+
+	chunk, err := spool.NextChunk()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if chunk.Offset != 0 || string(chunk.Payload) != "abcd" {
+		t.Fatalf("first chunk = {%d %q}, want {0 %q}", chunk.Offset, chunk.Payload, "abcd")
+	}
+
+	select {
+	case <-sourceReader.SecondReadStarted():
+		t.Fatal("source read ahead past ack window before first chunk was acknowledged")
+	case <-time.After(150 * time.Millisecond):
+	}
+
+	if err := spool.AckTo(4); err != nil {
+		t.Fatal(err)
+	}
+
+	select {
+	case <-sourceReader.SecondReadStarted():
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("source reader did not resume after ack advanced")
+	}
+
+	sourceReader.Release()
+	chunk, err = spool.NextChunk()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if chunk.Offset != 4 || string(chunk.Payload) != "efgh" {
+		t.Fatalf("next chunk = {%d %q}, want {4 %q}", chunk.Offset, chunk.Payload, "efgh")
+	}
+}
+
 func TestExternalHandoffSenderReturnsEOFAfterSourceDrainedAndAcked(t *testing.T) {
 	spool, err := newExternalHandoffSpool(strings.NewReader("abc"), 8, 16)
 	if err != nil {

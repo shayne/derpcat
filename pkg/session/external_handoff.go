@@ -303,7 +303,25 @@ func (s *externalHandoffSpool) pumpSource() {
 	defer close(s.pumpDone)
 
 	for {
-		payload := make([]byte, s.chunkSize)
+		s.mu.Lock()
+		for !s.closed && s.readErr == nil && !s.eof && s.sourceOffset-s.ackedWatermark >= s.maxUnacked {
+			s.cond.Wait()
+		}
+		if s.closed || s.readErr != nil || s.eof {
+			s.mu.Unlock()
+			return
+		}
+		headroom := s.maxUnacked - (s.sourceOffset - s.ackedWatermark)
+		readSize := s.chunkSize
+		if headroom < int64(readSize) {
+			readSize = int(headroom)
+		}
+		s.mu.Unlock()
+
+		if readSize <= 0 {
+			continue
+		}
+		payload := make([]byte, readSize)
 		n, err := io.ReadFull(s.src, payload)
 		payload = payload[:n]
 

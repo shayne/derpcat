@@ -825,6 +825,107 @@ func TestExternalListenSendHandsOffToNativeQUICWhenNativeTCPIsUnavailableAndBoth
 	}
 }
 
+func TestExternalListenSendNativeQUICHandoffDoesNotEmitRelayRegression(t *testing.T) {
+	t.Setenv("DERPCAT_FAKE_TRANSPORT", "1")
+	t.Setenv("DERPCAT_FAKE_TRANSPORT_ENABLE_DIRECT_AT", "0")
+
+	prevTCPAddrAllowed := externalNativeTCPAddrAllowed
+	externalNativeTCPAddrAllowed = func(net.Addr) bool { return false }
+	t.Cleanup(func() { externalNativeTCPAddrAllowed = prevTCPAddrAllowed })
+
+	prevInterfaceAddrs := publicInterfaceAddrs
+	publicInterfaceAddrs = func() ([]net.Addr, error) {
+		return []net.Addr{
+			&net.IPNet{
+				IP:   net.IPv4(127, 0, 0, 1),
+				Mask: net.CIDRMask(8, 32),
+			},
+		}, nil
+	}
+	t.Cleanup(func() { publicInterfaceAddrs = prevInterfaceAddrs })
+
+	srv := newSessionTestDERPServer(t)
+	t.Setenv("DERPCAT_TEST_DERP_MAP_URL", srv.MapURL)
+	t.Setenv("DERPCAT_TEST_DERP_SERVER_URL", srv.DERPURL)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	payload := bytes.Repeat([]byte("native-quic-direct:"), (4*externalCopyBufferSize)/len("native-quic-direct:"))
+	var listenerOut bytes.Buffer
+	var listenerStatus syncBuffer
+	var senderStatus syncBuffer
+
+	tokenSink := make(chan string, 1)
+	listenErr := make(chan error, 1)
+	go func() {
+		_, err := Listen(ctx, ListenConfig{
+			Emitter:       telemetry.New(&listenerStatus, telemetry.LevelVerbose),
+			TokenSink:     tokenSink,
+			StdioOut:      &listenerOut,
+			UsePublicDERP: true,
+		})
+		listenErr <- err
+	}()
+
+	token := <-tokenSink
+	midpoint := len(payload) / 2
+	stdinReader, stdinWriter := io.Pipe()
+	writerErr := make(chan error, 1)
+	go func() {
+		defer stdinWriter.Close()
+		if _, err := stdinWriter.Write(payload[:midpoint]); err != nil {
+			writerErr <- err
+			return
+		}
+
+		gateCtx, gateCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer gateCancel()
+		if err := waitForSessionTestStatusContains(gateCtx, &senderStatus, "sender-quic-direct"); err != nil {
+			writerErr <- fmt.Errorf("waiting for sender native QUIC handoff: %w; listener=%q sender=%q", err, listenerStatus.String(), senderStatus.String())
+			return
+		}
+		if err := waitForSessionTestStatusContains(gateCtx, &listenerStatus, "listener-quic-direct"); err != nil {
+			writerErr <- fmt.Errorf("waiting for listener native QUIC handoff: %w; listener=%q sender=%q", err, listenerStatus.String(), senderStatus.String())
+			return
+		}
+
+		_, err := stdinWriter.Write(payload[midpoint:])
+		writerErr <- err
+	}()
+
+	sendErr := make(chan error, 1)
+	go func() {
+		sendErr <- Send(ctx, SendConfig{
+			Token:         token,
+			Emitter:       telemetry.New(&senderStatus, telemetry.LevelVerbose),
+			StdioIn:       stdinReader,
+			UsePublicDERP: true,
+		})
+	}()
+
+	if err := <-listenErr; err != nil {
+		t.Fatalf("Listen() error = %v listener=%q sender=%q", err, listenerStatus.String(), senderStatus.String())
+	}
+	if err := <-sendErr; err != nil {
+		t.Fatalf("Send() error = %v listener=%q sender=%q", err, listenerStatus.String(), senderStatus.String())
+	}
+	if err := <-writerErr; err != nil {
+		t.Fatalf("stdin writer error = %v listener=%q sender=%q", err, listenerStatus.String(), senderStatus.String())
+	}
+
+	if !bytes.Equal(listenerOut.Bytes(), payload) {
+		t.Fatalf("listener output length = %d, want %d", listenerOut.Len(), len(payload))
+	}
+
+	if got := sessionStatusLines(senderStatus.String()); hasSessionStatusPrefix(got, []string{string(StateProbing), string(StateRelay), string(StateDirect), string(StateRelay)}) {
+		t.Fatalf("sender status lines = %q, want no relay regression after direct handoff", got)
+	}
+	if got := sessionStatusLines(listenerStatus.String()); hasSessionStatusPrefix(got, []string{string(StateWaiting), string(StateClaimed), string(StateRelay), string(StateDirect), string(StateRelay)}) {
+		t.Fatalf("listener status lines = %q, want no relay regression after direct handoff", got)
+	}
+}
+
 func TestExternalListenSendExitsWhenRelayFinishesDuringDelayedNativeQUICSetup(t *testing.T) {
 	t.Setenv("DERPCAT_FAKE_TRANSPORT", "1")
 	t.Setenv("DERPCAT_FAKE_TRANSPORT_ENABLE_DIRECT_AT", "0")
@@ -1209,6 +1310,27 @@ func TestTransportPathEmitterCompletionIsTerminal(t *testing.T) {
 
 	if got := sessionStatusLines(status.String()); len(got) != 2 || got[0] != string(StateRelay) || got[1] != string(StateComplete) {
 		t.Fatalf("status lines = %q, want [%q %q]", got, StateRelay, StateComplete)
+	}
+}
+
+func TestTransportPathEmitterCanSuppressTemporaryRelayRegression(t *testing.T) {
+	var status bytes.Buffer
+	emitter := newTransportPathEmitter(telemetry.New(&status, telemetry.LevelDefault))
+
+	emitter.Handle(transport.PathRelay)
+	emitter.Handle(transport.PathDirect)
+	emitter.SuppressRelayRegression()
+	emitter.Handle(transport.PathRelay)
+
+	if got := sessionStatusLines(status.String()); len(got) != 2 || got[0] != string(StateRelay) || got[1] != string(StateDirect) {
+		t.Fatalf("status lines = %q, want [%q %q] while relay regression suppressed", got, StateRelay, StateDirect)
+	}
+
+	emitter.ResumeRelayRegression()
+	emitter.Handle(transport.PathRelay)
+
+	if got := sessionStatusLines(status.String()); len(got) != 3 || got[0] != string(StateRelay) || got[1] != string(StateDirect) || got[2] != string(StateRelay) {
+		t.Fatalf("status lines = %q, want [%q %q %q] after suppression lifted", got, StateRelay, StateDirect, StateRelay)
 	}
 }
 

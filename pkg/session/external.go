@@ -472,6 +472,7 @@ func runExternalSendStream(
 			return nil
 		}
 
+		pathEmitter.SuppressRelayRegression()
 		transportManager.StopDirect()
 		_ = probeConn.SetDeadline(time.Time{})
 		externalTransferTracef("sender-keep-relay-quic-during-native-setup")
@@ -560,6 +561,8 @@ func runExternalSendStream(
 					cfg.Emitter.Debug("sender-native-quic-setup-fallback=primary-only")
 				}
 			}
+			pathEmitter.ResumeRelayRegression()
+			pathEmitter.Flush(transportManager)
 			if err := <-relayErrCh; err != nil {
 				return err
 			}
@@ -750,6 +753,7 @@ func runExternalListenStream(
 				}
 			}
 
+			pathEmitter.SuppressRelayRegression()
 			transportManager.StopDirect()
 			_ = probeConn.SetDeadline(time.Time{})
 			nativeQUICSetupCtx, nativeQUICSetupCancel := context.WithCancel(ctx)
@@ -814,6 +818,8 @@ func runExternalListenStream(
 						cfg.Emitter.Debug("listener-native-quic-setup-fallback=primary-only")
 					}
 				}
+				pathEmitter.ResumeRelayRegression()
+				pathEmitter.Flush(transportManager)
 				if !relayErrReady {
 					relayErr = <-relayErrCh
 					relayErrReady = true
