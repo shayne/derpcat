@@ -751,7 +751,7 @@ func TestExternalListenSendHandsOffToNativeQUICWhenNativeTCPIsUnavailableAndBoth
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 
-	payload := bytes.Repeat([]byte("native-quic-direct:"), 1<<18)
+	payload := bytes.Repeat([]byte("native-quic-direct:"), (4*externalCopyBufferSize)/len("native-quic-direct:"))
 	var listenerOut bytes.Buffer
 	var listenerStatus syncBuffer
 	var senderStatus syncBuffer
