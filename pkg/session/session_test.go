@@ -788,30 +788,22 @@ func TestExternalListenSendHandsOffToNativeQUICWhenNativeTCPIsUnavailableAndBoth
 			UsePublicDERP: true,
 		})
 	}()
-	gateErr := make(chan error, 1)
-	go func() {
-		defer closeSessionTestRelease(releaseSecondHalf)
-		gateCtx, gateCancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer gateCancel()
-		if err := waitForSessionTestStatusContains(gateCtx, &senderStatus, "sender-quic-direct"); err != nil {
-			gateErr <- fmt.Errorf("waiting for sender native QUIC handoff: %w; listener=%q sender=%q", err, listenerStatus.String(), senderStatus.String())
-			return
-		}
-		if err := waitForSessionTestStatusContains(gateCtx, &listenerStatus, "listener-quic-direct"); err != nil {
-			gateErr <- fmt.Errorf("waiting for listener native QUIC handoff: %w; listener=%q sender=%q", err, listenerStatus.String(), senderStatus.String())
-			return
-		}
-		gateErr <- nil
-	}()
+
+	gateCtx, gateCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer gateCancel()
+	if err := waitForSessionTestStatusContains(gateCtx, &senderStatus, "sender-quic-direct"); err != nil {
+		t.Fatalf("waiting for sender native QUIC handoff: %v; listener=%q sender=%q", err, listenerStatus.String(), senderStatus.String())
+	}
+	if err := waitForSessionTestStatusContains(gateCtx, &listenerStatus, "listener-quic-direct"); err != nil {
+		t.Fatalf("waiting for listener native QUIC handoff: %v; listener=%q sender=%q", err, listenerStatus.String(), senderStatus.String())
+	}
+	closeSessionTestRelease(releaseSecondHalf)
 
 	if err := <-listenErr; err != nil {
 		t.Fatalf("Listen() error = %v listener=%q sender=%q", err, listenerStatus.String(), senderStatus.String())
 	}
 	if err := <-sendErr; err != nil {
 		t.Fatalf("Send() error = %v listener=%q sender=%q", err, listenerStatus.String(), senderStatus.String())
-	}
-	if err := <-gateErr; err != nil {
-		t.Fatalf("native QUIC handoff gate error = %v", err)
 	}
 
 	if !bytes.Equal(listenerOut.Bytes(), payload) {
