@@ -68,6 +68,8 @@ npx -y derpcat@latest --verbose listen
 
 Want transport details after the examples? Jump to [Transport Model](#transport-model), [Behavior](#behavior), or [Security Model](#security-model).
 
+Want concrete Internet/NAT example? See [Real-World Example: Tar Pipe Over Internet](#real-world-example-tar-pipe-over-internet).
+
 ## Transport Model
 
 High level:

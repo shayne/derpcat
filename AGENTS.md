@@ -26,6 +26,8 @@ For remote verification, set `REMOTE_HOST` and use `mise run smoke-remote`, `mis
 
 Write idiomatic Go and keep files ASCII unless the file already requires otherwise. Use `gofmt` formatting conventions: tabs for indentation, mixedCaps for exported names, and short, package-scoped helpers where possible. Keep package boundaries clear: CLI code in `cmd/`, reusable logic in `pkg/`, packaging logic in shell scripts under `tools/packaging/`.
 
+When editing `README.md`, use the `Caveman` skill for tight, direct prose. Keep the writing compressed and technical, but still use proper grammar and readable full sentences. Do not write the README in broken-English or fragment style.
+
 Do not hand-edit generated `dist/` contents. Update the source script or template instead.
 
 ## Testing Guidelines
