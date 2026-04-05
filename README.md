@@ -24,35 +24,76 @@ The token printed by `listen` or `share` carries session authorization. Public s
 
 ## Quick Start
 
-Run the published package directly:
+`listen` receives bytes and prints a token. `send` pipes bytes into that token. `share` and `open` do the same thing for a local TCP service instead of a byte stream.
+
+### Transfer a File
+
+On the receiving machine:
 
 ```bash
-npx -y derpcat@latest listen
+npx -y derpcat@latest listen > received.img
 ```
 
-Send data from another machine:
+`listen` prints a token to stderr. Copy that token to the sending machine.
+
+On the sending machine:
+
+```bash
+cat ./disk.img | npx -y derpcat@latest send <token>
+```
+
+For a quick text example:
 
 ```bash
 printf 'hello\n' | npx -y derpcat@latest send <token>
 ```
 
-Share a local web app or API until Ctrl-C:
+### Watch Progress with `pv`
+
+`derpcat` is plain stdin/stdout, so `pv` fits naturally in the pipe.
+
+Install `pv` if needed:
+
+```bash
+brew install pv
+sudo apt install -y pv
+```
+
+On the receiving machine:
+
+```bash
+npx -y derpcat@latest listen | pv -brt > received.img
+```
+
+On the sending machine:
+
+```bash
+cat ./disk.img | pv -brt | npx -y derpcat@latest send <token>
+```
+
+Want a concrete Internet/NAT version of the same idea? See [Real-World Example: Tar Pipe Over Internet](#real-world-example-tar-pipe-over-internet).
+
+### Share a Local TCP Service
+
+On the machine running the local web app or API:
 
 ```bash
 npx -y derpcat@latest share 127.0.0.1:3000
 ```
 
-Expose that shared service locally on another machine:
+On another machine, expose that shared service locally:
 
 ```bash
 npx -y derpcat@latest open <token>
 ```
 
-Bind `open` to a specific local port:
+Bind `open` to a specific local port if you want:
 
 ```bash
 npx -y derpcat@latest open <token> 127.0.0.1:8080
 ```
+
+### Useful Extras
 
 Use the development channel for the latest commit published from `main`:
 
@@ -67,8 +108,6 @@ npx -y derpcat@latest --verbose listen
 ```
 
 Want transport details after the examples? Jump to [Transport Model](#transport-model), [Behavior](#behavior), or [Security Model](#security-model).
-
-Want concrete Internet/NAT example? See [Real-World Example: Tar Pipe Over Internet](#real-world-example-tar-pipe-over-internet).
 
 ## Transport Model
 
