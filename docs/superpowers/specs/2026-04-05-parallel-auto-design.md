@@ -20,7 +20,7 @@ The active side (`send` / `open`) is authoritative for the session policy. The f
 - stop when growth no longer helps
 - cap at `16`
 
-This design is intended to make `auto` a candidate for the eventual default, but only after it passes a benchmark gate on both `ktzlxc` and `canlxc`.
+This design is intended to make `auto` a candidate for the eventual default, but only after it passes a benchmark gate on `ktzlxc`, `canlxc`, and `uklxc`.
 
 ## Why This Work Is Worth Doing
 
@@ -201,7 +201,7 @@ Require both:
 
 If either threshold fails, stop growing and hold the current stripe count for the rest of the session.
 
-These numbers are strong enough to reject noise and weak enough to capture the benchmark wins already observed on `canlxc` and `ktzlxc`.
+These numbers are strong enough to reject noise and weak enough to capture the benchmark wins already observed on `canlxc` and `ktzlxc`, while still leaving room for a third-host validation pass on `uklxc`.
 
 ### Tail behavior
 
@@ -302,16 +302,17 @@ Add focused tests for:
 
 Live testing is required during implementation, not only at the end.
 
-Use both hosts because they expose different network conditions:
+Use all three hosts because they expose different network conditions and help prevent overfitting the controller to one path shape:
 
 - `ktzlxc`: healthy high-bandwidth WAN path
 - `canlxc`: slower and more variable WAN path
+- `uklxc`: third independent WAN path to verify the controller generalizes beyond the first two hosts
 
 Required matrix before claiming the feature works:
 
 - sizes: `10 KB`, `1 MB`, `10 MB`, `50 MB`, `128 MB`, `1 GB`
 - both directions
-- both hosts
+- all three hosts
 - `3x` each
 - compare:
   - default fixed `4`
@@ -325,7 +326,7 @@ Do not make `auto` the default until it passes this bar:
 - `10 KB` and `1 MB`: no more than `10%` worse than fixed `4`
 - `10 MB`: no more than `5%` worse than fixed `4`
 - `50 MB` and larger: should be equal or better on average
-- `128 MB` and `1 GB`: should show a meaningful improvement on at least one path class without causing a serious regression on the other
+- `128 MB` and `1 GB`: should show a meaningful improvement on at least one host/path class without causing a serious regression on the others
 - no stalls
 - no progress freezes
 - no relay/direct status churn
@@ -344,7 +345,7 @@ Phase 1:
 Phase 2:
 
 - implement QUIC live growth for `auto`
-- benchmark on `ktzlxc` and `canlxc`
+- benchmark on `ktzlxc`, `canlxc`, and `uklxc`
 
 Phase 3:
 
