@@ -386,6 +386,11 @@ func sendExternalHandoffCarrier(ctx context.Context, carrier io.ReadWriteCloser,
 		go func() {
 			select {
 			case <-stop:
+				select {
+				case <-stopWatchDone:
+					return
+				default:
+				}
 				spool.InterruptPendingRead()
 			case <-stopWatchDone:
 			}
