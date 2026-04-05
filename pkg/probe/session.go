@@ -14,6 +14,7 @@ const (
 	defaultChunkSize     = 1200
 	defaultWindowSize    = 8
 	defaultRetryInterval = 20 * time.Millisecond
+	terminalAckLinger    = 3 * defaultRetryInterval
 	zeroReadRetryDelay   = 1 * time.Millisecond
 	maxAckMaskBits       = 64
 )
@@ -134,16 +135,28 @@ func Send(ctx context.Context, conn net.PacketConn, remoteAddr string, src io.Re
 }
 
 func Receive(ctx context.Context, conn net.PacketConn, remoteAddr string, cfg ReceiveConfig) ([]byte, error) {
+	var out bytes.Buffer
+	_, err := ReceiveToWriter(ctx, conn, remoteAddr, &out, cfg)
+	if err != nil {
+		return nil, err
+	}
+	return out.Bytes(), nil
+}
+
+func ReceiveToWriter(ctx context.Context, conn net.PacketConn, remoteAddr string, dst io.Writer, cfg ReceiveConfig) (TransferStats, error) {
 	if conn == nil {
-		return nil, errors.New("nil packet conn")
+		return TransferStats{}, errors.New("nil packet conn")
+	}
+	if dst == nil {
+		return TransferStats{}, errors.New("nil destination writer")
 	}
 
 	peer, err := resolveRemoteAddr(remoteAddr)
 	if err != nil {
-		return nil, err
+		return TransferStats{}, err
 	}
 
-	var out bytes.Buffer
+	stats := TransferStats{StartedAt: time.Now()}
 	buf := make([]byte, 64<<10)
 	var expectedSeq uint64
 	buffered := make(map[uint64]Packet)
@@ -152,19 +165,19 @@ func Receive(ctx context.Context, conn net.PacketConn, remoteAddr string, cfg Re
 
 	for {
 		if err := setReadDeadline(ctx, conn, defaultRetryInterval); err != nil {
-			return nil, err
+			return TransferStats{}, err
 		}
 
 		n, addr, err := conn.ReadFrom(buf)
 		if err != nil {
 			if ctx.Err() != nil {
-				return nil, ctx.Err()
+				return TransferStats{}, ctx.Err()
 			}
 			if isNetTimeout(err) {
 				continue
 			}
 			if errors.Is(err, net.ErrClosed) {
-				return nil, err
+				return TransferStats{}, err
 			}
 			continue
 		}
@@ -174,7 +187,7 @@ func Receive(ctx context.Context, conn net.PacketConn, remoteAddr string, cfg Re
 
 		packet, err := UnmarshalPacket(buf[:n], nil)
 		if err != nil {
-			return nil, err
+			return TransferStats{}, err
 		}
 		if isZeroRunID(packet.RunID) {
 			continue
@@ -186,7 +199,7 @@ func Receive(ctx context.Context, conn net.PacketConn, remoteAddr string, cfg Re
 			runID = packet.RunID
 			runIDSet = true
 			if err := sendHelloAck(ctx, conn, addr, runID); err != nil {
-				return nil, err
+				return TransferStats{}, err
 			}
 			continue
 		}
@@ -195,7 +208,7 @@ func Receive(ctx context.Context, conn net.PacketConn, remoteAddr string, cfg Re
 		}
 		if packet.Type == PacketTypeHello {
 			if err := sendHelloAck(ctx, conn, addr, runID); err != nil {
-				return nil, err
+				return TransferStats{}, err
 			}
 			continue
 		}
@@ -206,30 +219,38 @@ func Receive(ctx context.Context, conn net.PacketConn, remoteAddr string, cfg Re
 				buffered[packet.Seq] = clonePacket(packet)
 			}
 			var complete bool
-			expectedSeq, complete, err = advanceReceiveWindow(&out, buffered, expectedSeq)
+			expectedSeq, complete, err = advanceReceiveWindow(dst, buffered, expectedSeq, &stats)
 			if err != nil {
-				return nil, err
+				return TransferStats{}, err
 			}
 			if err := sendAck(ctx, conn, addr, runID, expectedSeq, ackMaskFor(buffered, expectedSeq)); err != nil {
-				return nil, err
+				return TransferStats{}, err
 			}
 			if complete {
-				return out.Bytes(), nil
+				stats.CompletedAt = time.Now()
+				if err := lingerTerminalAcks(ctx, conn, addr, runID, expectedSeq); err != nil {
+					return TransferStats{}, err
+				}
+				return stats, nil
 			}
 		case PacketTypeDone:
 			if packet.Seq >= expectedSeq && packet.Seq <= expectedSeq+maxAckMaskBits {
 				buffered[packet.Seq] = clonePacket(packet)
 			}
 			var complete bool
-			expectedSeq, complete, err = advanceReceiveWindow(&out, buffered, expectedSeq)
+			expectedSeq, complete, err = advanceReceiveWindow(dst, buffered, expectedSeq, &stats)
 			if err != nil {
-				return nil, err
+				return TransferStats{}, err
 			}
 			if err := sendAck(ctx, conn, addr, runID, expectedSeq, ackMaskFor(buffered, expectedSeq)); err != nil {
-				return nil, err
+				return TransferStats{}, err
 			}
 			if complete {
-				return out.Bytes(), nil
+				stats.CompletedAt = time.Now()
+				if err := lingerTerminalAcks(ctx, conn, addr, runID, expectedSeq); err != nil {
+					return TransferStats{}, err
+				}
+				return stats, nil
 			}
 		}
 	}
@@ -490,7 +511,7 @@ func applyAck(packets map[uint64]*outboundPacket, ackFloor, ackMask uint64) int 
 	return acked
 }
 
-func advanceReceiveWindow(out *bytes.Buffer, buffered map[uint64]Packet, expectedSeq uint64) (uint64, bool, error) {
+func advanceReceiveWindow(dst io.Writer, buffered map[uint64]Packet, expectedSeq uint64, stats *TransferStats) (uint64, bool, error) {
 	for {
 		packet, ok := buffered[expectedSeq]
 		if !ok {
@@ -499,8 +520,15 @@ func advanceReceiveWindow(out *bytes.Buffer, buffered map[uint64]Packet, expecte
 		delete(buffered, expectedSeq)
 		switch packet.Type {
 		case PacketTypeData:
-			if _, err := out.Write(packet.Payload); err != nil {
+			n, err := dst.Write(packet.Payload)
+			if err != nil {
 				return expectedSeq, false, err
+			}
+			if n != len(packet.Payload) {
+				return expectedSeq, false, io.ErrShortWrite
+			}
+			if stats != nil {
+				stats.BytesReceived += int64(n)
 			}
 			expectedSeq++
 		case PacketTypeDone:
@@ -556,6 +584,59 @@ func waitZeroReadRetry(ctx context.Context, zeroReads int) error {
 	case <-timer.C:
 		return nil
 	}
+}
+
+func lingerTerminalAcks(ctx context.Context, conn net.PacketConn, peer net.Addr, runID [16]byte, expectedSeq uint64) error {
+	lingerDeadline := time.Now().Add(terminalAckLinger)
+	buf := make([]byte, 64<<10)
+	for {
+		if time.Now().After(lingerDeadline) {
+			return nil
+		}
+		if err := setReadDeadlineAbsolute(ctx, conn, lingerDeadline); err != nil {
+			return err
+		}
+		n, addr, err := conn.ReadFrom(buf)
+		if err != nil {
+			if ctx.Err() != nil {
+				return nil
+			}
+			if isNetTimeout(err) {
+				return nil
+			}
+			if errors.Is(err, net.ErrClosed) {
+				return nil
+			}
+			return err
+		}
+		if addr.String() != peer.String() {
+			continue
+		}
+		packet, err := UnmarshalPacket(buf[:n], nil)
+		if err != nil {
+			continue
+		}
+		if packet.RunID != runID {
+			continue
+		}
+		switch packet.Type {
+		case PacketTypeHello:
+			if err := sendHelloAck(ctx, conn, addr, runID); err != nil {
+				return err
+			}
+		case PacketTypeData, PacketTypeDone:
+			if err := sendAck(ctx, conn, addr, runID, expectedSeq, 0); err != nil {
+				return err
+			}
+		}
+	}
+}
+
+func setReadDeadlineAbsolute(ctx context.Context, conn net.PacketConn, deadline time.Time) error {
+	if ctxDeadline, ok := ctx.Deadline(); ok && ctxDeadline.Before(deadline) {
+		deadline = ctxDeadline
+	}
+	return conn.SetReadDeadline(deadline)
 }
 
 func writeWithContext(ctx context.Context, conn net.PacketConn, peer net.Addr, packet []byte) (int, error) {

@@ -134,6 +134,30 @@ func (l *lossyPacketConn) WriteTo(p []byte, addr net.Addr) (int, error) {
 	return l.PacketConn.WriteTo(p, addr)
 }
 
+type dropMatchingAckConn struct {
+	net.PacketConn
+	matchAckFloor uint64
+
+	mu      sync.Mutex
+	dropped bool
+}
+
+func (d *dropMatchingAckConn) WriteTo(p []byte, addr net.Addr) (int, error) {
+	packet, err := UnmarshalPacket(p, nil)
+	if err != nil {
+		return 0, err
+	}
+
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	if !d.dropped && packet.Type == PacketTypeAck && packet.AckFloor == d.matchAckFloor {
+		d.dropped = true
+		return len(p), nil
+	}
+	return d.PacketConn.WriteTo(p, addr)
+}
+
 func TestTransferSurvivesDroppedPackets(t *testing.T) {
 	src := bytes.Repeat([]byte("udp-proof"), 1<<16)
 	a, err := net.ListenPacket("udp4", "127.0.0.1:0")
@@ -164,6 +188,51 @@ func TestTransferSurvivesDroppedPackets(t *testing.T) {
 	}()
 
 	if _, err := Send(ctx, lossy, b.LocalAddr().String(), bytes.NewReader(src), SendConfig{Raw: true, ChunkSize: 1200}); err != nil {
+		t.Fatalf("Send() error = %v", err)
+	}
+
+	select {
+	case err := <-errs:
+		t.Fatalf("Receive() error = %v", err)
+	case got := <-done:
+		if !bytes.Equal(got, src) {
+			t.Fatal("received payload mismatch")
+		}
+	case <-ctx.Done():
+		t.Fatalf("timed out waiting for receive: %v", ctx.Err())
+	}
+}
+
+func TestTransferSurvivesDroppedFinalAck(t *testing.T) {
+	src := bytes.Repeat([]byte("final-ack"), 256)
+	a, err := net.ListenPacket("udp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.Close()
+
+	bBase, err := net.ListenPacket("udp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer bBase.Close()
+
+	b := &dropMatchingAckConn{PacketConn: bBase, matchAckFloor: 2}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	done := make(chan []byte, 1)
+	errs := make(chan error, 1)
+	go func() {
+		got, err := Receive(ctx, b, "", ReceiveConfig{Raw: true})
+		if err != nil {
+			errs <- err
+			return
+		}
+		done <- got
+	}()
+
+	if _, err := Send(ctx, a, b.LocalAddr().String(), bytes.NewReader(src), SendConfig{Raw: true, ChunkSize: 1200, WindowSize: 2}); err != nil {
 		t.Fatalf("Send() error = %v", err)
 	}
 
@@ -779,6 +848,58 @@ func TestSendReturnsPartialReadErrorBeforeDone(t *testing.T) {
 	cancel()
 	if err := <-errs; !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("Receive() error = %v, want context cancellation", err)
+	}
+}
+
+func TestReceiveToWriterStreamsPayload(t *testing.T) {
+	src := bytes.Repeat([]byte("stream-writer"), 1<<14)
+	a, err := net.ListenPacket("udp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.Close()
+
+	b, err := net.ListenPacket("udp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer b.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	var got bytes.Buffer
+	statsCh := make(chan TransferStats, 1)
+	errs := make(chan error, 1)
+	go func() {
+		stats, err := ReceiveToWriter(ctx, b, a.LocalAddr().String(), &got, ReceiveConfig{Raw: true})
+		if err != nil {
+			errs <- err
+			return
+		}
+		statsCh <- stats
+	}()
+
+	sendStats, err := Send(ctx, a, b.LocalAddr().String(), bytes.NewReader(src), SendConfig{Raw: true, ChunkSize: 1200, WindowSize: 4})
+	if err != nil {
+		t.Fatalf("Send() error = %v", err)
+	}
+	if sendStats.BytesSent != int64(len(src)) {
+		t.Fatalf("BytesSent = %d, want %d", sendStats.BytesSent, len(src))
+	}
+
+	select {
+	case err := <-errs:
+		t.Fatalf("ReceiveToWriter() error = %v", err)
+	case stats := <-statsCh:
+		if stats.BytesReceived != int64(len(src)) {
+			t.Fatalf("BytesReceived = %d, want %d", stats.BytesReceived, len(src))
+		}
+		if !bytes.Equal(got.Bytes(), src) {
+			t.Fatal("received payload mismatch")
+		}
+	case <-ctx.Done():
+		t.Fatalf("timed out waiting for ReceiveToWriter: %v", ctx.Err())
 	}
 }
 
