@@ -308,6 +308,12 @@ Use all three hosts because they expose different network conditions and help pr
 - `canlxc`: slower and more variable WAN path
 - `uklxc`: third independent WAN path to verify the controller generalizes beyond the first two hosts
 
+All derpcat live-transfer validation in this matrix must run with:
+
+- `DERPCAT_TEST_DISABLE_TAILSCALE_CANDIDATES=1`
+
+That keeps the benchmark focused on public-Internet direct behavior rather than Tailscale-route candidate shortcuts.
+
 Required matrix before claiming the feature works:
 
 - sizes: `10 KB`, `1 MB`, `10 MB`, `50 MB`, `128 MB`, `1 GB`
