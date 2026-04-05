@@ -155,6 +155,30 @@ Sessions can start on DERP relay and later promote to a direct path without rest
 - good for quick sharing of local web apps, APIs, and admin interfaces
 - can be used entirely through `npx` without a manual install
 
+## Real-World Example: Tar Pipe Over Internet
+
+Classic tar pipe is fast because it streams bytes directly from `tar` on one host into `tar` on another host. Good reference: [Using netcat and tar to quickly transfer files between machines, aka tar pipe](https://toast.djw.org.uk/tarpipe.html).
+
+Problem: classic `tar | nc` assumes receiver can expose a listening port and sender can reach it. That breaks down fast when both hosts are on the public Internet, both sit behind NAT, and neither side should expose an inbound port.
+
+`derpcat` keeps the same streaming shape, but removes the open-port requirement.
+
+Receiver:
+
+```bash
+npx -y derpcat@latest listen | tar -xpf - -C /restore/path
+```
+
+`listen` prints a token on stderr. Copy that token to the sender over a channel you trust.
+
+Sender:
+
+```bash
+tar -cpf - /srv/data | npx -y derpcat@latest send <token>
+```
+
+This is still tar pipe. Difference: no public listener to expose, no SSH daemon required for data path, no VPN to join, and no permanent mesh to set up. `derpcat` starts with DERP if needed, then promotes the live transfer onto direct QUIC or native TCP when a faster direct path becomes available.
+
 ## Development
 
 ```bash
