@@ -5,11 +5,19 @@ import (
 	"context"
 	"errors"
 	"io"
+	"math"
 	"net"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
+
+func testRunID(seed byte) [16]byte {
+	var runID [16]byte
+	runID[0] = seed
+	return runID
+}
 
 func TestTransferCompletesAcrossLoopback(t *testing.T) {
 	src := bytes.Repeat([]byte("derpcat"), 1<<17)
@@ -184,6 +192,7 @@ func TestReceiveAckSignalsOutOfOrderPackets(t *testing.T) {
 		wire, err := MarshalPacket(Packet{
 			Version: ProtocolVersion,
 			Type:    kind,
+			RunID:   testRunID(1),
 			Seq:     seq,
 			Payload: payload,
 		}, nil)
@@ -211,6 +220,9 @@ func TestReceiveAckSignalsOutOfOrderPackets(t *testing.T) {
 		}
 		if packet.Type != PacketTypeAck {
 			t.Fatalf("packet type = %v, want ACK", packet.Type)
+		}
+		if packet.RunID != testRunID(1) {
+			t.Fatalf("ack RunID = %x, want %x", packet.RunID, testRunID(1))
 		}
 		return packet
 	}
@@ -276,6 +288,7 @@ func TestReceiveAckSignalsAckMaskBoundaryAtPlus64(t *testing.T) {
 	wire, err := MarshalPacket(Packet{
 		Version: ProtocolVersion,
 		Type:    PacketTypeData,
+		RunID:   testRunID(2),
 		Seq:     64,
 		Payload: []byte("z"),
 	}, nil)
@@ -303,6 +316,9 @@ func TestReceiveAckSignalsAckMaskBoundaryAtPlus64(t *testing.T) {
 	}
 	if ack.AckMask != uint64(1)<<63 {
 		t.Fatalf("AckMask = %064b, want %064b", ack.AckMask, uint64(1)<<63)
+	}
+	if ack.RunID != testRunID(2) {
+		t.Fatalf("ack RunID = %x, want %x", ack.RunID, testRunID(2))
 	}
 
 	cancel()
@@ -407,6 +423,25 @@ func (c *countingPacketConn) WriteTo(p []byte, addr net.Addr) (int, error) {
 	return c.PacketConn.WriteTo(p, addr)
 }
 
+type countingZeroReader struct {
+	releaseAt time.Time
+	chunk     []byte
+	calls     atomic.Int64
+	delivered atomic.Bool
+}
+
+func (r *countingZeroReader) Read(p []byte) (int, error) {
+	r.calls.Add(1)
+	if time.Now().Before(r.releaseAt) {
+		return 0, nil
+	}
+	if !r.delivered.CompareAndSwap(false, true) {
+		return 0, io.EOF
+	}
+	n := copy(p, r.chunk)
+	return n, io.EOF
+}
+
 func TestSendStreamsBeforeSourceEOF(t *testing.T) {
 	a, err := net.ListenPacket("udp4", "127.0.0.1:0")
 	if err != nil {
@@ -467,7 +502,7 @@ func TestSendRetriesAfterZeroProgressRead(t *testing.T) {
 	defer b.Close()
 
 	reader := &zeroThenDataReader{chunk: bytes.Repeat([]byte("zero-progress"), 80), zeros: 8}
-	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
 	defer cancel()
 
 	done := make(chan []byte, 1)
@@ -487,6 +522,57 @@ func TestSendRetriesAfterZeroProgressRead(t *testing.T) {
 	}
 	if stats.BytesSent != int64(len(reader.chunk)) {
 		t.Fatalf("BytesSent = %d, want %d", stats.BytesSent, len(reader.chunk))
+	}
+
+	select {
+	case err := <-errs:
+		t.Fatalf("Receive() error = %v", err)
+	case got := <-done:
+		if !bytes.Equal(got, reader.chunk) {
+			t.Fatal("received payload mismatch")
+		}
+	case <-ctx.Done():
+		t.Fatalf("timed out waiting for receive: %v", ctx.Err())
+	}
+}
+
+func TestSendBacksOffRepeatedZeroProgressReads(t *testing.T) {
+	a, err := net.ListenPacket("udp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.Close()
+
+	b, err := net.ListenPacket("udp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer b.Close()
+
+	reader := &countingZeroReader{
+		releaseAt: time.Now().Add(8 * time.Millisecond),
+		chunk:     bytes.Repeat([]byte("zero-backoff"), 80),
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+
+	done := make(chan []byte, 1)
+	errs := make(chan error, 1)
+	go func() {
+		got, err := Receive(ctx, b, "", ReceiveConfig{Raw: true})
+		if err != nil {
+			errs <- err
+			return
+		}
+		done <- got
+	}()
+
+	if _, err := Send(ctx, a, b.LocalAddr().String(), reader, SendConfig{Raw: true, ChunkSize: len(reader.chunk), WindowSize: 2}); err != nil {
+		t.Fatalf("Send() error = %v", err)
+	}
+
+	if calls := reader.calls.Load(); calls > 50 {
+		t.Fatalf("zero-progress Read calls = %d, want bounded retries", calls)
 	}
 
 	select {
@@ -588,6 +674,189 @@ func TestSendUsesSelectiveRetransmitForMissingBasePacket(t *testing.T) {
 		if conn.writeCounts[seq] != 1 {
 			t.Fatalf("seq %d writes = %d, want 1 with SACK", seq, conn.writeCounts[seq])
 		}
+	}
+}
+
+func TestSendIgnoresAckWithWrongRunID(t *testing.T) {
+	a, err := net.ListenPacket("udp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.Close()
+
+	b, err := net.ListenPacket("udp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer b.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+
+	conn := &countingPacketConn{PacketConn: a}
+	src := bytes.NewReader(bytes.Repeat([]byte("wrong-ack"), 100))
+
+	done := make(chan error, 1)
+	go func() {
+		buf := make([]byte, 64<<10)
+		var runID [16]byte
+		for {
+			if err := b.SetReadDeadline(time.Now().Add(10 * time.Millisecond)); err != nil {
+				done <- err
+				return
+			}
+			n, addr, err := b.ReadFrom(buf)
+			if err != nil {
+				if errors.Is(err, net.ErrClosed) || errors.Is(err, context.Canceled) {
+					done <- nil
+					return
+				}
+				var netErr net.Error
+				if errors.As(err, &netErr) && netErr.Timeout() {
+					if ctx.Err() != nil {
+						done <- nil
+						return
+					}
+					continue
+				}
+				done <- err
+				return
+			}
+			packet, err := UnmarshalPacket(buf[:n], nil)
+			if err != nil {
+				done <- err
+				return
+			}
+			if isZeroRunID(runID) {
+				runID = packet.RunID
+				if isZeroRunID(runID) {
+					done <- errors.New("sender used zero RunID")
+					return
+				}
+			}
+			badRunID := runID
+			badRunID[15] ^= 0xff
+			ack, err := MarshalPacket(Packet{
+				Version:  ProtocolVersion,
+				Type:     PacketTypeAck,
+				RunID:    badRunID,
+				AckFloor: math.MaxUint64,
+			}, nil)
+			if err != nil {
+				done <- err
+				return
+			}
+			if _, err := b.WriteTo(ack, addr); err != nil {
+				done <- err
+				return
+			}
+		}
+	}()
+
+	if _, err := Send(ctx, conn, b.LocalAddr().String(), src, SendConfig{Raw: true, ChunkSize: 1200, WindowSize: 2}); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Send() error = %v, want context deadline exceeded", err)
+	}
+	if err := <-done; err != nil {
+		t.Fatalf("spoof ACK loop error = %v", err)
+	}
+}
+
+func TestReceiveIgnoresPacketsWithWrongRunIDAfterEstablishingSession(t *testing.T) {
+	a, err := net.ListenPacket("udp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.Close()
+
+	b, err := net.ListenPacket("udp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer b.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	done := make(chan []byte, 1)
+	errs := make(chan error, 1)
+	go func() {
+		got, err := Receive(ctx, b, a.LocalAddr().String(), ReceiveConfig{Raw: true})
+		if err != nil {
+			errs <- err
+			return
+		}
+		done <- got
+	}()
+
+	write := func(runID [16]byte, seq uint64, kind PacketType, payload []byte) {
+		t.Helper()
+		wire, err := MarshalPacket(Packet{
+			Version: ProtocolVersion,
+			Type:    kind,
+			RunID:   runID,
+			Seq:     seq,
+			Payload: payload,
+		}, nil)
+		if err != nil {
+			t.Fatalf("MarshalPacket() error = %v", err)
+		}
+		if _, err := a.WriteTo(wire, b.LocalAddr()); err != nil {
+			t.Fatalf("WriteTo() error = %v", err)
+		}
+	}
+
+	readAck := func(expectTimeout bool) Packet {
+		t.Helper()
+		buf := make([]byte, 64<<10)
+		if err := a.SetReadDeadline(time.Now().Add(100 * time.Millisecond)); err != nil {
+			t.Fatalf("SetReadDeadline() error = %v", err)
+		}
+		n, _, err := a.ReadFrom(buf)
+		if expectTimeout {
+			if err == nil {
+				t.Fatal("ReadFrom() error = nil, want timeout")
+			}
+			var netErr net.Error
+			if !errors.As(err, &netErr) || !netErr.Timeout() {
+				t.Fatalf("ReadFrom() error = %v, want timeout", err)
+			}
+			return Packet{}
+		}
+		if err != nil {
+			t.Fatalf("ReadFrom() error = %v", err)
+		}
+		packet, err := UnmarshalPacket(buf[:n], nil)
+		if err != nil {
+			t.Fatalf("UnmarshalPacket() error = %v", err)
+		}
+		return packet
+	}
+
+	goodRunID := testRunID(9)
+	badRunID := testRunID(10)
+
+	write(goodRunID, 0, PacketTypeData, []byte("a"))
+	if ack := readAck(false); ack.RunID != goodRunID {
+		t.Fatalf("ack RunID = %x, want %x", ack.RunID, goodRunID)
+	}
+
+	write(badRunID, 1, PacketTypeData, []byte("x"))
+	_ = readAck(true)
+
+	write(goodRunID, 1, PacketTypeDone, nil)
+	if ack := readAck(false); ack.RunID != goodRunID {
+		t.Fatalf("ack RunID = %x, want %x", ack.RunID, goodRunID)
+	}
+
+	select {
+	case err := <-errs:
+		t.Fatalf("Receive() error = %v", err)
+	case got := <-done:
+		if !bytes.Equal(got, []byte("a")) {
+			t.Fatalf("payload = %q, want %q", got, []byte("a"))
+		}
+	case <-ctx.Done():
+		t.Fatalf("timed out waiting for receive: %v", ctx.Err())
 	}
 }
 

@@ -3,6 +3,7 @@ package probe
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"errors"
 	"io"
 	"net"
@@ -13,6 +14,7 @@ const (
 	defaultChunkSize     = 1200
 	defaultWindowSize    = 8
 	defaultRetryInterval = 20 * time.Millisecond
+	zeroReadRetryDelay   = 1 * time.Millisecond
 	maxAckMaskBits       = 64
 )
 
@@ -58,6 +60,10 @@ func Send(ctx context.Context, conn net.PacketConn, remoteAddr string, src io.Re
 	}
 
 	stats := TransferStats{StartedAt: time.Now()}
+	runID, err := newRunID()
+	if err != nil {
+		return TransferStats{}, err
+	}
 
 	buf := make([]byte, 64<<10)
 	state := senderState{
@@ -66,6 +72,7 @@ func Send(ctx context.Context, conn net.PacketConn, remoteAddr string, src io.Re
 		window:    cfg.WindowSize,
 		nextSeq:   0,
 		offset:    0,
+		runID:     runID,
 		inFlight:  make(map[uint64]*outboundPacket, cfg.WindowSize),
 	}
 
@@ -75,6 +82,9 @@ func Send(ctx context.Context, conn net.PacketConn, remoteAddr string, src io.Re
 		}
 		if len(state.inFlight) == 0 && !state.doneQueued {
 			if err := ctx.Err(); err != nil {
+				return TransferStats{}, err
+			}
+			if err := waitZeroReadRetry(ctx, state.zeroReads); err != nil {
 				return TransferStats{}, err
 			}
 			continue
@@ -112,6 +122,9 @@ func Send(ctx context.Context, conn net.PacketConn, remoteAddr string, src io.Re
 		if packet.Type != PacketTypeAck {
 			continue
 		}
+		if packet.RunID != state.runID {
+			continue
+		}
 
 		stats.PacketsAcked += int64(applyAck(state.inFlight, packet.AckFloor, packet.AckMask))
 	}
@@ -131,6 +144,8 @@ func Receive(ctx context.Context, conn net.PacketConn, remoteAddr string, cfg Re
 	buf := make([]byte, 64<<10)
 	var expectedSeq uint64
 	buffered := make(map[uint64]Packet)
+	var runID [16]byte
+	var runIDSet bool
 
 	for {
 		if err := setReadDeadline(ctx, conn, defaultRetryInterval); err != nil {
@@ -158,6 +173,17 @@ func Receive(ctx context.Context, conn net.PacketConn, remoteAddr string, cfg Re
 		if err != nil {
 			return nil, err
 		}
+		if isZeroRunID(packet.RunID) {
+			continue
+		}
+		if runIDSet {
+			if packet.RunID != runID {
+				continue
+			}
+		} else {
+			runID = packet.RunID
+			runIDSet = true
+		}
 
 		switch packet.Type {
 		case PacketTypeData:
@@ -169,7 +195,7 @@ func Receive(ctx context.Context, conn net.PacketConn, remoteAddr string, cfg Re
 			if err != nil {
 				return nil, err
 			}
-			if err := sendAck(ctx, conn, addr, expectedSeq, ackMaskFor(buffered, expectedSeq)); err != nil {
+			if err := sendAck(ctx, conn, addr, runID, expectedSeq, ackMaskFor(buffered, expectedSeq)); err != nil {
 				return nil, err
 			}
 			if complete {
@@ -184,7 +210,7 @@ func Receive(ctx context.Context, conn net.PacketConn, remoteAddr string, cfg Re
 			if err != nil {
 				return nil, err
 			}
-			if err := sendAck(ctx, conn, addr, expectedSeq, ackMaskFor(buffered, expectedSeq)); err != nil {
+			if err := sendAck(ctx, conn, addr, runID, expectedSeq, ackMaskFor(buffered, expectedSeq)); err != nil {
 				return nil, err
 			}
 			if complete {
@@ -194,10 +220,11 @@ func Receive(ctx context.Context, conn net.PacketConn, remoteAddr string, cfg Re
 	}
 }
 
-func sendAck(ctx context.Context, conn net.PacketConn, peer net.Addr, ackFloor, ackMask uint64) error {
+func sendAck(ctx context.Context, conn net.PacketConn, peer net.Addr, runID [16]byte, ackFloor, ackMask uint64) error {
 	packet, err := MarshalPacket(Packet{
 		Version:  ProtocolVersion,
 		Type:     PacketTypeAck,
+		RunID:    runID,
 		AckFloor: ackFloor,
 		AckMask:  ackMask,
 	}, nil)
@@ -221,10 +248,12 @@ type senderState struct {
 	window     int
 	nextSeq    uint64
 	offset     uint64
+	runID      [16]byte
 	eof        bool
 	doneQueued bool
 	pendingErr error
 	inFlight   map[uint64]*outboundPacket
+	zeroReads  int
 }
 
 func sendOutbound(ctx context.Context, conn net.PacketConn, peer net.Addr, packet *outboundPacket, stats *TransferStats) error {
@@ -269,6 +298,7 @@ func nextOutboundPacket(state *senderState) (*outboundPacket, error) {
 		wire, err := MarshalPacket(Packet{
 			Version: ProtocolVersion,
 			Type:    PacketTypeDone,
+			RunID:   state.runID,
 			Seq:     state.nextSeq,
 			Offset:  state.offset,
 		}, nil)
@@ -278,6 +308,7 @@ func nextOutboundPacket(state *senderState) (*outboundPacket, error) {
 		packet := &outboundPacket{seq: state.nextSeq, wire: wire}
 		state.nextSeq++
 		state.doneQueued = true
+		state.zeroReads = 0
 		return packet, nil
 	}
 
@@ -288,6 +319,7 @@ func nextOutboundPacket(state *senderState) (*outboundPacket, error) {
 		wire, err := MarshalPacket(Packet{
 			Version: ProtocolVersion,
 			Type:    PacketTypeData,
+			RunID:   state.runID,
 			Seq:     state.nextSeq,
 			Offset:  state.offset,
 			Payload: payload,
@@ -302,6 +334,7 @@ func nextOutboundPacket(state *senderState) (*outboundPacket, error) {
 		}
 		state.nextSeq++
 		state.offset += uint64(n)
+		state.zeroReads = 0
 		if errors.Is(readErr, io.EOF) {
 			state.eof = true
 		} else if readErr != nil {
@@ -316,6 +349,7 @@ func nextOutboundPacket(state *senderState) (*outboundPacket, error) {
 	if readErr != nil {
 		return nil, readErr
 	}
+	state.zeroReads++
 	return nil, nil
 }
 
@@ -419,6 +453,37 @@ func ackMaskFor(buffered map[uint64]Packet, ackFloor uint64) uint64 {
 func clonePacket(packet Packet) Packet {
 	packet.Payload = append([]byte(nil), packet.Payload...)
 	return packet
+}
+
+func newRunID() ([16]byte, error) {
+	var runID [16]byte
+	for {
+		if _, err := rand.Read(runID[:]); err != nil {
+			return [16]byte{}, err
+		}
+		if !isZeroRunID(runID) {
+			return runID, nil
+		}
+	}
+}
+
+func isZeroRunID(runID [16]byte) bool {
+	return runID == [16]byte{}
+}
+
+func waitZeroReadRetry(ctx context.Context, zeroReads int) error {
+	delay := zeroReadRetryDelay
+	if zeroReads > 4 {
+		delay = defaultRetryInterval
+	}
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
 }
 
 func writeWithContext(ctx context.Context, conn net.PacketConn, peer net.Addr, packet []byte) (int, error) {
