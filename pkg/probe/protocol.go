@@ -8,7 +8,7 @@ import (
 
 const (
 	ProtocolVersion = 1
-	headerLen       = 44
+	headerLen       = 52
 )
 
 type PacketType uint8
@@ -29,6 +29,7 @@ type Packet struct {
 	Seq      uint64
 	Offset   uint64
 	AckFloor uint64
+	AckMask  uint64
 	Payload  []byte
 }
 
@@ -44,7 +45,8 @@ func MarshalPacket(p Packet, aead cipher.AEAD) ([]byte, error) {
 	binary.BigEndian.PutUint64(buf[20:28], p.Seq)
 	binary.BigEndian.PutUint64(buf[28:36], p.Offset)
 	binary.BigEndian.PutUint64(buf[36:44], p.AckFloor)
-	copy(buf[44:], p.Payload)
+	binary.BigEndian.PutUint64(buf[44:52], p.AckMask)
+	copy(buf[52:], p.Payload)
 	return buf, nil
 }
 
@@ -63,6 +65,7 @@ func UnmarshalPacket(buf []byte, aead cipher.AEAD) (Packet, error) {
 	p.Seq = binary.BigEndian.Uint64(buf[20:28])
 	p.Offset = binary.BigEndian.Uint64(buf[28:36])
 	p.AckFloor = binary.BigEndian.Uint64(buf[36:44])
-	p.Payload = append([]byte(nil), buf[44:]...)
+	p.AckMask = binary.BigEndian.Uint64(buf[44:52])
+	p.Payload = append([]byte(nil), buf[52:]...)
 	return p, nil
 }

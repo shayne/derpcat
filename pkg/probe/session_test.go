@@ -108,3 +108,188 @@ func TestTransferSurvivesDroppedPackets(t *testing.T) {
 		t.Fatalf("timed out waiting for receive: %v", ctx.Err())
 	}
 }
+
+type reorderPacketConn struct {
+	net.PacketConn
+
+	mu         sync.Mutex
+	heldPacket []byte
+	heldAddr   net.Addr
+	reordered  bool
+}
+
+func (r *reorderPacketConn) WriteTo(p []byte, addr net.Addr) (int, error) {
+	packet, err := UnmarshalPacket(p, nil)
+	if err != nil {
+		return 0, err
+	}
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if !r.reordered && packet.Type == PacketTypeData {
+		switch packet.Seq {
+		case 0:
+			r.heldPacket = append([]byte(nil), p...)
+			r.heldAddr = addr
+			return len(p), nil
+		case 1:
+			r.reordered = true
+			if _, err := r.PacketConn.WriteTo(p, addr); err != nil {
+				return 0, err
+			}
+			if _, err := r.PacketConn.WriteTo(r.heldPacket, r.heldAddr); err != nil {
+				return 0, err
+			}
+			r.heldPacket = nil
+			r.heldAddr = nil
+			return len(p), nil
+		}
+	}
+
+	return r.PacketConn.WriteTo(p, addr)
+}
+
+func TestReceiveAckSignalsOutOfOrderPackets(t *testing.T) {
+	a, err := net.ListenPacket("udp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.Close()
+
+	b, err := net.ListenPacket("udp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer b.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	done := make(chan []byte, 1)
+	errs := make(chan error, 1)
+	go func() {
+		got, err := Receive(ctx, b, a.LocalAddr().String(), ReceiveConfig{Raw: true})
+		if err != nil {
+			errs <- err
+			return
+		}
+		done <- got
+	}()
+
+	writePacket := func(seq uint64, kind PacketType, payload []byte) {
+		t.Helper()
+		wire, err := MarshalPacket(Packet{
+			Version: ProtocolVersion,
+			Type:    kind,
+			Seq:     seq,
+			Payload: payload,
+		}, nil)
+		if err != nil {
+			t.Fatalf("MarshalPacket() error = %v", err)
+		}
+		if _, err := a.WriteTo(wire, b.LocalAddr()); err != nil {
+			t.Fatalf("WriteTo() error = %v", err)
+		}
+	}
+
+	readAck := func() Packet {
+		t.Helper()
+		buf := make([]byte, 64<<10)
+		if err := a.SetReadDeadline(time.Now().Add(500 * time.Millisecond)); err != nil {
+			t.Fatalf("SetReadDeadline() error = %v", err)
+		}
+		n, _, err := a.ReadFrom(buf)
+		if err != nil {
+			t.Fatalf("ReadFrom() error = %v", err)
+		}
+		packet, err := UnmarshalPacket(buf[:n], nil)
+		if err != nil {
+			t.Fatalf("UnmarshalPacket() error = %v", err)
+		}
+		if packet.Type != PacketTypeAck {
+			t.Fatalf("packet type = %v, want ACK", packet.Type)
+		}
+		return packet
+	}
+
+	writePacket(1, PacketTypeData, []byte("b"))
+	ack := readAck()
+	if ack.AckFloor != 0 {
+		t.Fatalf("AckFloor after out-of-order packet = %d, want 0", ack.AckFloor)
+	}
+	if ack.AckMask != 1 {
+		t.Fatalf("AckMask after out-of-order packet = %064b, want %064b", ack.AckMask, uint64(1))
+	}
+
+	writePacket(0, PacketTypeData, []byte("a"))
+	ack = readAck()
+	if ack.AckFloor != 2 {
+		t.Fatalf("AckFloor after filling gap = %d, want 2", ack.AckFloor)
+	}
+	if ack.AckMask != 0 {
+		t.Fatalf("AckMask after filling gap = %064b, want 0", ack.AckMask)
+	}
+
+	writePacket(2, PacketTypeDone, nil)
+	ack = readAck()
+	if ack.AckFloor != 3 {
+		t.Fatalf("AckFloor after done = %d, want 3", ack.AckFloor)
+	}
+
+	select {
+	case err := <-errs:
+		t.Fatalf("Receive() error = %v", err)
+	case got := <-done:
+		if !bytes.Equal(got, []byte("ab")) {
+			t.Fatalf("payload = %q, want %q", got, []byte("ab"))
+		}
+	case <-ctx.Done():
+		t.Fatalf("timed out waiting for receive: %v", ctx.Err())
+	}
+}
+
+func TestTransferSurvivesReorderedPackets(t *testing.T) {
+	src := bytes.Repeat([]byte("reorder-proof"), 1<<15)
+	a, err := net.ListenPacket("udp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.Close()
+
+	b, err := net.ListenPacket("udp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer b.Close()
+
+	reordered := &reorderPacketConn{PacketConn: a}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	done := make(chan []byte, 1)
+	errs := make(chan error, 1)
+	go func() {
+		got, err := Receive(ctx, b, "", ReceiveConfig{Raw: true})
+		if err != nil {
+			errs <- err
+			return
+		}
+		done <- got
+	}()
+
+	if _, err := Send(ctx, reordered, b.LocalAddr().String(), bytes.NewReader(src), SendConfig{Raw: true, ChunkSize: 1200, WindowSize: 4}); err != nil {
+		t.Fatalf("Send() error = %v", err)
+	}
+
+	select {
+	case err := <-errs:
+		t.Fatalf("Receive() error = %v", err)
+	case got := <-done:
+		if !bytes.Equal(got, src) {
+			t.Fatal("received payload mismatch")
+		}
+	case <-ctx.Done():
+		t.Fatalf("timed out waiting for receive: %v", ctx.Err())
+	}
+}
