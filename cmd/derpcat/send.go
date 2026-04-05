@@ -11,7 +11,8 @@ import (
 )
 
 type sendFlags struct {
-	ForceRelay bool `flag:"force-relay" help:"Disable direct probing"`
+	ForceRelay bool   `flag:"force-relay" help:"Disable direct probing"`
+	Parallel   string `flag:"parallel" short:"P" help:"Direct stripe count (1-16) or auto"`
 }
 
 type sendArgs struct {
@@ -32,7 +33,7 @@ var sendHelpConfig = yargs.HelpConfig{
 		"send": {
 			Name:        "send",
 			Description: "Send data to a derpcat listener using its token.",
-			Usage:       "[--force-relay]",
+			Usage:       "[--force-relay] [--parallel]",
 			Examples: []string{
 				"cat file | derpcat send <token>",
 				"printf 'hello' | derpcat send <token>",
@@ -64,12 +65,23 @@ func runSend(args []string, level telemetry.Level, stdin io.Reader, stdout, stde
 		return 2
 	}
 
+	policy := session.DefaultParallelPolicy()
+	if parsed.SubCommandFlags.Parallel != "" {
+		policy, err = session.ParseParallelPolicy(parsed.SubCommandFlags.Parallel)
+		if err != nil {
+			fmt.Fprintln(stderr, err)
+			fmt.Fprint(stderr, sendHelpText())
+			return 2
+		}
+	}
+
 	if err := session.Send(commandContext(), session.SendConfig{
-		Token:         parsed.Args.Token,
-		Emitter:       telemetry.New(stderr, level),
-		StdioIn:       stdin,
-		ForceRelay:    parsed.SubCommandFlags.ForceRelay,
-		UsePublicDERP: usePublicDERPTransport(),
+		Token:          parsed.Args.Token,
+		Emitter:        telemetry.New(stderr, level),
+		StdioIn:        stdin,
+		ForceRelay:     parsed.SubCommandFlags.ForceRelay,
+		UsePublicDERP:  usePublicDERPTransport(),
+		ParallelPolicy: policy,
 	}); err != nil {
 		fmt.Fprintln(stderr, err)
 		return 1

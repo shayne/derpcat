@@ -14,7 +14,8 @@ import (
 )
 
 type openFlags struct {
-	ForceRelay bool `flag:"force-relay" help:"Disable direct probing"`
+	ForceRelay bool   `flag:"force-relay" help:"Disable direct probing"`
+	Parallel   string `flag:"parallel" short:"P" help:"Direct stripe count (1-16) or auto"`
 }
 
 type openArgs struct {
@@ -36,7 +37,7 @@ var openHelpConfig = yargs.HelpConfig{
 		"open": {
 			Name:        "open",
 			Description: "Open a shared service locally until Ctrl-C.",
-			Usage:       "[--force-relay]",
+			Usage:       "[--force-relay] [--parallel]",
 			Examples: []string{
 				"derpcat open <token>",
 				"derpcat open <token> 127.0.0.1:8080",
@@ -68,6 +69,16 @@ func runOpen(args []string, level telemetry.Level, stdout, stderr io.Writer) int
 		return 2
 	}
 
+	policy := session.DefaultParallelPolicy()
+	if parsed.SubCommandFlags.Parallel != "" {
+		policy, err = session.ParseParallelPolicy(parsed.SubCommandFlags.Parallel)
+		if err != nil {
+			fmt.Fprintln(stderr, err)
+			fmt.Fprint(stderr, openHelpText())
+			return 2
+		}
+	}
+
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
@@ -75,12 +86,13 @@ func runOpen(args []string, level telemetry.Level, stdout, stderr io.Writer) int
 	done := make(chan error, 1)
 	go func() {
 		done <- session.Open(ctx, session.OpenConfig{
-			Token:         parsed.Args.Token,
-			BindAddr:      parsed.Args.BindAddr,
-			BindAddrSink:  bindSink,
-			Emitter:       telemetry.New(stderr, level),
-			ForceRelay:    parsed.SubCommandFlags.ForceRelay,
-			UsePublicDERP: usePublicDERPTransport(),
+			Token:          parsed.Args.Token,
+			BindAddr:       parsed.Args.BindAddr,
+			BindAddrSink:   bindSink,
+			Emitter:        telemetry.New(stderr, level),
+			ForceRelay:     parsed.SubCommandFlags.ForceRelay,
+			UsePublicDERP:  usePublicDERPTransport(),
+			ParallelPolicy: policy,
 		})
 	}()
 

@@ -36,6 +36,19 @@ func TestSendHelpTargetsCanonicalUsage(t *testing.T) {
 	}
 }
 
+func TestSendHelpMentionsParallelFlag(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := runSend([]string{"--help"}, telemetry.LevelDefault, nil, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("runSend() = %d, want 0", code)
+	}
+	for _, want := range []string{"-P", "--parallel", "auto"} {
+		if !strings.Contains(stderr.String(), want) {
+			t.Fatalf("stderr = %q, want help mentioning %q", stderr.String(), want)
+		}
+	}
+}
+
 func TestSendAllowsTokenBeforeHelp(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	code := runSend([]string{"token-value", "-h"}, telemetry.LevelDefault, nil, &stdout, &stderr)
@@ -76,6 +89,9 @@ func assertSendHelpText(t *testing.T, got string) {
 		"ARGUMENTS:",
 		"TOKEN",
 		"--force-relay",
+		"-P",
+		"--parallel",
+		"auto",
 		"cat file | derpcat send <token>",
 		"printf 'hello' | derpcat send <token>",
 	} {

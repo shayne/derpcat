@@ -110,7 +110,7 @@ func TestRequestExternalQUICModeSendsRequestBeforeLocalDirectIsReady(t *testing.
 		})
 	}()
 
-	nativeQUIC, nativeTCPConns, addr, err := requestExternalQUICMode(ctx, senderDERP, listenerDERP.PublicKey(), manager, nil, nil, nil, nil, externalNativeTCPAuth{}, false)
+	nativeQUIC, nativeTCPConns, addr, _, err := requestExternalQUICMode(ctx, senderDERP, listenerDERP.PublicKey(), manager, nil, nil, nil, nil, externalNativeTCPAuth{}, DefaultParallelPolicy(), false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -201,7 +201,7 @@ func TestRequestExternalQUICModeUsesPeerResponseAddrWhenLocalDirectIsNotReady(t 
 		})
 	}()
 
-	nativeQUIC, nativeTCPConns, addr, err := requestExternalQUICMode(ctx, senderDERP, listenerDERP.PublicKey(), manager, nil, nil, nil, nil, externalNativeTCPAuth{}, false)
+	nativeQUIC, nativeTCPConns, addr, _, err := requestExternalQUICMode(ctx, senderDERP, listenerDERP.PublicKey(), manager, nil, nil, nil, nil, externalNativeTCPAuth{}, DefaultParallelPolicy(), false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -219,6 +219,101 @@ func TestRequestExternalQUICModeUsesPeerResponseAddrWhenLocalDirectIsNotReady(t 
 	if len(nativeTCPConns) > 0 {
 		closeExternalNativeTCPConns(nativeTCPConns)
 		t.Fatal("requestExternalQUICMode() nativeTCPConns != nil, want nil")
+	}
+	if err := <-listenerDone; err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestRequestExternalQUICModeCarriesParallelPolicy(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	srv := newSessionTestDERPServer(t)
+	node := firstDERPNode(srv.Map, 1)
+
+	senderDERP, err := derpbind.NewClient(ctx, node, srv.DERPURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer senderDERP.Close()
+
+	listenerDERP, err := derpbind.NewClient(ctx, node, srv.DERPURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listenerDERP.Close()
+	warmExternalQUICModeTestDERPRoute(t, ctx, senderDERP, listenerDERP)
+
+	manager := transport.NewManager(transport.ManagerConfig{RelayAddr: relayTransportAddr()})
+	if err := manager.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		cancel()
+		manager.Wait()
+	}()
+
+	modeCh, unsubscribe := listenerDERP.SubscribeLossless(func(pkt derpbind.Packet) bool {
+		return pkt.From == senderDERP.PublicKey() && isQUICModeRequestPayload(pkt.Payload)
+	})
+	defer unsubscribe()
+	modeAckCh, unsubscribeAck := listenerDERP.SubscribeLossless(func(pkt derpbind.Packet) bool {
+		return pkt.From == senderDERP.PublicKey() && isQUICModeAckPayload(pkt.Payload)
+	})
+	defer unsubscribeAck()
+
+	wantPolicy := AutoParallelPolicy()
+	listenerDone := make(chan error, 1)
+	go func() {
+		req, err := receiveQUICModeRequest(ctx, modeCh)
+		if err != nil {
+			listenerDone <- err
+			return
+		}
+		if got := quicModeParallelPolicy(req); got != wantPolicy {
+			listenerDone <- context.Canceled
+			return
+		}
+		if err := sendEnvelope(ctx, listenerDERP, senderDERP.PublicKey(), envelope{
+			Type: envelopeQUICModeResp,
+			QUICModeResp: &quicModeResponse{
+				NativeDirect:    true,
+				DirectAddr:      "127.0.0.1:54321",
+				ParallelMode:    string(wantPolicy.Mode),
+				ParallelInitial: wantPolicy.Initial,
+				ParallelCap:     wantPolicy.Cap,
+			},
+		}); err != nil {
+			listenerDone <- err
+			return
+		}
+		if _, err := receiveQUICModeAck(ctx, modeAckCh); err != nil {
+			listenerDone <- err
+			return
+		}
+		listenerDone <- sendEnvelope(ctx, listenerDERP, senderDERP.PublicKey(), envelope{
+			Type:          envelopeQUICModeReady,
+			QUICModeReady: &quicModeReady{NativeDirect: true},
+		})
+	}()
+
+	nativeQUIC, nativeTCPConns, addr, policy, err := requestExternalQUICMode(ctx, senderDERP, listenerDERP.PublicKey(), manager, nil, nil, nil, nil, externalNativeTCPAuth{}, wantPolicy, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !nativeQUIC {
+		t.Fatal("requestExternalQUICMode() nativeQUIC = false, want true")
+	}
+	if addr == nil || addr.String() != "127.0.0.1:54321" {
+		t.Fatalf("requestExternalQUICMode() addr = %v, want 127.0.0.1:54321", addr)
+	}
+	if len(nativeTCPConns) > 0 {
+		closeExternalNativeTCPConns(nativeTCPConns)
+		t.Fatal("requestExternalQUICMode() nativeTCPConns != nil, want nil")
+	}
+	if policy != wantPolicy {
+		t.Fatalf("requestExternalQUICMode() policy = %#v, want %#v", policy, wantPolicy)
 	}
 	if err := <-listenerDone; err != nil {
 		t.Fatal(err)
@@ -291,7 +386,7 @@ func TestRequestExternalQUICModeWaitsForListenerReadyBeforeReturningNativeQUIC(t
 	}()
 
 	start := time.Now()
-	nativeQUIC, nativeTCPConns, addr, err := requestExternalQUICMode(
+	nativeQUIC, nativeTCPConns, addr, _, err := requestExternalQUICMode(
 		ctx,
 		senderDERP,
 		listenerDERP.PublicKey(),
@@ -301,6 +396,7 @@ func TestRequestExternalQUICModeWaitsForListenerReadyBeforeReturningNativeQUIC(t
 		nil,
 		nil,
 		externalNativeTCPAuth{},
+		DefaultParallelPolicy(),
 		false,
 	)
 	if err != nil {
@@ -392,7 +488,7 @@ func TestRequestExternalQUICModeRetriesAckUntilListenerReady(t *testing.T) {
 		})
 	}()
 
-	nativeQUIC, nativeTCPConns, addr, err := requestExternalQUICMode(
+	nativeQUIC, nativeTCPConns, addr, _, err := requestExternalQUICMode(
 		ctx,
 		senderDERP,
 		listenerDERP.PublicKey(),
@@ -402,6 +498,7 @@ func TestRequestExternalQUICModeRetriesAckUntilListenerReady(t *testing.T) {
 		nil,
 		nil,
 		externalNativeTCPAuth{},
+		DefaultParallelPolicy(),
 		false,
 	)
 	if err != nil {
@@ -504,7 +601,7 @@ func TestExternalQUICModeNegotiationUsesListenerResponseAddrWithoutSplitBrain(t 
 		err        error
 	}, 1)
 	go func() {
-		nativeQUIC, nativeTCPConns, addr, err := acceptExternalQUICMode(
+		nativeQUIC, nativeTCPConns, addr, _, err := acceptExternalQUICMode(
 			ctx,
 			listenerDERP,
 			modeCh,
@@ -525,7 +622,7 @@ func TestExternalQUICModeNegotiationUsesListenerResponseAddrWithoutSplitBrain(t 
 		}{nativeQUIC: nativeQUIC, addr: addr, err: err}
 	}()
 
-	nativeQUIC, nativeTCPConns, addr, err := requestExternalQUICMode(ctx, senderDERP, listenerDERP.PublicKey(), senderManager, nil, nil, nil, nil, externalNativeTCPAuth{}, false)
+	nativeQUIC, nativeTCPConns, addr, _, err := requestExternalQUICMode(ctx, senderDERP, listenerDERP.PublicKey(), senderManager, nil, nil, nil, nil, externalNativeTCPAuth{}, DefaultParallelPolicy(), false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -620,7 +717,7 @@ func TestExternalQUICModeNegotiationUsesRouteLocalNativeTCPBeforeUDPDirectPromot
 		err        error
 	}, 1)
 	go func() {
-		nativeQUIC, nativeTCPConns, _, err := acceptExternalQUICMode(
+		nativeQUIC, nativeTCPConns, _, _, err := acceptExternalQUICMode(
 			ctx,
 			listenerDERP,
 			modeCh,
@@ -640,7 +737,7 @@ func TestExternalQUICModeNegotiationUsesRouteLocalNativeTCPBeforeUDPDirectPromot
 		}{nativeQUIC: nativeQUIC, conns: nativeTCPConns, err: err}
 	}()
 
-	nativeQUIC, nativeTCPConns, addr, err := requestExternalQUICMode(
+	nativeQUIC, nativeTCPConns, addr, _, err := requestExternalQUICMode(
 		ctx,
 		senderDERP,
 		listenerDERP.PublicKey(),
@@ -650,6 +747,7 @@ func TestExternalQUICModeNegotiationUsesRouteLocalNativeTCPBeforeUDPDirectPromot
 		nil,
 		nil,
 		externalNativeTCPAuth{},
+		DefaultParallelPolicy(),
 		false,
 	)
 	if err != nil {

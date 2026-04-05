@@ -136,6 +136,13 @@ type externalHandoffSpool struct {
 	pumpDone        chan struct{}
 }
 
+type externalHandoffSpoolSnapshot struct {
+	ReadOffset     int64
+	SourceOffset   int64
+	AckedWatermark int64
+	EOF            bool
+}
+
 func newExternalHandoffSpool(src io.Reader, chunkSize int, maxUnackedBytes int64) (*externalHandoffSpool, error) {
 	if src == nil {
 		return nil, errors.New("external handoff spool source is nil")
@@ -232,6 +239,18 @@ func (s *externalHandoffSpool) AckedWatermark() int64 {
 	defer s.mu.Unlock()
 
 	return s.ackedWatermark
+}
+
+func (s *externalHandoffSpool) Snapshot() externalHandoffSpoolSnapshot {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	return externalHandoffSpoolSnapshot{
+		ReadOffset:     s.readOffset,
+		SourceOffset:   s.sourceOffset,
+		AckedWatermark: s.ackedWatermark,
+		EOF:            s.eof,
+	}
 }
 
 func (s *externalHandoffSpool) Done() bool {

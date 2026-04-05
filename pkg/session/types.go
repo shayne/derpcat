@@ -19,11 +19,12 @@ type ListenConfig struct {
 }
 
 type SendConfig struct {
-	Token         string
-	Emitter       *telemetry.Emitter
-	StdioIn       io.Reader
-	ForceRelay    bool
-	UsePublicDERP bool
+	Token          string
+	Emitter        *telemetry.Emitter
+	StdioIn        io.Reader
+	ForceRelay     bool
+	UsePublicDERP  bool
+	ParallelPolicy ParallelPolicy
 }
 
 type ShareConfig struct {
@@ -35,12 +36,13 @@ type ShareConfig struct {
 }
 
 type OpenConfig struct {
-	Token         string
-	BindAddr      string
-	BindAddrSink  chan<- string
-	Emitter       *telemetry.Emitter
-	ForceRelay    bool
-	UsePublicDERP bool
+	Token          string
+	BindAddr       string
+	BindAddrSink   chan<- string
+	Emitter        *telemetry.Emitter
+	ForceRelay     bool
+	UsePublicDERP  bool
+	ParallelPolicy ParallelPolicy
 }
 
 type State string

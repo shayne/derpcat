@@ -33,15 +33,18 @@ import (
 )
 
 const (
-	envelopeClaim         = "claim"
-	envelopeDecision      = "decision"
-	envelopeControl       = "control"
-	envelopeAck           = "ack"
-	envelopeQUICModeReq   = "quic_mode_request"
-	envelopeQUICModeResp  = "quic_mode_response"
-	envelopeQUICModeAck   = "quic_mode_ack"
-	envelopeQUICModeReady = "quic_mode_ready"
-	maxEnvelopeBytes      = 16 << 10
+	envelopeClaim              = "claim"
+	envelopeDecision           = "decision"
+	envelopeControl            = "control"
+	envelopeAck                = "ack"
+	envelopeQUICModeReq        = "quic_mode_request"
+	envelopeQUICModeResp       = "quic_mode_response"
+	envelopeQUICModeAck        = "quic_mode_ack"
+	envelopeQUICModeReady      = "quic_mode_ready"
+	envelopeParallelGrowReq    = "parallel_grow_request"
+	envelopeParallelGrowAck    = "parallel_grow_ack"
+	envelopeParallelGrowResult = "parallel_grow_result"
+	maxEnvelopeBytes           = 16 << 10
 )
 
 const externalNativeQUICWait = 5 * time.Second
@@ -78,28 +81,37 @@ type publicPortmap interface {
 }
 
 type envelope struct {
-	Type          string                    `json:"type"`
-	Claim         *rendezvous.Claim         `json:"claim,omitempty"`
-	Decision      *rendezvous.Decision      `json:"decision,omitempty"`
-	Control       *transport.ControlMessage `json:"control,omitempty"`
-	QUICModeReq   *quicModeRequest          `json:"quic_mode_request,omitempty"`
-	QUICModeResp  *quicModeResponse         `json:"quic_mode_response,omitempty"`
-	QUICModeAck   *quicModeAck              `json:"quic_mode_ack,omitempty"`
-	QUICModeReady *quicModeReady            `json:"quic_mode_ready,omitempty"`
+	Type               string                    `json:"type"`
+	Claim              *rendezvous.Claim         `json:"claim,omitempty"`
+	Decision           *rendezvous.Decision      `json:"decision,omitempty"`
+	Control            *transport.ControlMessage `json:"control,omitempty"`
+	QUICModeReq        *quicModeRequest          `json:"quic_mode_request,omitempty"`
+	QUICModeResp       *quicModeResponse         `json:"quic_mode_response,omitempty"`
+	QUICModeAck        *quicModeAck              `json:"quic_mode_ack,omitempty"`
+	QUICModeReady      *quicModeReady            `json:"quic_mode_ready,omitempty"`
+	ParallelGrowReq    *parallelGrowRequest      `json:"parallel_grow_request,omitempty"`
+	ParallelGrowAck    *parallelGrowAck          `json:"parallel_grow_ack,omitempty"`
+	ParallelGrowResult *parallelGrowResult       `json:"parallel_grow_result,omitempty"`
 }
 
 type quicModeRequest struct {
-	NativeDirect   bool   `json:"native_direct"`
-	NativeTCP      bool   `json:"native_tcp,omitempty"`
-	DirectAddr     string `json:"direct_addr,omitempty"`
-	NativeTCPConns int    `json:"native_tcp_conns,omitempty"`
+	NativeDirect    bool   `json:"native_direct"`
+	NativeTCP       bool   `json:"native_tcp,omitempty"`
+	DirectAddr      string `json:"direct_addr,omitempty"`
+	NativeTCPConns  int    `json:"native_tcp_conns,omitempty"`
+	ParallelMode    string `json:"parallel_mode,omitempty"`
+	ParallelInitial int    `json:"parallel_initial,omitempty"`
+	ParallelCap     int    `json:"parallel_cap,omitempty"`
 }
 
 type quicModeResponse struct {
-	NativeDirect   bool   `json:"native_direct"`
-	NativeTCP      bool   `json:"native_tcp,omitempty"`
-	DirectAddr     string `json:"direct_addr,omitempty"`
-	NativeTCPConns int    `json:"native_tcp_conns,omitempty"`
+	NativeDirect    bool   `json:"native_direct"`
+	NativeTCP       bool   `json:"native_tcp,omitempty"`
+	DirectAddr      string `json:"direct_addr,omitempty"`
+	NativeTCPConns  int    `json:"native_tcp_conns,omitempty"`
+	ParallelMode    string `json:"parallel_mode,omitempty"`
+	ParallelInitial int    `json:"parallel_initial,omitempty"`
+	ParallelCap     int    `json:"parallel_cap,omitempty"`
 }
 
 type quicModeAck struct {
@@ -109,6 +121,23 @@ type quicModeAck struct {
 
 type quicModeReady struct {
 	NativeDirect bool `json:"native_direct"`
+}
+
+type parallelGrowRequest struct {
+	Target        int        `json:"target"`
+	CandidateSets [][]string `json:"candidate_sets,omitempty"`
+}
+
+type parallelGrowAck struct {
+	Target        int        `json:"target"`
+	Ready         bool       `json:"ready"`
+	CandidateSets [][]string `json:"candidate_sets,omitempty"`
+}
+
+type parallelGrowResult struct {
+	Target  int  `json:"target"`
+	Ready   bool `json:"ready"`
+	Applied int  `json:"applied,omitempty"`
 }
 
 type remoteCandidateSeeder interface {
@@ -294,6 +323,7 @@ func sendExternal(ctx context.Context, cfg SendConfig) error {
 			LocalPublic:  clientIdentity.Public,
 			PeerPublic:   tok.QUICPublic,
 		},
+		cfg.ParallelPolicy,
 		cfg.ForceRelay,
 	)
 
@@ -316,6 +346,8 @@ func sendExternal(ctx context.Context, cfg SendConfig) error {
 		ctx,
 		cfg,
 		quicConn,
+		derpClient,
+		listenerDERP,
 		ackCh,
 		pathEmitter,
 		transportManager,
@@ -333,6 +365,8 @@ func runExternalSendStream(
 	ctx context.Context,
 	cfg SendConfig,
 	quicConn *quic.Conn,
+	derpClient *derpbind.Client,
+	peerDERP key.NodePublic,
 	ackCh <-chan derpbind.Packet,
 	pathEmitter *transportPathEmitter,
 	transportManager *transport.Manager,
@@ -488,7 +522,7 @@ func runExternalSendStream(
 				cfg.Emitter,
 				clientTLSConfig,
 				serverTLSConfig,
-				externalNativeQUICConnCount(),
+				externalParallelQUICConnCount(modeResult.parallelPolicy),
 			)
 			if err != nil || nativeQUICSession == nil || nativeQUICSession.setupFallback {
 				nativeQUICSetupCh <- externalNativeQUICSendSetupResult{
@@ -619,7 +653,21 @@ func runExternalSendStream(
 			cfg.Emitter.Debug("sender-quic-direct")
 		}
 		externalTransferTracef("sender-native-quic-copy-start conns=%d acked=%d", len(nativeQUICSetup.streams), spool.AckedWatermark())
-		if err := sendExternalHandoffCarriers(ctx, nativeQUICSetup.streams, spool); err != nil {
+		runtime := newExternalHandoffSendRuntime(ctx, spool)
+		for _, stream := range nativeQUICSetup.streams {
+			if err := runtime.Add(stream); err != nil {
+				closeExternalNativeQUICSendSetupResult(nativeQUICSetup)
+				return err
+			}
+		}
+		var growthDone <-chan struct{}
+		if modeResult.parallelPolicy.Mode == ParallelModeAuto {
+			growthDone = startParallelAutoGrowthLoop(ctx, derpClient, peerDERP, nativeQUICSetup.session, runtime, spool, modeResult.parallelPolicy, cfg.Emitter)
+		}
+		if growthDone != nil {
+			<-growthDone
+		}
+		if err := runtime.CloseAndWait(); err != nil {
 			closeExternalNativeQUICSendSetupResult(nativeQUICSetup)
 			return err
 		}
@@ -767,7 +815,7 @@ func runExternalListenStream(
 					cfg.Emitter,
 					clientTLSConfig,
 					serverTLSConfig,
-					externalNativeQUICConnCount(),
+					externalParallelQUICConnCount(modeResult.parallelPolicy),
 				)
 				if err == nil && nativeQUICSession != nil && !nativeQUICSession.setupFallback {
 					err = signalExternalNativeQUICReceiverReady(
@@ -864,7 +912,24 @@ func runExternalListenStream(
 				cfg.Emitter.Debug("listener-quic-direct")
 			}
 			externalTransferTracef("listener-native-quic-copy-start conns=%d watermark=%d", len(nativeQUICSetup.streams), rx.Watermark())
-			if err := receiveExternalHandoffNativeQUICStreams(ctx, nativeQUICSetup.streams, rx); err != nil {
+			runtime := newExternalHandoffReceiveRuntime(ctx, rx)
+			for _, stream := range nativeQUICSetup.streams {
+				if err := runtime.Add(stream); err != nil {
+					return err
+				}
+			}
+			growthCtx, growthCancel := context.WithCancel(ctx)
+			var growthDone <-chan struct{}
+			if modeResult.parallelPolicy.Mode == ParallelModeAuto {
+				growthDone = startParallelGrowthRequestHandler(growthCtx, derpClient, peerDERP, nativeQUICSetup.session, runtime, cfg.Emitter)
+			}
+			err := runtime.Wait()
+			growthCancel()
+			if growthDone != nil {
+				<-growthDone
+			}
+			runtime.Close()
+			if err != nil {
 				return err
 			}
 			externalTransferTracef("listener-native-quic-copy-complete watermark=%d", rx.Watermark())
@@ -929,7 +994,7 @@ func runExternalListenStream(
 				cfg.Emitter,
 				clientTLSConfig,
 				serverTLSConfig,
-				externalNativeQUICConnCount(),
+				externalParallelQUICConnCount(modeResult.parallelPolicy),
 			)
 			if err != nil {
 				return err
@@ -942,7 +1007,24 @@ func runExternalListenStream(
 				cfg.Emitter.Debug("listener-quic-direct")
 			}
 			externalTransferTracef("listener-native-quic-copy-start conns=%d watermark=%d", len(nativeQUICStreams), rx.Watermark())
-			if err := receiveExternalHandoffNativeQUICStreams(ctx, nativeQUICStreams, rx); err != nil {
+			runtime := newExternalHandoffReceiveRuntime(ctx, rx)
+			for _, stream := range nativeQUICStreams {
+				if err := runtime.Add(stream); err != nil {
+					return err
+				}
+			}
+			growthCtx, growthCancel := context.WithCancel(ctx)
+			var growthDone <-chan struct{}
+			if modeResult.parallelPolicy.Mode == ParallelModeAuto {
+				growthDone = startParallelGrowthRequestHandler(growthCtx, derpClient, peerDERP, nativeQUICSession, runtime, cfg.Emitter)
+			}
+			err = runtime.Wait()
+			growthCancel()
+			if growthDone != nil {
+				<-growthDone
+			}
+			runtime.Close()
+			if err != nil {
 				return err
 			}
 			externalTransferTracef("listener-native-quic-copy-complete watermark=%d", rx.Watermark())
@@ -960,6 +1042,7 @@ type externalNativeDirectModeResult struct {
 	nativeQUIC     bool
 	nativeQUICAddr net.Addr
 	nativeTCPConns []net.Conn
+	parallelPolicy ParallelPolicy
 	err            error
 }
 
@@ -1077,17 +1160,19 @@ func requestExternalDirectModeAsync(
 	clientTLSConfig *tls.Config,
 	serverTLSConfig *tls.Config,
 	nativeTCPAuth externalNativeTCPAuth,
+	parallelPolicy ParallelPolicy,
 	forceRelay bool,
 ) <-chan externalNativeDirectModeResult {
 	_ = dm
 	_ = probeConn
 	resultCh := make(chan externalNativeDirectModeResult, 1)
 	go func() {
-		nativeQUIC, nativeTCPConns, nativeQUICAddr, err := requestExternalQUICMode(ctx, client, peerDERP, manager, localCandidates, emitter, clientTLSConfig, serverTLSConfig, nativeTCPAuth, forceRelay)
+		nativeQUIC, nativeTCPConns, nativeQUICAddr, resolvedPolicy, err := requestExternalQUICMode(ctx, client, peerDERP, manager, localCandidates, emitter, clientTLSConfig, serverTLSConfig, nativeTCPAuth, parallelPolicy, forceRelay)
 		resultCh <- externalNativeDirectModeResult{
 			nativeQUIC:     nativeQUIC,
 			nativeQUICAddr: nativeQUICAddr,
 			nativeTCPConns: nativeTCPConns,
+			parallelPolicy: resolvedPolicy,
 			err:            err,
 		}
 	}()
@@ -1109,7 +1194,7 @@ func acceptExternalDirectModeAsync(
 ) <-chan externalNativeDirectModeResult {
 	resultCh := make(chan externalNativeDirectModeResult, 1)
 	go func() {
-		nativeQUIC, nativeTCPConns, nativeQUICAddr, err := acceptExternalQUICMode(
+		nativeQUIC, nativeTCPConns, nativeQUICAddr, resolvedPolicy, err := acceptExternalQUICMode(
 			ctx,
 			client,
 			modeCh,
@@ -1126,6 +1211,7 @@ func acceptExternalDirectModeAsync(
 			nativeQUIC:     nativeQUIC,
 			nativeQUICAddr: nativeQUICAddr,
 			nativeTCPConns: nativeTCPConns,
+			parallelPolicy: resolvedPolicy,
 			err:            err,
 		}
 	}()
@@ -1174,14 +1260,6 @@ func receiveExternalHandoffNativeTCPConns(ctx context.Context, conns []net.Conn,
 	carriers := make([]io.ReadWriteCloser, 0, len(conns))
 	for _, conn := range conns {
 		carriers = append(carriers, conn)
-	}
-	return receiveExternalHandoffCarriers(ctx, carriers, rx)
-}
-
-func receiveExternalHandoffNativeQUICStreams(ctx context.Context, streams []*quic.Stream, rx *externalHandoffReceiver) error {
-	carriers := make([]io.ReadWriteCloser, 0, len(streams))
-	for _, stream := range streams {
-		carriers = append(carriers, stream)
 	}
 	return receiveExternalHandoffCarriers(ctx, carriers, rx)
 }
@@ -1462,11 +1540,13 @@ func requestExternalQUICMode(
 	clientTLSConfig *tls.Config,
 	serverTLSConfig *tls.Config,
 	nativeTCPAuth externalNativeTCPAuth,
+	parallelPolicy ParallelPolicy,
 	forceRelay bool,
-) (bool, []net.Conn, net.Addr, error) {
+) (bool, []net.Conn, net.Addr, ParallelPolicy, error) {
 	if forceRelay || manager == nil {
-		return false, nil, nil, nil
+		return false, nil, nil, ParallelPolicy{}, nil
 	}
+	parallelPolicy = parallelPolicy.normalized()
 
 	var localTCPListener net.Listener
 	localTCPAddr := ""
@@ -1495,13 +1575,16 @@ func requestExternalQUICMode(
 	if err := sendEnvelope(ctx, client, peerDERP, envelope{
 		Type: envelopeQUICModeReq,
 		QUICModeReq: &quicModeRequest{
-			NativeDirect:   true,
-			NativeTCP:      localTCPListener != nil,
-			DirectAddr:     localTCPAddr,
-			NativeTCPConns: externalNativeTCPConnCount(),
+			NativeDirect:    true,
+			NativeTCP:       localTCPListener != nil,
+			DirectAddr:      localTCPAddr,
+			NativeTCPConns:  externalParallelTCPConnCount(parallelPolicy),
+			ParallelMode:    string(parallelPolicy.Mode),
+			ParallelInitial: parallelPolicy.Initial,
+			ParallelCap:     parallelPolicy.Cap,
 		},
 	}); err != nil {
-		return false, nil, nil, err
+		return false, nil, nil, ParallelPolicy{}, err
 	}
 
 	modeCtx, cancel := context.WithTimeout(ctx, externalNativeQUICWait)
@@ -1522,12 +1605,16 @@ func requestExternalQUICMode(
 		if emitter != nil {
 			emitter.Debug("sender-tcp-response=none")
 		}
-		return false, nil, nil, nil
+		return false, nil, nil, ParallelPolicy{}, nil
 	}
 	if emitter != nil {
 		emitter.Debug("sender-tcp-response=" + strconv.FormatBool(resp.NativeTCP) + " addr=" + resp.DirectAddr)
 	}
 
+	resolvedPolicy := quicModeParallelPolicy(resp)
+	if resolvedPolicy.Mode == "" {
+		resolvedPolicy = parallelPolicy
+	}
 	var addr net.Addr
 	ok := false
 	if parsed := parseCandidateStrings([]string{resp.DirectAddr}); len(parsed) == 1 {
@@ -1547,7 +1634,7 @@ func requestExternalQUICMode(
 		if externalNativeTCPUseBearerAuth(localTCPListener.Addr(), addr) {
 			tcpTLSConfig = nil
 		}
-		connCount := externalNativeTCPHandshakeConnCount(resp.NativeTCPConns, externalNativeTCPConnCount())
+		connCount := externalNativeTCPHandshakeConnCount(resp.NativeTCPConns, externalParallelTCPConnCount(parallelPolicy))
 		if connCount > 1 {
 			nativeTCPConns, err = connectExternalNativeTCPConns(modeCtx, localTCPListener, addr, tcpTLSConfig, nativeTCPAuth, 0, connCount)
 			if err == nil && emitter != nil {
@@ -1577,19 +1664,19 @@ func requestExternalQUICMode(
 	}
 	if err := sendEnvelope(ctx, client, peerDERP, ackEnv); err != nil {
 		closeExternalNativeTCPConns(nativeTCPConns)
-		return false, nil, nil, err
+		return false, nil, nil, resolvedPolicy, err
 	}
 	if !resp.NativeDirect || !ok || addr == nil {
 		if len(nativeTCPConns) > 0 {
 			localTCPListener = nil
-			return false, nativeTCPConns, nil, nil
+			return false, nativeTCPConns, nil, resolvedPolicy, nil
 		}
 		closeExternalNativeTCPConns(nativeTCPConns)
-		return false, nil, nil, nil
+		return false, nil, nil, resolvedPolicy, nil
 	}
 	if len(nativeTCPConns) > 0 {
 		localTCPListener = nil
-		return true, nativeTCPConns, cloneSessionAddr(addr), nil
+		return true, nativeTCPConns, cloneSessionAddr(addr), resolvedPolicy, nil
 	}
 	readyCtx, readyCancel := context.WithTimeout(ctx, externalNativeQUICWait)
 	defer readyCancel()
@@ -1599,11 +1686,11 @@ func requestExternalQUICMode(
 	if err != nil || !ready.NativeDirect {
 		closeExternalNativeTCPConns(nativeTCPConns)
 		if errors.Is(err, context.Canceled) {
-			return false, nil, nil, ctx.Err()
+			return false, nil, nil, resolvedPolicy, ctx.Err()
 		}
-		return false, nil, nil, nil
+		return false, nil, nil, resolvedPolicy, nil
 	}
-	return true, nativeTCPConns, cloneSessionAddr(addr), nil
+	return true, nativeTCPConns, cloneSessionAddr(addr), resolvedPolicy, nil
 }
 
 func acceptExternalQUICMode(
@@ -1618,7 +1705,7 @@ func acceptExternalQUICMode(
 	clientTLSConfig *tls.Config,
 	serverTLSConfig *tls.Config,
 	nativeTCPAuth externalNativeTCPAuth,
-) (bool, []net.Conn, net.Addr, error) {
+) (bool, []net.Conn, net.Addr, ParallelPolicy, error) {
 	modeCtx, cancel := context.WithTimeout(ctx, externalNativeQUICWait)
 	defer cancel()
 
@@ -1634,12 +1721,16 @@ func acceptExternalQUICMode(
 	req, err := receiveQUICModeRequest(modeCtx, modeCh)
 	if err != nil {
 		if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, net.ErrClosed) {
-			return false, nil, nil, nil
+			return false, nil, nil, ParallelPolicy{}, nil
 		}
 		if errors.Is(err, context.Canceled) {
-			return false, nil, nil, ctx.Err()
+			return false, nil, nil, ParallelPolicy{}, ctx.Err()
 		}
-		return false, nil, nil, nil
+		return false, nil, nil, ParallelPolicy{}, nil
+	}
+	requestedPolicy := quicModeParallelPolicy(req)
+	if requestedPolicy.Mode == "" {
+		requestedPolicy = DefaultParallelPolicy()
 	}
 	if emitter != nil {
 		emitter.Debug("listener-tcp-request=" + strconv.FormatBool(req.NativeTCP) + " addr=" + req.DirectAddr)
@@ -1681,7 +1772,7 @@ func acceptExternalQUICMode(
 	if req.NativeDirect && !forceRelay && nativeTCPListener == nil {
 		peerDirectAddr, ok, aborted := waitForExternalDirectAddrOrModeAbort(ctx, manager, modeAbortCh, externalNativeQUICWait)
 		if aborted {
-			return false, nil, nil, nil
+			return false, nil, nil, ParallelPolicy{}, nil
 		}
 		if ok {
 			nativeQUIC = true
@@ -1714,22 +1805,33 @@ func acceptExternalQUICMode(
 	if emitter != nil && nativeTCPListener != nil && !nativeQUIC {
 		emitter.Debug("listener-tcp-selected=" + quicModeDirectAddrString(nativeTCPAddr))
 	}
+	resolvedPolicy := requestedPolicy
+	if nativeQUIC && nativeQUICPeerAddr != nil {
+		resolvedPolicy.Initial = externalNativeQUICConnCountForPeer(nativeQUICPeerAddr, resolvedPolicy.Initial)
+		resolvedPolicy.Cap = externalNativeQUICConnCountForPeer(nativeQUICPeerAddr, resolvedPolicy.Cap)
+		if resolvedPolicy.Cap < resolvedPolicy.Initial {
+			resolvedPolicy.Cap = resolvedPolicy.Initial
+		}
+	}
 	if err := sendEnvelope(ctx, client, peerDERP, envelope{
 		Type: envelopeQUICModeResp,
 		QUICModeResp: &quicModeResponse{
-			NativeDirect:   nativeQUIC,
-			NativeTCP:      nativeTCPListener != nil && nativeTCPPeerAddr != nil,
-			DirectAddr:     quicModeDirectAddrString(nativeQUICModeResponseAddr(nativeQUICAddr, nativeTCPAddr, nativeTCPListener != nil && nativeTCPPeerAddr != nil)),
-			NativeTCPConns: externalNativeTCPHandshakeConnCount(req.NativeTCPConns, externalNativeTCPConnCount()),
+			NativeDirect:    nativeQUIC,
+			NativeTCP:       nativeTCPListener != nil && nativeTCPPeerAddr != nil,
+			DirectAddr:      quicModeDirectAddrString(nativeQUICModeResponseAddr(nativeQUICAddr, nativeTCPAddr, nativeTCPListener != nil && nativeTCPPeerAddr != nil)),
+			NativeTCPConns:  externalNativeTCPHandshakeConnCount(req.NativeTCPConns, externalNativeTCPConnCount()),
+			ParallelMode:    string(resolvedPolicy.Mode),
+			ParallelInitial: resolvedPolicy.Initial,
+			ParallelCap:     resolvedPolicy.Cap,
 		},
 	}); err != nil {
 		if nativeTCPListener != nil {
 			_ = nativeTCPListener.Close()
 		}
-		return false, nil, nil, err
+		return false, nil, nil, resolvedPolicy, err
 	}
 	if !nativeQUIC && nativeTCPListener == nil {
-		return false, nil, nil, nil
+		return false, nil, nil, resolvedPolicy, nil
 	}
 
 	type nativeTCPResult struct {
@@ -1778,7 +1880,7 @@ func acceptExternalQUICMode(
 			result := <-nativeTCPConnCh
 			closeExternalNativeTCPConns(result.conns)
 		}
-		return false, nil, nil, nil
+		return false, nil, nil, resolvedPolicy, nil
 	}
 	if nativeTCPListener != nil && (!ack.NativeTCP || nativeTCPPeerAddr == nil) {
 		if emitter != nil {
@@ -1792,27 +1894,27 @@ func acceptExternalQUICMode(
 			closeExternalNativeTCPConns(result.conns)
 		}
 		if !nativeQUIC {
-			return false, nil, nil, nil
+			return false, nil, nil, resolvedPolicy, nil
 		}
 		if _, err := sendExternalQUICModeReady(ctx, client, peerDERP, manager, nativeQUICAddr); err != nil {
-			return false, nil, nil, err
+			return false, nil, nil, resolvedPolicy, err
 		}
-		return nativeQUIC, nil, cloneSessionAddr(nativeQUICPeerAddr), nil
+		return nativeQUIC, nil, cloneSessionAddr(nativeQUICPeerAddr), resolvedPolicy, nil
 	}
 	if nativeTCPListener == nil {
 		if !nativeQUIC {
-			return false, nil, nil, nil
+			return false, nil, nil, resolvedPolicy, nil
 		}
 		if _, err := sendExternalQUICModeReady(ctx, client, peerDERP, manager, nativeQUICAddr); err != nil {
-			return false, nil, nil, err
+			return false, nil, nil, resolvedPolicy, err
 		}
-		return nativeQUIC, nil, cloneSessionAddr(nativeQUICPeerAddr), nil
+		return nativeQUIC, nil, cloneSessionAddr(nativeQUICPeerAddr), resolvedPolicy, nil
 	}
 	result := <-nativeTCPConnCh
 	if result.err != nil {
-		return false, nil, nil, result.err
+		return false, nil, nil, resolvedPolicy, result.err
 	}
-	return nativeQUIC, result.conns, cloneSessionAddr(nativeQUICPeerAddr), nil
+	return nativeQUIC, result.conns, cloneSessionAddr(nativeQUICPeerAddr), resolvedPolicy, nil
 }
 
 func sendExternalQUICModeReady(
@@ -2175,6 +2277,49 @@ func sendClaimAndReceiveDecision(
 
 func sendTransportControl(ctx context.Context, client *derpbind.Client, dst key.NodePublic, msg transport.ControlMessage) error {
 	return sendEnvelope(ctx, client, dst, envelope{Type: envelopeControl, Control: &msg})
+}
+
+func quicModeParallelPolicy(msg interface {
+	getParallelMode() string
+	getParallelInitial() int
+	getParallelCap() int
+}) ParallelPolicy {
+	return parallelPolicyFromFields(msg.getParallelMode(), msg.getParallelInitial(), msg.getParallelCap())
+}
+
+func parallelPolicyFromFields(mode string, initial, cap int) ParallelPolicy {
+	switch ParallelMode(mode) {
+	case ParallelModeFixed:
+		return FixedParallelPolicy(initial).normalized()
+	case ParallelModeAuto:
+		policy := AutoParallelPolicy()
+		if initial > 0 {
+			policy.Initial = initial
+		}
+		if cap > 0 {
+			policy.Cap = cap
+		}
+		return policy.normalized()
+	default:
+		return ParallelPolicy{}
+	}
+}
+
+func (m quicModeRequest) getParallelMode() string  { return m.ParallelMode }
+func (m quicModeRequest) getParallelInitial() int  { return m.ParallelInitial }
+func (m quicModeRequest) getParallelCap() int      { return m.ParallelCap }
+func (m quicModeResponse) getParallelMode() string { return m.ParallelMode }
+func (m quicModeResponse) getParallelInitial() int { return m.ParallelInitial }
+func (m quicModeResponse) getParallelCap() int     { return m.ParallelCap }
+
+func externalParallelQUICConnCount(policy ParallelPolicy) int {
+	policy = policy.normalized()
+	return policy.Initial
+}
+
+func externalParallelTCPConnCount(policy ParallelPolicy) int {
+	policy = policy.normalized()
+	return policy.Initial
 }
 
 func receiveTransportControl(ctx context.Context, ch <-chan derpbind.Packet) (transport.ControlMessage, error) {
@@ -2543,6 +2688,30 @@ func isQUICModeReadyPayload(payload []byte) bool {
 	return err == nil && env.Type == envelopeQUICModeReady && env.QUICModeReady != nil
 }
 
+func isParallelGrowRequestPayload(payload []byte) bool {
+	if len(payload) == 0 || payload[0] != '{' {
+		return false
+	}
+	env, err := decodeEnvelope(payload)
+	return err == nil && env.Type == envelopeParallelGrowReq && env.ParallelGrowReq != nil
+}
+
+func isParallelGrowAckPayload(payload []byte) bool {
+	if len(payload) == 0 || payload[0] != '{' {
+		return false
+	}
+	env, err := decodeEnvelope(payload)
+	return err == nil && env.Type == envelopeParallelGrowAck && env.ParallelGrowAck != nil
+}
+
+func isParallelGrowResultPayload(payload []byte) bool {
+	if len(payload) == 0 || payload[0] != '{' {
+		return false
+	}
+	env, err := decodeEnvelope(payload)
+	return err == nil && env.Type == envelopeParallelGrowResult && env.ParallelGrowResult != nil
+}
+
 func isDecisionPayload(payload []byte) bool {
 	if len(payload) == 0 || payload[0] != '{' {
 		return false
@@ -2559,7 +2728,10 @@ func isTransportDataPayload(payload []byte) bool {
 		!isQUICModeRequestPayload(payload) &&
 		!isQUICModeResponsePayload(payload) &&
 		!isQUICModeAckPayload(payload) &&
-		!isQUICModeReadyPayload(payload)
+		!isQUICModeReadyPayload(payload) &&
+		!isParallelGrowRequestPayload(payload) &&
+		!isParallelGrowAckPayload(payload) &&
+		!isParallelGrowResultPayload(payload)
 }
 
 func relayTransportAddr() net.Addr {

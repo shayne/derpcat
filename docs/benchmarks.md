@@ -15,6 +15,8 @@ Use the checked-in harnesses first:
 
 `promotion-test.sh` is the main throughput benchmark for one-shot `listen/send`. It verifies byte count, SHA-256, path transition logs, and now fails if any `derpcat` process or UDP socket survives after cleanup.
 
+When comparing direct-path striping, forward the same CLI flag family used by `send` and `open` through the harness with `DERPCAT_PARALLEL_ARGS`. The harness passes those args to the active side only: local `send/open` in forward runs and remote `send/open` in reverse runs. The passive side follows the active side's negotiated request.
+
 ## Baseline Comparisons
 
 Measure raw network capacity separately before blaming tunnel overhead.
@@ -35,6 +37,12 @@ For no-Tailscale route verification, run 3x averaged 1 GiB transfers in both dir
 - `pve1` -> Mac
 
 Default production runs already skip `100.64.0.0/10` and `fd7a:115c:a1e0::/48` candidates so transport stays independent from Tailscale routes. Use `./scripts/promotion-matrix-no-tailscale.sh 1024` for the public-Internet/private-LAN matrix, and use `DERPCAT_ENABLE_TAILSCALE_CANDIDATES=1 ./scripts/promotion-test.sh <host> 1024` only when you intentionally want to compare the old over-Tailscale route. `DERPCAT_TEST_DISABLE_TAILSCALE_CANDIDATES=1` remains available as an explicit guardrail for internet-only tests. For `pve1`, same-LAN private routing is expected because `pve1` and this Mac are on the same LAN.
+
+Examples:
+
+- `DERPCAT_TEST_DISABLE_TAILSCALE_CANDIDATES=1 DERPCAT_PARALLEL_ARGS='--parallel=8' ./scripts/promotion-test.sh ktzlxc 1024`
+- `DERPCAT_TEST_DISABLE_TAILSCALE_CANDIDATES=1 DERPCAT_PARALLEL_ARGS='--parallel=auto' ./scripts/promotion-test.sh canlxc 1024`
+- `DERPCAT_TEST_DISABLE_TAILSCALE_CANDIDATES=1 DERPCAT_PARALLEL_ARGS='--parallel=8' ./scripts/promotion-test-reverse.sh ktzlxc 1024`
 
 ## Cleanup Guardrails
 

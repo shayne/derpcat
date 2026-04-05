@@ -48,6 +48,7 @@ var externalNativeQUICStripeProbeCandidates = publicProbeCandidates
 var externalNativeQUICStripeCanUseLocalAddrCandidate = externalNativeQUICStripeCanUseLocalAddrCandidateDefault
 
 type externalNativeQUICStripedSession struct {
+	mu            sync.Mutex
 	setupFallback bool
 	packetConns   []net.PacketConn
 	transports    []*quic.Transport
@@ -55,6 +56,34 @@ type externalNativeQUICStripedSession struct {
 	openStreams   []bool
 	portmaps      []publicPortmap
 	primaryStream *quic.Stream
+	peerAddr      net.Addr
+	derpMap       *tailcfg.DERPMap
+	emitter       *telemetry.Emitter
+	clientTLS     *tls.Config
+	serverTLS     *tls.Config
+	preferDial    bool
+}
+
+type externalNativeQUICGrowthPlan struct {
+	target        int
+	packetConns   []net.PacketConn
+	portmaps      []publicPortmap
+	candidateSets [][]string
+}
+
+type externalNativeQUICGrowthResult struct {
+	plan        *externalNativeQUICGrowthPlan
+	transports  []*quic.Transport
+	conns       []*quic.Conn
+	openStreams []bool
+	streams     []io.ReadWriteCloser
+}
+
+func closeExternalNativeQUICGrowthPlan(plan *externalNativeQUICGrowthPlan) {
+	if plan == nil {
+		return
+	}
+	closeExternalNativeQUICStripePacketConns(plan.packetConns, plan.portmaps)
 }
 
 type externalNativeQUICStripeSetup struct {
@@ -79,6 +108,125 @@ func (s *externalNativeQUICStripedSession) Close() {
 	for _, packetConn := range s.packetConns {
 		_ = packetConn.Close()
 	}
+}
+
+func (s *externalNativeQUICStripedSession) StripeCount() int {
+	if s == nil {
+		return 0
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.conns)
+}
+
+func (s *externalNativeQUICStripedSession) PrepareGrowth(ctx context.Context, target int) (*externalNativeQUICGrowthPlan, error) {
+	if s == nil {
+		return nil, errors.New("nil native QUIC session")
+	}
+	s.mu.Lock()
+	current := len(s.conns)
+	peerAddr := cloneSessionAddr(s.peerAddr)
+	dm := s.derpMap
+	emitter := s.emitter
+	s.mu.Unlock()
+	if target <= current {
+		return nil, nil
+	}
+	extraCount := target - current
+	packetConns, portmaps, candidateSets, err := openExternalNativeQUICStripePacketConns(ctx, peerAddr, dm, emitter, extraCount)
+	if err != nil {
+		return nil, err
+	}
+	return &externalNativeQUICGrowthPlan{
+		target:        target,
+		packetConns:   packetConns,
+		portmaps:      portmaps,
+		candidateSets: candidateSets,
+	}, nil
+}
+
+func (s *externalNativeQUICStripedSession) OpenGrowth(ctx context.Context, plan *externalNativeQUICGrowthPlan, peerCandidateSets [][]string) (*externalNativeQUICGrowthResult, error) {
+	if s == nil {
+		return nil, errors.New("nil native QUIC session")
+	}
+	if plan == nil {
+		return nil, nil
+	}
+	s.mu.Lock()
+	peerAddr := cloneSessionAddr(s.peerAddr)
+	clientTLS := s.clientTLS
+	serverTLS := s.serverTLS
+	preferDial := s.preferDial
+	emitter := s.emitter
+	s.mu.Unlock()
+	transports, conns, openStreams, ready := openExternalNativeQUICStripeConns(
+		ctx,
+		peerAddr,
+		plan.packetConns,
+		peerCandidateSets,
+		clientTLS,
+		serverTLS,
+		preferDial,
+		"native-quic-grow-ready",
+		"native-quic-grow-fallback err=",
+		emitter,
+	)
+	if !ready {
+		return nil, errors.New("native QUIC growth setup failed")
+	}
+	growthSession := &externalNativeQUICStripedSession{
+		conns:       conns,
+		openStreams: openStreams,
+	}
+	streams, err := growthSession.OpenReadWriteStreams(ctx)
+	if err != nil {
+		closeExternalNativeQUICConns(conns)
+		for _, transport := range transports {
+			if transport != nil {
+				_ = transport.Close()
+			}
+		}
+		return nil, err
+	}
+	return &externalNativeQUICGrowthResult{
+		plan:        plan,
+		transports:  transports,
+		conns:       conns,
+		openStreams: openStreams,
+		streams:     streams,
+	}, nil
+}
+
+func (s *externalNativeQUICStripedSession) CommitGrowth(growth *externalNativeQUICGrowthResult) int {
+	if s == nil || growth == nil {
+		return s.StripeCount()
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.packetConns = append(s.packetConns, growth.plan.packetConns...)
+	s.portmaps = append(s.portmaps, growth.plan.portmaps...)
+	s.transports = append(s.transports, growth.transports...)
+	s.conns = append(s.conns, growth.conns...)
+	s.openStreams = append(s.openStreams, growth.openStreams...)
+	return len(s.conns)
+}
+
+func closeExternalNativeQUICGrowthResult(growth *externalNativeQUICGrowthResult) {
+	if growth == nil {
+		return
+	}
+	for _, stream := range growth.streams {
+		if stream != nil {
+			_ = stream.Close()
+		}
+	}
+	closeExternalNativeQUICConns(growth.conns)
+	for _, transport := range growth.transports {
+		if transport != nil {
+			_ = transport.Close()
+		}
+	}
+	closeExternalNativeQUICGrowthPlan(growth.plan)
 }
 
 func (s *externalNativeQUICStripedSession) OpenStreams(ctx context.Context) ([]io.WriteCloser, error) {
@@ -192,6 +340,12 @@ func dialExternalNativeQUICStripedConns(
 			transports:  []*quic.Transport{transport},
 			conns:       conns,
 			openStreams: externalNativeQUICStreamRoles(len(conns), openStreams),
+			peerAddr:    cloneSessionAddr(peerAddr),
+			derpMap:     dm,
+			emitter:     emitter,
+			clientTLS:   clientTLS,
+			serverTLS:   serverTLS,
+			preferDial:  true,
 		}, nil
 	}
 
@@ -212,6 +366,12 @@ func dialExternalNativeQUICStripedConns(
 		transports:  []*quic.Transport{primaryTransport},
 		conns:       []*quic.Conn{primaryConn},
 		openStreams: []bool{openPrimaryStream},
+		peerAddr:    cloneSessionAddr(peerAddr),
+		derpMap:     dm,
+		emitter:     emitter,
+		clientTLS:   clientTLS,
+		serverTLS:   serverTLS,
+		preferDial:  true,
 	}
 	if connCount == 1 {
 		if emitter != nil {
@@ -393,6 +553,12 @@ func acceptExternalNativeQUICStripedConns(
 			transports:  []*quic.Transport{transport},
 			conns:       conns,
 			openStreams: externalNativeQUICStreamRoles(len(conns), openStreams),
+			peerAddr:    cloneSessionAddr(peerAddr),
+			derpMap:     dm,
+			emitter:     emitter,
+			clientTLS:   clientTLS,
+			serverTLS:   serverTLS,
+			preferDial:  false,
 		}
 		if emitter != nil {
 			emitter.Debug(fmt.Sprintf("native-quic-stripes=%d", len(conns)))
@@ -421,6 +587,12 @@ func acceptExternalNativeQUICStripedConns(
 		transports:  []*quic.Transport{transport},
 		conns:       []*quic.Conn{conn},
 		openStreams: []bool{openPrimaryStream},
+		peerAddr:    cloneSessionAddr(peerAddr),
+		derpMap:     dm,
+		emitter:     emitter,
+		clientTLS:   clientTLS,
+		serverTLS:   serverTLS,
+		preferDial:  false,
 	}
 	externalTransferTracef("native-quic-accept-primary-ready")
 	if connCount > 1 {

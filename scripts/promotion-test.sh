@@ -26,6 +26,10 @@ if [[ "${DERPCAT_TRACE_HANDOFF:-}" == "1" ]]; then
   remote_env+=(DERPCAT_TRACE_HANDOFF=1)
 fi
 
+parallel_args=()
+if [[ -n "${DERPCAT_PARALLEL_ARGS:-}" ]]; then
+  read -r -a parallel_args <<<"${DERPCAT_PARALLEL_ARGS}"
+fi
 remote() {
   ssh "${remote_user}@${target}" "${remote_env[@]}" 'bash -se' <<<"$1"
 }
@@ -152,7 +156,7 @@ if [[ -z "${token}" ]]; then
 fi
 
 SECONDS=0
-./dist/derpcat --verbose send "${token}" <"${payload}" >/dev/null 2>"${send_log}"
+./dist/derpcat --verbose send "${parallel_args[@]}" "${token}" <"${payload}" >/dev/null 2>"${send_log}"
 duration="${SECONDS}"
 
 for _ in $(seq 1 400); do
