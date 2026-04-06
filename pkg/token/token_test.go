@@ -2,6 +2,7 @@ package token
 
 import (
 	"encoding/base64"
+	"net/netip"
 	"strings"
 	"testing"
 	"time"
@@ -135,7 +136,7 @@ func TestEncodeWireFormatContract(t *testing.T) {
 	if err != nil {
 		t.Fatalf("DecodeString() error = %v", err)
 	}
-	if got, want := len(raw), fixedPayloadSize+4; got != want {
+	if got, want := len(raw), fixedPayloadSizeV4+4; got != want {
 		t.Fatalf("raw length = %d, want %d", got, want)
 	}
 	decoded, err := Decode(encoded, time.Unix(tok.ExpiresUnix-1, 0))
@@ -171,6 +172,61 @@ func TestEncodeDecodeRoundTripPublicShareToken(t *testing.T) {
 
 	if decoded.QUICPublic != tok.QUICPublic {
 		t.Fatalf("QUICPublic = %x, want %x", decoded.QUICPublic, tok.QUICPublic)
+	}
+}
+
+func TestEncodeDecodeRoundTripWithNativeTCPBootstrap(t *testing.T) {
+	tok := Token{
+		Version:         SupportedVersion,
+		SessionID:       [16]byte{1, 2, 3, 4},
+		ExpiresUnix:     time.Now().Add(5 * time.Minute).Unix(),
+		BootstrapRegion: 12,
+		DERPPublic:      [32]byte{5, 6, 7, 8},
+		BearerSecret:    [32]byte{17, 18, 19, 20},
+		Capabilities:    CapabilityStdio | CapabilityShare,
+		QUICPublic:      [32]byte{21, 22, 23, 24},
+	}
+	wantAddr := netip.MustParseAddrPort("108.18.210.19:8321")
+	tok.SetNativeTCPBootstrapAddr(wantAddr)
+
+	encoded, err := Encode(tok)
+	if err != nil {
+		t.Fatalf("Encode() error = %v", err)
+	}
+	decoded, err := Decode(encoded, time.Now())
+	if err != nil {
+		t.Fatalf("Decode() error = %v", err)
+	}
+	if got, ok := decoded.NativeTCPBootstrapAddr(); !ok || got != wantAddr {
+		t.Fatalf("NativeTCPBootstrapAddr() = (%v, %v), want (%v, true)", got, ok, wantAddr)
+	}
+}
+
+func TestDecodeAcceptsLegacyVersion3Token(t *testing.T) {
+	tok := Token{
+		Version:         3,
+		SessionID:       [16]byte{1, 2, 3, 4},
+		ExpiresUnix:     time.Now().Add(5 * time.Minute).Unix(),
+		BootstrapRegion: 12,
+		DERPPublic:      [32]byte{5, 6, 7, 8},
+		BearerSecret:    [32]byte{17, 18, 19, 20},
+		Capabilities:    CapabilityStdio,
+		QUICPublic:      [32]byte{21, 22, 23, 24},
+	}
+
+	encoded, err := Encode(tok)
+	if err != nil {
+		t.Fatalf("Encode() error = %v", err)
+	}
+	decoded, err := Decode(encoded, time.Now())
+	if err != nil {
+		t.Fatalf("Decode() error = %v", err)
+	}
+	if decoded.Version != 3 {
+		t.Fatalf("Version = %d, want 3", decoded.Version)
+	}
+	if _, ok := decoded.NativeTCPBootstrapAddr(); ok {
+		t.Fatal("NativeTCPBootstrapAddr() ok = true, want false for legacy token")
 	}
 }
 

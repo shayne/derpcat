@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"hash/crc32"
+	"net/netip"
 	"time"
 )
 
@@ -23,6 +24,9 @@ type Token struct {
 	QUICPublic      [32]byte
 	BearerSecret    [32]byte
 	Capabilities    uint32
+	bootstrapIP     [16]byte
+	bootstrapPort   uint16
+	bootstrapFamily uint8
 }
 
 var (
@@ -32,13 +36,26 @@ var (
 	ErrInvalidLength      = errors.New("token invalid length")
 )
 
-const SupportedVersion uint8 = 3
-const fixedPayloadSize = 1 + 16 + 8 + 2 + 32 + 32 + 32 + 4
+const (
+	SupportedVersion uint8 = 4
+	legacyVersion    uint8 = 3
+)
+
+const (
+	bootstrapFamilyNone uint8 = 0
+	bootstrapFamilyV4   uint8 = 4
+	bootstrapFamilyV6   uint8 = 6
+)
+
+const (
+	fixedPayloadSizeV3 = 1 + 16 + 8 + 2 + 32 + 32 + 32 + 4
+	fixedPayloadSizeV4 = fixedPayloadSizeV3 + 1 + 16 + 2
+)
 
 func Encode(tok Token) (string, error) {
 	if tok.Version == 0 {
 		tok.Version = SupportedVersion
-	} else if tok.Version != SupportedVersion {
+	} else if tok.Version != legacyVersion && tok.Version != SupportedVersion {
 		return "", ErrUnsupportedVersion
 	}
 
@@ -67,6 +84,17 @@ func Encode(tok Token) (string, error) {
 	if err := binary.Write(&payload, binary.BigEndian, tok.Capabilities); err != nil {
 		return "", err
 	}
+	if tok.Version >= SupportedVersion {
+		if err := binary.Write(&payload, binary.BigEndian, tok.bootstrapFamily); err != nil {
+			return "", err
+		}
+		if _, err := payload.Write(tok.bootstrapIP[:]); err != nil {
+			return "", err
+		}
+		if err := binary.Write(&payload, binary.BigEndian, tok.bootstrapPort); err != nil {
+			return "", err
+		}
+	}
 
 	sum := crc32.ChecksumIEEE(payload.Bytes())
 	if err := binary.Write(&payload, binary.BigEndian, sum); err != nil {
@@ -88,10 +116,14 @@ func Decode(encoded string, now time.Time) (Token, error) {
 	}
 
 	tok.Version = raw[0]
-	if tok.Version != SupportedVersion {
+	if tok.Version != legacyVersion && tok.Version != SupportedVersion {
 		return tok, ErrUnsupportedVersion
 	}
-	if len(raw) < fixedPayloadSize+4 {
+	wantLen := fixedPayloadSizeV3 + 4
+	if tok.Version >= SupportedVersion {
+		wantLen = fixedPayloadSizeV4 + 4
+	}
+	if len(raw) < wantLen {
 		return tok, ErrInvalidLength
 	}
 
@@ -123,6 +155,17 @@ func Decode(encoded string, now time.Time) (Token, error) {
 	if err := binary.Read(r, binary.BigEndian, &tok.Capabilities); err != nil {
 		return tok, err
 	}
+	if tok.Version >= SupportedVersion {
+		if err := binary.Read(r, binary.BigEndian, &tok.bootstrapFamily); err != nil {
+			return tok, err
+		}
+		if _, err := r.Read(tok.bootstrapIP[:]); err != nil {
+			return tok, err
+		}
+		if err := binary.Read(r, binary.BigEndian, &tok.bootstrapPort); err != nil {
+			return tok, err
+		}
+	}
 	if r.Len() != 0 {
 		return tok, ErrInvalidLength
 	}
@@ -132,4 +175,45 @@ func Decode(encoded string, now time.Time) (Token, error) {
 	}
 
 	return tok, nil
+}
+
+func (tok *Token) SetNativeTCPBootstrapAddr(addr netip.AddrPort) {
+	if !addr.IsValid() {
+		tok.bootstrapFamily = bootstrapFamilyNone
+		tok.bootstrapIP = [16]byte{}
+		tok.bootstrapPort = 0
+		return
+	}
+	ip := addr.Addr().Unmap()
+	tok.bootstrapIP = [16]byte{}
+	if ip.Is4() {
+		tok.bootstrapFamily = bootstrapFamilyV4
+		tok.bootstrapIP = [16]byte{}
+		copy(tok.bootstrapIP[:4], ip.AsSlice())
+	} else {
+		tok.bootstrapFamily = bootstrapFamilyV6
+		tok.bootstrapIP = ip.As16()
+	}
+	tok.bootstrapPort = addr.Port()
+}
+
+func (tok Token) NativeTCPBootstrapAddr() (netip.AddrPort, bool) {
+	switch tok.bootstrapFamily {
+	case bootstrapFamilyV4:
+		var raw [4]byte
+		copy(raw[:], tok.bootstrapIP[:4])
+		addr := netip.AddrFrom4(raw)
+		if !addr.IsValid() || tok.bootstrapPort == 0 {
+			return netip.AddrPort{}, false
+		}
+		return netip.AddrPortFrom(addr, tok.bootstrapPort), true
+	case bootstrapFamilyV6:
+		addr := netip.AddrFrom16(tok.bootstrapIP)
+		if !addr.IsValid() || tok.bootstrapPort == 0 {
+			return netip.AddrPort{}, false
+		}
+		return netip.AddrPortFrom(addr, tok.bootstrapPort), true
+	default:
+		return netip.AddrPort{}, false
+	}
 }

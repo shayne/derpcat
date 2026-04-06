@@ -13,18 +13,24 @@ import (
 	"net/netip"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 )
 
 const externalNativeTCPDialFallbackDelay = 150 * time.Millisecond
-const externalNativeTCPCopyBufferSize = 1 << 20
+const externalNativeTCPCopyBufferSizeDefault = 1 << 20
 const defaultExternalNativeTCPConns = 2
 const externalNativeTCPBearerAuthSize = 32 + sha256.Size
+const externalNativeTCPBootstrapHelloSize = 1
 
 var externalNativeTCPBearerAuthDomain = []byte("derpcat-native-tcp-v1")
 
 var externalNativeTCPAddrAllowed = externalNativeTCPAddrAllowedDefault
 var externalNativeTCPListen = listenExternalNativeTCP
+
+const externalNativeTCPBindAddrEnv = "DERPCAT_NATIVE_TCP_BIND_ADDR"
+const externalNativeTCPAdvertiseAddrEnv = "DERPCAT_NATIVE_TCP_ADVERTISE_ADDR"
+const externalNativeTCPChunkSizeEnv = "DERPCAT_NATIVE_TCP_CHUNK_SIZE"
 
 type externalNativeTCPAuth struct {
 	Enabled      bool
@@ -55,6 +61,16 @@ func externalNativeTCPConnCount() int {
 	return defaultExternalNativeTCPConns
 }
 
+func externalNativeTCPCopyChunkSize() int {
+	if raw := os.Getenv(externalNativeTCPChunkSizeEnv); raw != "" {
+		size, err := strconv.Atoi(raw)
+		if err == nil && size > 0 {
+			return size
+		}
+	}
+	return externalNativeTCPCopyBufferSizeDefault
+}
+
 func externalNativeTCPHandshakeConnCount(peerCount, localCount int) int {
 	if localCount < 1 {
 		localCount = 1
@@ -63,6 +79,28 @@ func externalNativeTCPHandshakeConnCount(peerCount, localCount int) int {
 		return localCount
 	}
 	return peerCount
+}
+
+func externalNativeTCPPassiveConnCount(peerCount int) int {
+	localCap := externalNativeTCPConnCap()
+	if peerCount < 1 {
+		return externalNativeTCPConnCount()
+	}
+	if peerCount > localCap {
+		return localCap
+	}
+	return peerCount
+}
+
+func externalNativeTCPConnCap() int {
+	localCap := MaxParallelStripes
+	if raw := os.Getenv("DERPCAT_NATIVE_TCP_CONNS"); raw != "" {
+		count, err := strconv.Atoi(raw)
+		if err == nil && count > 0 && count < localCap {
+			localCap = count
+		}
+	}
+	return localCap
 }
 
 func listenExternalNativeTCP(addr net.Addr, tlsConfig *tls.Config) (net.Listener, error) {
@@ -81,6 +119,13 @@ func listenExternalNativeTCP(addr net.Addr, tlsConfig *tls.Config) (net.Listener
 }
 
 func listenExternalNativeTCPOnCandidates(addrs []net.Addr, tlsConfig *tls.Config) (net.Listener, bool) {
+	if ln, ok := listenExternalNativeTCPOnAddrs(externalNativeTCPBindOverrideAddrs(), tlsConfig); ok {
+		return ln, true
+	}
+	return listenExternalNativeTCPOnAddrs(addrs, tlsConfig)
+}
+
+func listenExternalNativeTCPOnAddrs(addrs []net.Addr, tlsConfig *tls.Config) (net.Listener, bool) {
 	for _, addr := range externalNativeTCPListenCandidates(addrs) {
 		if !externalNativeTCPAddrAllowed(addr) {
 			continue
@@ -101,6 +146,56 @@ func listenExternalNativeTCPOnCandidates(addrs []net.Addr, tlsConfig *tls.Config
 		return ln, true
 	}
 	return nil, false
+}
+
+func externalNativeTCPBindOverrideAddrs() []net.Addr {
+	return externalNativeTCPEnvAddrs(externalNativeTCPBindAddrEnv)
+}
+
+func selectExternalNativeTCPOfferAddr(localCandidates []net.Addr) net.Addr {
+	if overrides := externalNativeTCPBindOverrideAddrs(); len(overrides) > 0 {
+		for _, addr := range externalNativeTCPListenCandidates(overrides) {
+			if externalNativeTCPAddrAllowed(addr) {
+				return cloneSessionAddr(addr)
+			}
+		}
+	}
+	for _, addr := range externalNativeTCPListenCandidates(localCandidates) {
+		if externalNativeTCPAddrAllowed(addr) {
+			return cloneSessionAddr(addr)
+		}
+	}
+	return nil
+}
+
+func externalNativeTCPAdvertiseAddr(addr, peerAddr net.Addr) net.Addr {
+	overrides := externalNativeTCPEnvAddrs(externalNativeTCPAdvertiseAddrEnv)
+	if len(overrides) == 0 {
+		return cloneSessionAddr(addr)
+	}
+	if peerAddr != nil {
+		if selected := selectExternalNativeTCPRouteAddr(peerAddr, overrides); selected != nil {
+			return selected
+		}
+	}
+	return cloneSessionAddr(overrides[0])
+}
+
+func externalNativeTCPEnvAddrs(key string) []net.Addr {
+	raw := strings.TrimSpace(os.Getenv(key))
+	if raw == "" {
+		return nil
+	}
+	parts := strings.Split(raw, ",")
+	filtered := make([]string, 0, len(parts))
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		filtered = append(filtered, part)
+	}
+	return parseCandidateStrings(filtered)
 }
 
 func externalNativeTCPListenCandidates(addrs []net.Addr) []net.Addr {
@@ -324,18 +419,156 @@ func acceptExternalNativeTCP(ctx context.Context, ln net.Listener, auth external
 	}
 }
 
+func dialExternalNativeTCPBootstrapConns(ctx context.Context, addr net.Addr, tlsConfig *tls.Config, auth externalNativeTCPAuth, connCount int) ([]net.Conn, error) {
+	if connCount < 1 {
+		return nil, errors.New("native tcp bootstrap connection count must be positive")
+	}
+	firstConn, err := dialExternalNativeTCP(ctx, addr, tlsConfig, auth)
+	if err != nil {
+		return nil, err
+	}
+	acceptedCount, err := negotiateExternalNativeTCPBootstrapConnCount(ctx, firstConn, connCount)
+	if err != nil {
+		_ = firstConn.Close()
+		return nil, err
+	}
+	conns := []net.Conn{firstConn}
+	if acceptedCount == 1 {
+		return conns, nil
+	}
+	extraConns, err := dialExternalNativeTCPConns(ctx, addr, tlsConfig, auth, acceptedCount-1)
+	if err != nil {
+		closeExternalNativeTCPConns(conns)
+		return nil, err
+	}
+	return append(conns, extraConns...), nil
+}
+
+func acceptExternalNativeTCPBootstrapConns(ctx context.Context, ln net.Listener, auth externalNativeTCPAuth, localCap int) ([]net.Conn, error) {
+	defer ln.Close()
+	firstConn, err := acceptExternalNativeTCP(ctx, ln, auth)
+	if err != nil {
+		return nil, err
+	}
+	acceptedCount, err := acceptExternalNativeTCPBootstrapConnCount(ctx, firstConn, localCap)
+	if err != nil {
+		_ = firstConn.Close()
+		return nil, err
+	}
+	conns := []net.Conn{firstConn}
+	if acceptedCount == 1 {
+		return conns, nil
+	}
+	extraConns, err := acceptExternalNativeTCPConns(ctx, ln, auth, acceptedCount-1)
+	if err != nil {
+		closeExternalNativeTCPConns(conns)
+		return nil, err
+	}
+	return append(conns, extraConns...), nil
+}
+
+func negotiateExternalNativeTCPBootstrapConnCount(ctx context.Context, conn net.Conn, requestedCount int) (int, error) {
+	if err := writeExternalNativeTCPBootstrapHello(conn, requestedCount); err != nil {
+		return 0, err
+	}
+	acceptedCount, err := readExternalNativeTCPBootstrapHello(conn)
+	if err != nil {
+		return 0, err
+	}
+	if acceptedCount < 1 {
+		return 0, errors.New("native tcp bootstrap peer rejected all connections")
+	}
+	select {
+	case <-ctx.Done():
+		return 0, ctx.Err()
+	default:
+		return acceptedCount, nil
+	}
+}
+
+func acceptExternalNativeTCPBootstrapConnCount(ctx context.Context, conn net.Conn, localCap int) (int, error) {
+	requestedCount, err := readExternalNativeTCPBootstrapHello(conn)
+	if err != nil {
+		return 0, err
+	}
+	acceptedCount := requestedCount
+	if localCap > 0 && acceptedCount > localCap {
+		acceptedCount = localCap
+	}
+	if acceptedCount < 1 {
+		return 0, errors.New("native tcp bootstrap connection count must be positive")
+	}
+	if err := writeExternalNativeTCPBootstrapHello(conn, acceptedCount); err != nil {
+		return 0, err
+	}
+	select {
+	case <-ctx.Done():
+		return 0, ctx.Err()
+	default:
+		return acceptedCount, nil
+	}
+}
+
+func writeExternalNativeTCPBootstrapHello(conn net.Conn, connCount int) error {
+	if connCount < 1 || connCount > MaxParallelStripes {
+		return errors.New("native tcp bootstrap connection count out of range")
+	}
+	var msg [externalNativeTCPBootstrapHelloSize]byte
+	msg[0] = byte(connCount)
+	_, err := conn.Write(msg[:])
+	return err
+}
+
+func readExternalNativeTCPBootstrapHello(conn net.Conn) (int, error) {
+	var msg [externalNativeTCPBootstrapHelloSize]byte
+	if _, err := io.ReadFull(conn, msg[:]); err != nil {
+		return 0, err
+	}
+	connCount := int(msg[0])
+	if connCount < 1 || connCount > MaxParallelStripes {
+		return 0, errors.New("native tcp bootstrap connection count out of range")
+	}
+	return connCount, nil
+}
+
 func dialExternalNativeTCPConns(ctx context.Context, addr net.Addr, tlsConfig *tls.Config, auth externalNativeTCPAuth, connCount int) ([]net.Conn, error) {
 	if connCount < 1 {
 		return nil, errors.New("native tcp connection count must be positive")
 	}
-	conns := make([]net.Conn, 0, connCount)
-	for range connCount {
-		conn, err := dialExternalNativeTCP(ctx, addr, tlsConfig, auth)
-		if err != nil {
-			closeExternalNativeTCPConns(conns)
-			return nil, err
+	connCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	type dialResult struct {
+		idx  int
+		conn net.Conn
+		err  error
+	}
+	resultCh := make(chan dialResult, connCount)
+	for idx := range connCount {
+		go func(idx int) {
+			conn, err := dialExternalNativeTCP(connCtx, addr, tlsConfig, auth)
+			resultCh <- dialResult{idx: idx, conn: conn, err: err}
+		}(idx)
+	}
+	conns := make([]net.Conn, connCount)
+	var firstErr error
+	for i := 0; i < connCount; i++ {
+		result := <-resultCh
+		if result.err != nil {
+			if firstErr == nil {
+				firstErr = result.err
+				cancel()
+			}
+			continue
 		}
-		conns = append(conns, conn)
+		if firstErr != nil {
+			_ = result.conn.Close()
+			continue
+		}
+		conns[result.idx] = result.conn
+	}
+	if firstErr != nil {
+		closeExternalNativeTCPConns(conns)
+		return nil, firstErr
 	}
 	return conns, nil
 }
@@ -469,8 +702,9 @@ func copyExternalNativeTCP(ctx context.Context, dst io.Writer, src io.Reader) er
 		err error
 	}
 	resultCh := make(chan copyResult, 1)
+	chunkSize := externalNativeTCPCopyChunkSize()
 	go func() {
-		_, err := io.CopyBuffer(dst, src, make([]byte, externalNativeTCPCopyBufferSize))
+		_, err := io.CopyBuffer(dst, src, make([]byte, chunkSize))
 		resultCh <- copyResult{err: err}
 	}()
 
