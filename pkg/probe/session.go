@@ -23,10 +23,12 @@ type SendConfig struct {
 	Raw        bool
 	ChunkSize  int
 	WindowSize int
+	RunID      [16]byte
 }
 
 type ReceiveConfig struct {
-	Raw bool
+	Raw           bool
+	ExpectedRunID [16]byte
 }
 
 type TransferStats struct {
@@ -61,9 +63,12 @@ func Send(ctx context.Context, conn net.PacketConn, remoteAddr string, src io.Re
 	}
 
 	stats := TransferStats{StartedAt: time.Now()}
-	runID, err := newRunID()
-	if err != nil {
-		return TransferStats{}, err
+	runID := cfg.RunID
+	if isZeroRunID(runID) {
+		runID, err = newRunID()
+		if err != nil {
+			return TransferStats{}, err
+		}
 	}
 
 	buf := make([]byte, 64<<10)
@@ -197,6 +202,9 @@ func ReceiveToWriter(ctx context.Context, conn net.PacketConn, remoteAddr string
 		}
 		if !runIDSet {
 			if packet.Type != PacketTypeHello {
+				continue
+			}
+			if !isZeroRunID(cfg.ExpectedRunID) && packet.RunID != cfg.ExpectedRunID {
 				continue
 			}
 			runID = packet.RunID
