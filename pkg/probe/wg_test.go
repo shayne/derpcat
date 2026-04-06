@@ -3,6 +3,7 @@ package probe
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"io"
 	"net"
 	"strings"
@@ -80,6 +81,105 @@ func TestWireGuardTransferRejectsLegacyTransport(t *testing.T) {
 	})
 	if err == nil || !strings.Contains(err.Error(), "requires \"batched\" transport") {
 		t.Fatalf("ReceiveWireGuardToWriter() error = %v, want batched transport rejection", err)
+	}
+}
+
+func TestReceiveWireGuardParallelReturnsAfterExpectedBytesWithoutAllStreams(t *testing.T) {
+	ln, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+
+	payload := bytes.Repeat([]byte("parallel"), 1024)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		conn, err := net.Dial("tcp4", ln.Addr().String())
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		defer conn.Close()
+		if _, err := conn.Write(payload); err != nil {
+			t.Error(err)
+			return
+		}
+		time.Sleep(100 * time.Millisecond)
+	}()
+
+	stats, err := receiveWireGuardParallel(ctx, &TransferStats{StartedAt: time.Now()}, ln, io.Discard, WireGuardConfig{
+		Streams:   4,
+		SizeBytes: int64(len(payload)),
+	})
+	if err != nil {
+		t.Fatalf("receiveWireGuardParallel() error = %v", err)
+	}
+	if stats.BytesReceived != int64(len(payload)) {
+		t.Fatalf("BytesReceived = %d, want %d", stats.BytesReceived, len(payload))
+	}
+	<-done
+}
+
+func TestReceiveWireGuardParallelAcksAllStreamsAfterTargetReached(t *testing.T) {
+	ln, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+
+	const streams = 4
+	payload := bytes.Repeat([]byte("parallel-ack"), 2048)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	errCh := make(chan error, streams)
+	for i := 0; i < streams; i++ {
+		go func() {
+			conn, err := net.Dial("tcp4", ln.Addr().String())
+			if err != nil {
+				errCh <- err
+				return
+			}
+			defer conn.Close()
+			if _, err := conn.Write(payload); err != nil {
+				errCh <- err
+				return
+			}
+			if err := conn.(*net.TCPConn).CloseWrite(); err != nil {
+				errCh <- err
+				return
+			}
+			ack := make([]byte, len(wireGuardDrainAck))
+			if _, err := io.ReadFull(conn, ack); err != nil {
+				errCh <- err
+				return
+			}
+			if !bytes.Equal(ack, wireGuardDrainAck) {
+				errCh <- fmt.Errorf("ack = %q, want %q", ack, wireGuardDrainAck)
+				return
+			}
+			errCh <- nil
+		}()
+	}
+
+	stats, err := receiveWireGuardParallel(ctx, &TransferStats{StartedAt: time.Now()}, ln, io.Discard, WireGuardConfig{
+		Streams:   streams,
+		SizeBytes: int64(len(payload) * streams),
+	})
+	if err != nil {
+		t.Fatalf("receiveWireGuardParallel() error = %v", err)
+	}
+	if stats.BytesReceived != int64(len(payload)*streams) {
+		t.Fatalf("BytesReceived = %d, want %d", stats.BytesReceived, len(payload)*streams)
+	}
+	for i := 0; i < streams; i++ {
+		if err := <-errCh; err != nil {
+			t.Fatalf("stream %d error = %v", i+1, err)
+		}
 	}
 }
 

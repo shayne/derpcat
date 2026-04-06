@@ -139,6 +139,11 @@ func (r SSHRunner) ServerCommand(cfg ServerConfig) []string {
 	}
 	argv = append(argv,
 		r.target(),
+	)
+	if trace := strings.TrimSpace(os.Getenv("DERPCAT_PROBE_WG_TRACE")); trace != "" {
+		argv = append(argv, "env", "DERPCAT_PROBE_WG_TRACE="+trace)
+	}
+	argv = append(argv,
 		r.binaryPath(),
 		"server",
 		"--listen", listenAddr,
@@ -191,6 +196,11 @@ func (r SSHRunner) ClientCommand(cfg ClientConfig) []string {
 	}
 	argv = append(argv,
 		r.target(),
+	)
+	if trace := strings.TrimSpace(os.Getenv("DERPCAT_PROBE_WG_TRACE")); trace != "" {
+		argv = append(argv, "env", "DERPCAT_PROBE_WG_TRACE="+trace)
+	}
+	argv = append(argv,
 		r.binaryPath(),
 		"client",
 		"--mode", mode,
