@@ -7,6 +7,7 @@ import (
 	"io"
 	"math"
 	"net"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -170,6 +171,69 @@ func TestEffectiveWindowSizeAllowsLargerThanAckMask(t *testing.T) {
 	}
 }
 
+func TestMaxRetransmitBurst(t *testing.T) {
+	tests := []struct {
+		name         string
+		expiredCount int
+		maxBatch     int
+		want         int
+	}{
+		{name: "none", expiredCount: 0, maxBatch: 128, want: 0},
+		{name: "small floor", expiredCount: 4, maxBatch: 128, want: 4},
+		{name: "minimum burst", expiredCount: 40, maxBatch: 128, want: 8},
+		{name: "legacy floor ignores tiny maxBatch", expiredCount: 40, maxBatch: 1, want: 8},
+		{name: "upper cap", expiredCount: 400, maxBatch: 128, want: 32},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := maxRetransmitBurst(tt.expiredCount, tt.maxBatch); got != tt.want {
+				t.Fatalf("maxRetransmitBurst(%d, %d) = %d, want %d", tt.expiredCount, tt.maxBatch, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestRetransmitExpiredPrioritizesLowestSeqsAndLimitsBurst(t *testing.T) {
+	batcher := &recordingBatcher{maxBatch: 16}
+	peer := &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 9000}
+	now := time.Now().Add(-time.Second)
+	packets := make(map[uint64]*outboundPacket, 40)
+	for seq := uint64(0); seq < 40; seq++ {
+		packets[seq] = &outboundPacket{
+			seq:    seq,
+			wire:   []byte{byte(seq)},
+			sentAt: now,
+		}
+	}
+	var stats TransferStats
+	if err := retransmitExpired(context.Background(), batcher, peer, packets, 20*time.Millisecond, &stats); err != nil {
+		t.Fatalf("retransmitExpired() error = %v", err)
+	}
+	if got, want := len(batcher.writes), 8; got != want {
+		t.Fatalf("len(writes) = %d, want %d", got, want)
+	}
+	if got, want := batcher.writes, []uint64{0, 1, 2, 3, 4, 5, 6, 7}; !slices.Equal(got, want) {
+		t.Fatalf("writes = %v, want %v", got, want)
+	}
+	if got, want := stats.Retransmits, int64(8); got != want {
+		t.Fatalf("Retransmits = %d, want %d", got, want)
+	}
+	for seq, packet := range packets {
+		if seq < 8 {
+			if packet.attempts != 1 {
+				t.Fatalf("packet %d attempts = %d, want 1", seq, packet.attempts)
+			}
+			continue
+		}
+		if packet.attempts != 0 {
+			t.Fatalf("packet %d attempts = %d, want 0", seq, packet.attempts)
+		}
+		if !packet.sentAt.After(now) {
+			t.Fatalf("packet %d sentAt = %v, want after %v", seq, packet.sentAt, now)
+		}
+	}
+}
+
 func TestBlastTransferCompletesAcrossLoopback(t *testing.T) {
 	src := bytes.Repeat([]byte("blast"), 1<<15)
 	a, err := net.ListenPacket("udp4", "127.0.0.1:0")
@@ -216,6 +280,28 @@ func TestBlastTransferCompletesAcrossLoopback(t *testing.T) {
 	case <-ctx.Done():
 		t.Fatalf("timed out waiting for blast receive: %v", ctx.Err())
 	}
+}
+
+type recordingBatcher struct {
+	maxBatch int
+	writes   []uint64
+}
+
+func (b *recordingBatcher) Capabilities() TransportCaps { return TransportCaps{Kind: "recording"} }
+func (b *recordingBatcher) MaxBatch() int               { return b.maxBatch }
+
+func (b *recordingBatcher) WriteBatch(_ context.Context, _ net.Addr, packets [][]byte) (int, error) {
+	for _, packet := range packets {
+		if len(packet) == 0 {
+			continue
+		}
+		b.writes = append(b.writes, uint64(packet[0]))
+	}
+	return len(packets), nil
+}
+
+func (b *recordingBatcher) ReadBatch(context.Context, time.Duration, []batchReadBuffer) (int, error) {
+	return 0, errors.New("unexpected ReadBatch call")
 }
 
 func TestBlastTransferCompletesWhenFirstDonePacketIsDropped(t *testing.T) {
