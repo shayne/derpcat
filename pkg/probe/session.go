@@ -8,7 +8,6 @@ import (
 	"errors"
 	"io"
 	"net"
-	"sort"
 	"time"
 )
 
@@ -737,16 +736,8 @@ func retransmitExpired(ctx context.Context, batcher packetBatcher, peer net.Addr
 	if len(expired) == 0 {
 		return nil
 	}
-	sort.Slice(expired, func(i, j int) bool {
-		return expired[i].seq < expired[j].seq
-	})
-	limit := maxRetransmitBurst(len(expired), batcher.MaxBatch())
-	selected := expired
-	if limit < len(selected) {
-		selected = selected[:limit]
-	}
-	wires := make([][]byte, len(selected))
-	for i, packet := range selected {
+	wires := make([][]byte, len(expired))
+	for i, packet := range expired {
 		wires[i] = packet.wire
 	}
 	if _, err := batcher.WriteBatch(ctx, peer, wires); err != nil {
@@ -754,37 +745,12 @@ func retransmitExpired(ctx context.Context, batcher packetBatcher, peer net.Addr
 	}
 	now = time.Now()
 	for _, packet := range expired {
-		packet.sentAt = now
-	}
-	for _, packet := range selected {
 		packet.attempts++
+		packet.sentAt = now
 		stats.PacketsSent++
 		stats.Retransmits++
 	}
 	return nil
-}
-
-func maxRetransmitBurst(expiredCount, maxBatch int) int {
-	if expiredCount <= 0 {
-		return 0
-	}
-	if maxBatch < 32 {
-		maxBatch = 32
-	}
-	burst := expiredCount / 8
-	if burst < 8 {
-		burst = 8
-	}
-	if burst > 32 {
-		burst = 32
-	}
-	if burst > maxBatch {
-		burst = maxBatch
-	}
-	if burst > expiredCount {
-		burst = expiredCount
-	}
-	return burst
 }
 
 func donePacketSettled(packets map[uint64]*outboundPacket) bool {
