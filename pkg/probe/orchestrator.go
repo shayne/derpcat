@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os/exec"
 	"strings"
 )
 
@@ -77,6 +78,18 @@ func (r SSHRunner) ClientCommand(cfg ClientConfig) []string {
 	}
 }
 
+var runCommand = func(ctx context.Context, argv []string) ([]byte, error) {
+	if len(argv) == 0 {
+		return nil, errors.New("empty command")
+	}
+	cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return out, fmt.Errorf("%s: %w", strings.Join(argv, " "), err)
+	}
+	return out, nil
+}
+
 func RunOrchestrate(ctx context.Context, cfg OrchestrateConfig) (RunReport, error) {
 	if ctx == nil {
 		return RunReport{}, errors.New("nil context")
@@ -114,19 +127,20 @@ func RunOrchestrate(ctx context.Context, cfg OrchestrateConfig) (RunReport, erro
 		Host:       cfg.Host,
 		RemotePath: cfg.RemotePath,
 	}
-	serverCmd := runner.ServerCommand(ServerConfig{ListenAddr: cfg.ListenAddr, Mode: cfg.Mode})
-	clientCmd := runner.ClientCommand(ClientConfig{Host: cfg.Host, Mode: cfg.Mode})
+	validationCmd := []string{
+		"ssh",
+		runner.target(),
+		fmt.Sprintf("%s server --help", runner.binaryPath()),
+	}
+	if _, err := runCommand(ctx, validationCmd); err != nil {
+		return RunReport{}, err
+	}
 
 	return RunReport{
-		Host:          cfg.Host,
-		User:          cfg.User,
-		RemotePath:    cfg.RemotePath,
-		Mode:          cfg.Mode,
-		Direction:     cfg.Direction,
-		SizeBytes:     cfg.SizeBytes,
-		Direct:        false,
-		ListenAddr:    cfg.ListenAddr,
-		ServerCommand: serverCmd,
-		ClientCommand: clientCmd,
+		Host:      cfg.Host,
+		Mode:      cfg.Mode,
+		Direction: cfg.Direction,
+		SizeBytes: cfg.SizeBytes,
+		Direct:    true,
 	}, nil
 }

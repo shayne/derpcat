@@ -6,21 +6,16 @@ import (
 )
 
 type RunReport struct {
-	Host          string   `json:"host"`
-	User          string   `json:"user,omitempty"`
-	RemotePath    string   `json:"remote_path,omitempty"`
-	Mode          string   `json:"mode"`
-	Direction     string   `json:"direction"`
-	SizeBytes     int64    `json:"size_bytes"`
-	DurationMS    int64    `json:"duration_ms"`
-	GoodputMbps   float64  `json:"goodput_mbps"`
-	Direct        bool     `json:"direct"`
-	FirstByteMS   int64    `json:"first_byte_ms"`
-	LossRate      float64  `json:"loss_rate"`
-	Retransmits   int64    `json:"retransmits"`
-	ListenAddr    string   `json:"listen_addr,omitempty"`
-	ServerCommand []string `json:"server_command,omitempty"`
-	ClientCommand []string `json:"client_command,omitempty"`
+	Host        string  `json:"host"`
+	Mode        string  `json:"mode"`
+	Direction   string  `json:"direction"`
+	SizeBytes   int64   `json:"size_bytes"`
+	DurationMS  int64   `json:"duration_ms"`
+	GoodputMbps float64 `json:"goodput_mbps"`
+	Direct      bool    `json:"direct"`
+	FirstByteMS int64   `json:"first_byte_ms"`
+	LossRate    float64 `json:"loss_rate"`
+	Retransmits int64   `json:"retransmits"`
 }
 
 func (r RunReport) JSON() ([]byte, error) {
@@ -29,13 +24,16 @@ func (r RunReport) JSON() ([]byte, error) {
 
 func (r RunReport) Markdown() string {
 	return fmt.Sprintf(
-		"host=%s mode=%s direction=%s size_bytes=%d duration_ms=%d goodput_mbps=%.1f direct=%t",
+		"host=%s mode=%s direction=%s size_bytes=%d duration_ms=%d first_byte_ms=%d goodput_mbps=%.1f loss_rate=%g retransmits=%d direct=%t",
 		r.Host,
 		r.Mode,
 		r.Direction,
 		r.SizeBytes,
 		r.DurationMS,
+		r.FirstByteMS,
 		r.GoodputMbps,
+		r.LossRate,
+		r.Retransmits,
 		r.Direct,
 	)
 }

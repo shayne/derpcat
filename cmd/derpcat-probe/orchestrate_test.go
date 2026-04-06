@@ -2,11 +2,31 @@ package main
 
 import (
 	"bytes"
+	"context"
+	"io"
+	"net"
+	"os"
+	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
+	"time"
+
+	"github.com/shayne/derpcat/pkg/probe"
 )
 
 func TestRunOrchestratePrintsJSONReport(t *testing.T) {
+	oldPath := os.Getenv("PATH")
+	sshDir := t.TempDir()
+	sshPath := filepath.Join(sshDir, "ssh")
+	if err := os.WriteFile(sshPath, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Setenv("PATH", sshDir+string(os.PathListSeparator)+oldPath); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = os.Setenv("PATH", oldPath) }()
+
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 
@@ -22,5 +42,84 @@ func TestRunOrchestratePrintsJSONReport(t *testing.T) {
 	}
 	if !strings.Contains(stdout.String(), "\"mode\": \"raw\"") {
 		t.Fatalf("stdout missing mode JSON: %s", stdout.String())
+	}
+	if strings.Contains(stdout.String(), "user") || strings.Contains(stdout.String(), "remote_path") || strings.Contains(stdout.String(), "listen_addr") {
+		t.Fatalf("stdout included extra fields: %s", stdout.String())
+	}
+}
+
+func TestRunServerInvokesProbeReceive(t *testing.T) {
+	oldListenPacket := listenPacket
+	defer func() { listenPacket = oldListenPacket }()
+
+	serverConn, err := net.ListenPacket("udp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer serverConn.Close()
+
+	listenPacket = func(network, address string) (net.PacketConn, error) {
+		if address != serverConn.LocalAddr().String() {
+			t.Fatalf("listen address = %q, want %q", address, serverConn.LocalAddr().String())
+		}
+		return serverConn, nil
+	}
+
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		code := runServer([]string{"--listen", serverConn.LocalAddr().String(), "--mode", "raw"}, io.Discard, io.Discard)
+		if code != 0 {
+			t.Errorf("runServer() code = %d, want 0", code)
+		}
+	}()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	senderConn, err := net.ListenPacket("udp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer senderConn.Close()
+
+	if _, err := probe.Send(ctx, senderConn, serverConn.LocalAddr().String(), bytes.NewReader([]byte("hello")), probe.SendConfig{Raw: true}); err != nil {
+		t.Fatalf("probe.Send() error = %v", err)
+	}
+
+	wg.Wait()
+}
+
+func TestRunClientInvokesProbeSend(t *testing.T) {
+	serverConn, err := net.ListenPacket("udp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer serverConn.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := probe.ReceiveToWriter(ctx, serverConn, "", io.Discard, probe.ReceiveConfig{Raw: true})
+		done <- err
+	}()
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	code := runClient([]string{"--host", serverConn.LocalAddr().String(), "--mode", "raw"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("runClient() code = %d, want 0; stderr=%s", code, stderr.String())
+	}
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("ReceiveToWriter() error = %v", err)
+		}
+	case <-ctx.Done():
+		t.Fatal("timed out waiting for ReceiveToWriter")
 	}
 }

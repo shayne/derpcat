@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"os/signal"
+	"syscall"
 
 	"github.com/shayne/derpcat/pkg/probe"
 	"github.com/shayne/yargs"
@@ -31,30 +33,21 @@ func runOrchestrate(args []string, stdout, stderr io.Writer) int {
 	if flags.User == "" {
 		flags.User = "root"
 	}
-	if flags.RemotePath == "" {
-		flags.RemotePath = "/tmp/derpcat-probe"
-	}
-	if flags.ListenAddr == "" {
-		flags.ListenAddr = ":0"
-	}
 	if flags.Mode == "" {
 		flags.Mode = "raw"
-	}
-	if flags.Direction == "" {
-		flags.Direction = "forward"
 	}
 	if flags.SizeBytes == 0 {
 		flags.SizeBytes = 1 << 20
 	}
 
-	report, err := probe.RunOrchestrate(context.Background(), probe.OrchestrateConfig{
-		Host:       flags.Host,
-		User:       flags.User,
-		RemotePath: flags.RemotePath,
-		ListenAddr: flags.ListenAddr,
-		Mode:       flags.Mode,
-		Direction:  flags.Direction,
-		SizeBytes:  flags.SizeBytes,
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+
+	report, err := probe.RunOrchestrate(ctx, probe.OrchestrateConfig{
+		Host:      flags.Host,
+		User:      flags.User,
+		Mode:      flags.Mode,
+		SizeBytes: flags.SizeBytes,
 	})
 	if err != nil {
 		fmt.Fprintln(stderr, err)
@@ -72,11 +65,8 @@ func runOrchestrate(args []string, stdout, stderr io.Writer) int {
 }
 
 type orchestrateFlags struct {
-	Host       string `flag:"host" help:"Remote host to benchmark"`
-	User       string `flag:"user" help:"SSH user"`
-	RemotePath string `flag:"remote-path" help:"Path to the probe binary on the remote host"`
-	ListenAddr string `flag:"listen" help:"Listen address for the remote server"`
-	Mode       string `flag:"mode" help:"Probe mode"`
-	Direction  string `flag:"direction" help:"Benchmark direction"`
-	SizeBytes  int64  `flag:"size-bytes" help:"Payload size in bytes"`
+	Host      string `flag:"host" help:"Remote host to benchmark"`
+	User      string `flag:"user" help:"SSH user"`
+	Mode      string `flag:"mode" help:"Probe mode"`
+	SizeBytes int64  `flag:"size-bytes" help:"Payload size in bytes"`
 }

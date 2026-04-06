@@ -35,3 +35,33 @@ func TestOrchestratorRejectsMissingHost(t *testing.T) {
 		t.Fatalf("RunOrchestrate() error = %v, want host validation error", err)
 	}
 }
+
+func TestRunOrchestrateInvokesSSHAndReturnsDirectReport(t *testing.T) {
+	oldRunCommand := runCommand
+	defer func() { runCommand = oldRunCommand }()
+
+	var gotArgv []string
+	runCommand = func(ctx context.Context, argv []string) ([]byte, error) {
+		gotArgv = append([]string(nil), argv...)
+		return []byte("ok"), nil
+	}
+
+	report, err := RunOrchestrate(context.Background(), OrchestrateConfig{
+		Host:      "ktzlxc",
+		User:      "root",
+		Mode:      "raw",
+		SizeBytes: 1024,
+	})
+	if err != nil {
+		t.Fatalf("RunOrchestrate() error = %v", err)
+	}
+	if !report.Direct {
+		t.Fatal("RunOrchestrate() report.Direct = false, want true")
+	}
+	if report.Host != "ktzlxc" || report.Mode != "raw" || report.Direction != "forward" {
+		t.Fatalf("RunOrchestrate() report = %#v", report)
+	}
+	if len(gotArgv) < 3 || gotArgv[0] != "ssh" || !strings.Contains(strings.Join(gotArgv, " "), "/tmp/derpcat-probe server --help") {
+		t.Fatalf("RunOrchestrate() argv = %#v", gotArgv)
+	}
+}
