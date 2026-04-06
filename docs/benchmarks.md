@@ -58,6 +58,13 @@ Use these harnesses for the proof run:
 - `DERPCAT_PROBE_PEER_HOST=<reachable-local-host> DERPCAT_PROBE_PEER_USER=<ssh-user-on-that-host> ./scripts/probe-benchmark-reverse.sh ktzlxc 1073741824`
 - `./scripts/probe-matrix.sh`
 
+Useful probe tuning knobs:
+
+- `DERPCAT_PROBE_PARALLEL=<n>` controls raw/blast stripe count.
+- `DERPCAT_PROBE_WINDOW_SIZE=<n>` controls the reliable raw-mode in-flight window.
+- `DERPCAT_PROBE_WINDOW=<n>` is accepted as a shorthand alias for `DERPCAT_PROBE_WINDOW_SIZE`.
+- `DERPCAT_PROBE_CHUNK_SIZE=<bytes>` controls raw/blast payload size per packet.
+
 The matrix runner covers:
 
 - `ktzlxc`

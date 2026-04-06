@@ -379,7 +379,7 @@ func TestRunCommandIncludesCombinedOutputOnFailure(t *testing.T) {
 }
 
 func TestProbeSendTuningDefaultsAndOverrides(t *testing.T) {
-	for _, key := range []string{"DERPCAT_PROBE_WINDOW_SIZE", "DERPCAT_PROBE_CHUNK_SIZE"} {
+	for _, key := range []string{"DERPCAT_PROBE_WINDOW", "DERPCAT_PROBE_WINDOW_SIZE", "DERPCAT_PROBE_CHUNK_SIZE"} {
 		old := os.Getenv(key)
 		defer func(k, v string) {
 			if v == "" {
@@ -409,6 +409,11 @@ func TestProbeSendTuningDefaultsAndOverrides(t *testing.T) {
 
 	if got := probeWindowSize("raw", probeTransportBatched); got != 256 {
 		t.Fatalf("probeWindowSize(raw, batched) override = %d, want 256", got)
+	}
+	_ = os.Unsetenv("DERPCAT_PROBE_WINDOW_SIZE")
+	_ = os.Setenv("DERPCAT_PROBE_WINDOW", strconv.Itoa(320))
+	if got := probeWindowSize("raw", probeTransportBatched); got != 320 {
+		t.Fatalf("probeWindowSize(raw, batched) legacy override = %d, want 320", got)
 	}
 	if got := probeChunkSize(); got != 1300 {
 		t.Fatalf("probeChunkSize() = %d, want 1300", got)

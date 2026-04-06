@@ -1089,6 +1089,9 @@ func elapsedMS(start, end time.Time) int64 {
 }
 
 func probeWindowSize(mode, transport string) int {
+	if raw := strings.TrimSpace(os.Getenv("DERPCAT_PROBE_WINDOW")); raw != "" {
+		return envPositiveInt("DERPCAT_PROBE_WINDOW", defaultProbeWindowSize)
+	}
 	if raw := strings.TrimSpace(os.Getenv("DERPCAT_PROBE_WINDOW_SIZE")); raw != "" {
 		return envPositiveInt("DERPCAT_PROBE_WINDOW_SIZE", defaultProbeWindowSize)
 	}
