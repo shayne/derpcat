@@ -600,6 +600,9 @@ type blastParallelSendLane struct {
 	nextSeq    uint64
 	history    *blastRepairHistory
 	deduper    *blastRepairDeduper
+	rateMbps   int
+	startedAt  time.Time
+	bytesSent  uint64
 }
 
 func SendBlastParallel(ctx context.Context, conns []net.PacketConn, remoteAddrs []string, src io.Reader, cfg SendConfig) (TransferStats, error) {
@@ -692,6 +695,7 @@ func SendBlastParallel(ctx context.Context, conns []net.PacketConn, remoteAddrs 
 	}
 	stats.Lanes = len(lanes)
 	laneRate := parallelLaneRateMbps(cfg.RateMbps, len(lanes))
+	sendStartedAt := time.Now()
 	for _, lane := range lanes {
 		_ = setSocketPacing(lane.conn, laneRate)
 		buildBatchLimit := lane.batcher.MaxBatch()
@@ -700,6 +704,8 @@ func SendBlastParallel(ctx context.Context, conns []net.PacketConn, remoteAddrs 
 		}
 		lane.batchLimit = pacedBatchLimit(buildBatchLimit, cfg.ChunkSize, laneRate)
 		lane.ch = make(chan []byte, lane.batchLimit*2)
+		lane.rateMbps = laneRate
+		lane.startedAt = sendStartedAt
 	}
 
 	history, err := newBlastRepairHistory(runID, cfg.ChunkSize, cfg.RepairPayloads || cfg.TailReplayBytes > 0)
@@ -742,7 +748,6 @@ func SendBlastParallel(ctx context.Context, conns []net.PacketConn, remoteAddrs 
 	var seq uint64
 	var offset uint64
 	readBatch := make([]byte, parallelBlastReadBatchSize(len(lanes), cfg.ChunkSize))
-	startedAt := time.Now()
 	readErr := error(nil)
 	for readErr == nil {
 		var n int
@@ -790,9 +795,6 @@ func SendBlastParallel(ctx context.Context, conns []net.PacketConn, remoteAddrs 
 				seq++
 				offset += uint64(payloadLen)
 				remaining = remaining[payloadLen:]
-			}
-			if err := paceBlastSend(ctx, startedAt, offset, cfg.RateMbps); err != nil && readErr == nil {
-				readErr = err
 			}
 		}
 		if readErr != nil {
@@ -934,9 +936,24 @@ func runBlastParallelSendLane(ctx context.Context, lane *blastParallelSendLane) 
 		if len(pending) == 0 {
 			return nil
 		}
-		err := writeBlastBatch(ctx, lane.batcher, lane.peer, pending)
+		if err := writeBlastBatch(ctx, lane.batcher, lane.peer, pending); err != nil {
+			pending = pending[:0]
+			return err
+		}
+		if lane.rateMbps > 0 {
+			if lane.startedAt.IsZero() {
+				lane.startedAt = time.Now()
+			}
+			for _, packet := range pending {
+				lane.bytesSent += blastParallelPaceBytes(packet)
+			}
+			if err := paceBlastSend(ctx, lane.startedAt, lane.bytesSent, lane.rateMbps); err != nil {
+				pending = pending[:0]
+				return err
+			}
+		}
 		pending = pending[:0]
-		return err
+		return nil
 	}
 	for {
 		select {
@@ -954,6 +971,13 @@ func runBlastParallelSendLane(ctx context.Context, lane *blastParallelSendLane) 
 			return ctx.Err()
 		}
 	}
+}
+
+func blastParallelPaceBytes(packet []byte) uint64 {
+	if len(packet) <= headerLen {
+		return 0
+	}
+	return uint64(len(packet) - headerLen)
 }
 
 func writeBlastParallelPackets(ctx context.Context, lanes []*blastParallelSendLane, packets [][]byte) error {

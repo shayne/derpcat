@@ -90,6 +90,21 @@ require_direct_evidence() {
   fi
 }
 
+require_direct_blast_log() {
+  local label="$1"
+  local file="$2"
+  local metric_prefix="$3"
+
+  if grep -q '^udp-relay=true$' "${file}"; then
+    echo "${label} fell back to relay instead of direct UDP blast" >&2
+    exit 1
+  fi
+  if ! grep -q "^${metric_prefix}-data-goodput-mbps=" "${file}"; then
+    echo "${label} missing direct UDP blast goodput evidence" >&2
+    exit 1
+  fi
+}
+
 cleanup() {
   remote "if [[ -f '${remote_base}.pid' ]]; then kill \$(cat '${remote_base}.pid') 2>/dev/null || true; fi; rm -f '${remote_base}.pid' '${remote_base}.out' '${remote_base}.err'" >/dev/null 2>&1 || true
   rm -rf "${tmp}"
@@ -156,7 +171,7 @@ if [[ -z "${token}" ]]; then
 fi
 
 SECONDS=0
-./dist/derpcat --verbose send "${parallel_args[@]}" "${token}" <"${payload}" >/dev/null 2>"${send_log}"
+./dist/derpcat --verbose send "${parallel_args[@]+"${parallel_args[@]}"}" "${token}" <"${payload}" >/dev/null 2>"${send_log}"
 duration="${SECONDS}"
 
 for _ in $(seq 1 400); do
@@ -187,6 +202,8 @@ fi
 [[ -n "${listener_trace}" ]]
 require_direct_evidence "sender" "${sender_trace}"
 require_direct_evidence "listener" "${listener_trace}"
+require_direct_blast_log "sender" "${send_log}" "udp-send"
+require_direct_blast_log "listener" "${listener_log}" "udp-receive"
 
 echo "target=${target}"
 echo "size_mib=${size_mib}"

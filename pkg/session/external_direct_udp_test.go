@@ -25,8 +25,11 @@ func TestExternalDirectUDPDefaultUsesEightSectionedLanesWithoutFEC(t *testing.T)
 	if got, want := externalDirectUDPParallelism, 8; got != want {
 		t.Fatalf("externalDirectUDPParallelism = %d, want %d", got, want)
 	}
-	if got, want := externalDirectUDPRateMbps, 2150; got != want {
+	if got, want := externalDirectUDPRateMbps, 2250; got != want {
 		t.Fatalf("externalDirectUDPRateMbps = %d, want %d", got, want)
+	}
+	if got, want := externalDirectUDPTransportLabel, "batched"; got != want {
+		t.Fatalf("externalDirectUDPTransportLabel = %q, want %q", got, want)
 	}
 	if got, want := externalDirectUDPFECGroupSize, 0; got != want {
 		t.Fatalf("externalDirectUDPFECGroupSize = %d, want %d", got, want)
@@ -37,7 +40,7 @@ func TestExternalDirectUDPDefaultUsesEightSectionedLanesWithoutFEC(t *testing.T)
 }
 
 func TestExternalDirectUDPWaitCoversPunchHandshakeWindow(t *testing.T) {
-	minWait := externalDirectUDPHandshakeWait + 500*time.Millisecond
+	minWait := 5 * time.Second
 	if externalDirectUDPWait < minWait {
 		t.Fatalf("externalDirectUDPWait = %v, want at least %v", externalDirectUDPWait, minWait)
 	}
@@ -392,6 +395,33 @@ func TestExternalDirectUDPReceiveSectionTargetUsesRegularFileDirectly(t *testing
 	}
 }
 
+func TestExternalDirectUDPReceiveSectionTargetUsesWrappedRegularFileDirectly(t *testing.T) {
+	file, err := os.CreateTemp(t.TempDir(), "derpcat-section-target-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer file.Close()
+
+	target, copyToDst, cleanup, err := externalDirectUDPReceiveSectionTarget(nopWriteCloser{Writer: file}, 64)
+	if err != nil {
+		t.Fatalf("externalDirectUDPReceiveSectionTarget() error = %v", err)
+	}
+	defer cleanup()
+	if target != file {
+		t.Fatal("externalDirectUDPReceiveSectionTarget() did not use wrapped regular file directly")
+	}
+	if copyToDst {
+		t.Fatal("externalDirectUDPReceiveSectionTarget() copyToDst = true, want false for wrapped regular file")
+	}
+	info, err := file.Stat()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Size() != 64 {
+		t.Fatalf("direct target size = %d, want 64", info.Size())
+	}
+}
+
 func TestExternalDirectUDPSectionWriterForTargetBypassesBufferForRegularFiles(t *testing.T) {
 	file, err := os.CreateTemp(t.TempDir(), "derpcat-section-target-*")
 	if err != nil {
@@ -403,6 +433,23 @@ func TestExternalDirectUDPSectionWriterForTargetBypassesBufferForRegularFiles(t 
 	target, flush := externalDirectUDPSectionWriterForTarget(file, buffered, buffered.Flush)
 	if target != file {
 		t.Fatal("externalDirectUDPSectionWriterForTarget() did not use the raw regular file")
+	}
+	if err := flush(); err != nil {
+		t.Fatalf("flush() error = %v", err)
+	}
+}
+
+func TestExternalDirectUDPSectionWriterForTargetBypassesBufferForWrappedRegularFiles(t *testing.T) {
+	file, err := os.CreateTemp(t.TempDir(), "derpcat-section-target-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer file.Close()
+	buffered := bufio.NewWriter(file)
+
+	target, flush := externalDirectUDPSectionWriterForTarget(nopWriteCloser{Writer: file}, buffered, buffered.Flush)
+	if target != file {
+		t.Fatal("externalDirectUDPSectionWriterForTarget() did not use the wrapped raw regular file")
 	}
 	if err := flush(); err != nil {
 		t.Fatalf("flush() error = %v", err)

@@ -46,12 +46,12 @@ func TestSocketPacingRateBytesPerSecond(t *testing.T) {
 	}
 }
 
-func TestPacedBatchLimitTargetsSubMillisecondBursts(t *testing.T) {
-	if got := pacedBatchLimit(128, 1400, 800); got != 35 {
-		t.Fatalf("pacedBatchLimit(128, 1400, 800) = %d, want 35", got)
+func TestPacedBatchLimitTargetsQuarterMillisecondBursts(t *testing.T) {
+	if got := pacedBatchLimit(128, 1400, 800); got != 17 {
+		t.Fatalf("pacedBatchLimit(128, 1400, 800) = %d, want 17", got)
 	}
-	if got := pacedBatchLimit(128, 1400, 2000); got != 89 {
-		t.Fatalf("pacedBatchLimit(128, 1400, 2000) = %d, want 89", got)
+	if got := pacedBatchLimit(128, 1400, 2000); got != 44 {
+		t.Fatalf("pacedBatchLimit(128, 1400, 2000) = %d, want 44", got)
 	}
 	if got := pacedBatchLimit(128, 1400, 0); got != 128 {
 		t.Fatalf("pacedBatchLimit(128, 1400, 0) = %d, want max batch 128", got)

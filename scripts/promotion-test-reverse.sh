@@ -30,7 +30,7 @@ parallel_args=()
 if [[ -n "${DERPCAT_PARALLEL_ARGS:-}" ]]; then
   read -r -a parallel_args <<<"${DERPCAT_PARALLEL_ARGS}"
 fi
-parallel_args_remote="${parallel_args[*]}"
+parallel_args_remote="${parallel_args[*]-}"
 remote() {
   ssh "${remote_user}@${target}" "${remote_env[@]}" 'bash -se' <<<"$1"
 }
@@ -91,6 +91,21 @@ require_direct_evidence() {
   fi
 }
 
+require_direct_blast_log() {
+  local label="$1"
+  local file="$2"
+  local metric_prefix="$3"
+
+  if grep -q '^udp-relay=true$' "${file}"; then
+    echo "${label} fell back to relay instead of direct UDP blast" >&2
+    exit 1
+  fi
+  if ! grep -q "^${metric_prefix}-data-goodput-mbps=" "${file}"; then
+    echo "${label} missing direct UDP blast goodput evidence" >&2
+    exit 1
+  fi
+}
+
 cleanup() {
   remote "rm -f '${remote_base}.payload' '${remote_base}.err' '${remote_upload}'" >/dev/null 2>&1 || true
   rm -rf "${tmp}"
@@ -133,6 +148,7 @@ scp dist/derpcat-linux-amd64 "${remote_user}@${target}:${remote_upload}" >/dev/n
 remote "install -m 0755 '${remote_upload}' /usr/local/bin/derpcat && rm -f '${remote_upload}' && /usr/local/bin/derpcat --help >/dev/null 2>&1"
 
 payload="${remote_base}.payload"
+sender_log="${tmp}/send.err"
 listener_log="${tmp}/listen.err"
 listener_out="${tmp}/listen.out"
 listener_pid=""
@@ -164,10 +180,11 @@ duration="${SECONDS}"
 
 wait "${listener_pid}"
 listener_pid=""
+remote "sed -n '1,200p' '${remote_base}.err'" >"${sender_log}"
 
 local_sha="$(shasum -a 256 "${listener_out}" | awk '{print $1}')"
 local_size="$(wc -c <"${listener_out}" | tr -d '[:space:]')"
-sender_trace="$(remote_path_trace "${remote_base}.err")"
+sender_trace="$(path_trace "${sender_log}")"
 listener_trace="$(path_trace "${listener_log}")"
 sender_path_changed="false"
 listener_path_changed="false"
@@ -185,6 +202,8 @@ fi
 [[ -n "${listener_trace}" ]]
 require_direct_evidence "sender" "${sender_trace}"
 require_direct_evidence "listener" "${listener_trace}"
+require_direct_blast_log "sender" "${sender_log}" "udp-send"
+require_direct_blast_log "listener" "${listener_log}" "udp-receive"
 
 echo "target=${target}"
 echo "size_mib=${size_mib}"
@@ -195,6 +214,6 @@ echo "listener_path_changed=${listener_path_changed}"
 echo "sender_path_trace=$(printf '%s' "${sender_trace}" | tr '\n' ';')"
 echo "listener_path_trace=$(printf '%s' "${listener_trace}" | tr '\n' ';')"
 echo "--- sender log"
-remote "sed -n '1,200p' '${remote_base}.err'"
+cat "${sender_log}"
 echo "--- listener log"
 cat "${listener_log}"

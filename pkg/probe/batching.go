@@ -395,8 +395,8 @@ func pacedBatchLimit(maxBatch int, chunkSize int, rateMbps int) int {
 	if maxBatch <= 1 || chunkSize <= 0 || rateMbps <= 0 {
 		return maxBatch
 	}
-	bytesPerHalfMillisecond := rateMbps * 1000 * 1000 / 8 / 2000
-	limit := bytesPerHalfMillisecond / chunkSize
+	bytesPerQuarterMillisecond := rateMbps * 1000 * 1000 / 8 / 4000
+	limit := bytesPerQuarterMillisecond / chunkSize
 	if limit < 1 {
 		return 1
 	}

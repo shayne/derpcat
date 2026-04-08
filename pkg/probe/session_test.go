@@ -3409,6 +3409,30 @@ func TestFillSendWindowPacesReliableWrites(t *testing.T) {
 	}
 }
 
+func TestRunBlastParallelSendLanePacesBatches(t *testing.T) {
+	batcher := &capturingBatcher{}
+	packet := make([]byte, headerLen+1000)
+	encodePacketHeader(packet[:headerLen], PacketTypeData, testRunID(31), 0, 0, 0, 0, 0)
+	lane := &blastParallelSendLane{
+		peer:       &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 12345},
+		batcher:    batcher,
+		batchLimit: 1,
+		ch:         make(chan []byte, 1),
+		rateMbps:   1,
+		startedAt:  time.Now(),
+	}
+	lane.ch <- packet
+	close(lane.ch)
+
+	startedAt := time.Now()
+	if err := runBlastParallelSendLane(context.Background(), lane); err != nil {
+		t.Fatalf("runBlastParallelSendLane() error = %v", err)
+	}
+	if elapsed := time.Since(startedAt); elapsed < 2*time.Millisecond {
+		t.Fatalf("runBlastParallelSendLane() elapsed = %v, want pacing delay", elapsed)
+	}
+}
+
 type capturingBatcher struct {
 	mu     sync.Mutex
 	writes [][]byte

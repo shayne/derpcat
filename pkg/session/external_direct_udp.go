@@ -30,8 +30,8 @@ const (
 	externalDirectUDPTransportLabel  = "batched"
 	externalDirectUDPParallelism     = 8
 	externalDirectUDPChunkSize       = 1400
-	externalDirectUDPRateMbps        = 2150
-	externalDirectUDPWait            = 2 * time.Second
+	externalDirectUDPRateMbps        = 2250
+	externalDirectUDPWait            = 5 * time.Second
 	externalDirectUDPPunchWait       = 1200 * time.Millisecond
 	externalDirectUDPHandshakeWait   = 1500 * time.Millisecond
 	externalDirectUDPStartWait       = 30 * time.Second
@@ -1323,12 +1323,9 @@ func externalDirectUDPReceiveSectionSpoolParallel(ctx context.Context, conns []n
 		laneCfg.ExpectedRunID = [16]byte{}
 		laneCfg.ExpectedRunIDs = nil
 		laneCfg.RequireComplete = true
-		writer := bufio.NewWriterSize(&externalDirectUDPOffsetWriter{file: file, offset: offsets[i]}, externalDirectUDPBufferSize)
-		go func(conn net.PacketConn, writer *bufio.Writer, expected int64, laneCfg probe.ReceiveConfig) {
+		writer := &externalDirectUDPOffsetWriter{file: file, offset: offsets[i]}
+		go func(conn net.PacketConn, writer io.Writer, expected int64, laneCfg probe.ReceiveConfig) {
 			stats, err := probe.ReceiveBlastParallelToWriter(receiveCtx, []net.PacketConn{conn}, writer, laneCfg, expected)
-			if flushErr := writer.Flush(); err == nil {
-				err = flushErr
-			}
 			if err != nil {
 				cancel()
 			}
@@ -1364,16 +1361,13 @@ func externalDirectUDPReceiveSectionSpoolParallel(ctx context.Context, conns []n
 }
 
 func externalDirectUDPReceiveSectionTarget(dst io.Writer, totalBytes int64) (*os.File, bool, func(), error) {
-	if file, ok := dst.(*os.File); ok && file != nil {
-		info, err := file.Stat()
-		if err == nil && info.Mode().IsRegular() {
-			if totalBytes > 0 {
-				if err := file.Truncate(totalBytes); err != nil {
-					return nil, false, nil, err
-				}
+	if file := externalDirectUDPRegularFileWriter(dst); file != nil {
+		if totalBytes > 0 {
+			if err := file.Truncate(totalBytes); err != nil {
+				return nil, false, nil, err
 			}
-			return file, false, func() {}, nil
 		}
+		return file, false, func() {}, nil
 	}
 	file, err := os.CreateTemp("", "derpcat-receive-spool-*")
 	if err != nil {
@@ -1388,11 +1382,8 @@ func externalDirectUDPReceiveSectionTarget(dst io.Writer, totalBytes int64) (*os
 }
 
 func externalDirectUDPSectionWriterForTarget(dst io.Writer, buffered io.Writer, flush func() error) (io.Writer, func() error) {
-	if file, ok := dst.(*os.File); ok && file != nil {
-		info, err := file.Stat()
-		if err == nil && info.Mode().IsRegular() {
-			return file, func() error { return nil }
-		}
+	if file := externalDirectUDPRegularFileWriter(dst); file != nil {
+		return file, func() error { return nil }
 	}
 	if buffered == nil {
 		buffered = dst
@@ -1401,6 +1392,34 @@ func externalDirectUDPSectionWriterForTarget(dst io.Writer, buffered io.Writer, 
 		flush = func() error { return nil }
 	}
 	return buffered, flush
+}
+
+func externalDirectUDPRegularFileWriter(dst io.Writer) *os.File {
+	file := externalDirectUDPFileWriter(dst)
+	if file == nil {
+		return nil
+	}
+	info, err := file.Stat()
+	if err != nil || !info.Mode().IsRegular() {
+		return nil
+	}
+	return file
+}
+
+func externalDirectUDPFileWriter(dst io.Writer) *os.File {
+	switch writer := dst.(type) {
+	case *os.File:
+		return writer
+	case nopWriteCloser:
+		return externalDirectUDPFileWriter(writer.Writer)
+	case *nopWriteCloser:
+		if writer == nil {
+			return nil
+		}
+		return externalDirectUDPFileWriter(writer.Writer)
+	default:
+		return nil
+	}
 }
 
 func externalDirectUDPFinishSectionTarget(file *os.File, copyToDst bool, dst io.Writer, totalBytes int64) error {
