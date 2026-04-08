@@ -1995,6 +1995,15 @@ func waitForPeerAck(ctx context.Context, ch <-chan derpbind.Packet) error {
 	}
 }
 
+func waitForPeerAckWithTimeout(ctx context.Context, ch <-chan derpbind.Packet, timeout time.Duration) error {
+	if timeout <= 0 {
+		return waitForPeerAck(ctx, ch)
+	}
+	waitCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	return waitForPeerAck(waitCtx, ch)
+}
+
 func firstDERPNode(dm *tailcfg.DERPMap, regionID int) *tailcfg.DERPNode {
 	if dm == nil || len(dm.Regions) == 0 {
 		return nil

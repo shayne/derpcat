@@ -35,6 +35,8 @@ const (
 	blastDoneInterval               = defaultRetryInterval
 	parallelBlastDoneGrace          = 10 * blastDoneLinger
 	parallelBlastRepairGrace        = 3 * time.Second
+	parallelBlastRepairGraceMax     = 12 * time.Second
+	parallelBlastRepairGraceBytes   = 32 << 20
 	blastRepairQuietGrace           = 500 * time.Millisecond
 	blastRepairResendInterval       = 2 * blastRepairInterval
 	blastKnownGapRepairDelay        = 10 * time.Millisecond
@@ -51,6 +53,17 @@ const (
 	maxBufferedPackets              = 4096
 	defaultSocketBuffer             = 8 << 20
 )
+
+func parallelBlastRepairGraceForExpectedBytes(expectedBytes int64) time.Duration {
+	if expectedBytes <= 0 {
+		return parallelBlastRepairGrace
+	}
+	grace := parallelBlastRepairGrace + time.Duration(expectedBytes/parallelBlastRepairGraceBytes)*time.Second
+	if grace > parallelBlastRepairGraceMax {
+		return parallelBlastRepairGraceMax
+	}
+	return grace
+}
 
 type SendConfig struct {
 	Raw                      bool
@@ -1737,6 +1750,8 @@ func ReceiveBlastParallelToWriter(ctx context.Context, conns []net.PacketConn, d
 	var terminalGraceActive atomic.Bool
 	var repairGraceOnce sync.Once
 	var repairGraceExpired atomic.Bool
+	var repairGraceDeadline atomic.Int64
+	repairGrace := parallelBlastRepairGraceForExpectedBytes(expectedBytes)
 	closeDone := func() {
 		doneOnce.Do(func() {
 			close(done)
@@ -1761,18 +1776,52 @@ func ReceiveBlastParallelToWriter(ctx context.Context, conns []net.PacketConn, d
 	}
 	startRepairGrace := func() {
 		repairActive.Store(true)
+		repairGraceDeadline.Store(time.Now().Add(repairGrace).UnixNano())
 		repairGraceOnce.Do(func() {
 			go func() {
-				timer := time.NewTimer(parallelBlastRepairGrace)
-				defer timer.Stop()
+				ticker := time.NewTicker(blastRepairInterval)
+				defer ticker.Stop()
 				select {
-				case <-timer.C:
-					repairGraceExpired.Store(true)
-					closeDone()
 				case <-done:
+					return
+				default:
+				}
+				for {
+					select {
+					case <-ticker.C:
+						deadline := repairGraceDeadline.Load()
+						if !repairActive.Load() || deadline <= 0 {
+							continue
+						}
+						if time.Now().UnixNano() >= deadline {
+							repairGraceExpired.Store(true)
+							closeDone()
+							return
+						}
+					case <-done:
+						return
+					}
 				}
 			}()
 		})
+	}
+	currentStats := func(completedAt time.Time) TransferStats {
+		received := bytesReceived.Load()
+		firstByte := firstByteAt
+		if firstByte.IsZero() && received > 0 {
+			firstByte = completedAt
+		}
+		transport := PreviewTransportCaps(conns[0], cfg.Transport)
+		if connected.Load() {
+			transport.Connected = true
+		}
+		return TransferStats{
+			BytesReceived: received,
+			StartedAt:     startedAt,
+			FirstByteAt:   firstByte,
+			CompletedAt:   completedAt,
+			Transport:     transport,
+		}
 	}
 	go func() {
 		select {
@@ -1827,37 +1876,23 @@ func ReceiveBlastParallelToWriter(ctx context.Context, conns []net.PacketConn, d
 	case err := <-errCh:
 		received := bytesReceived.Load()
 		if expectedBytes > 0 && received < expectedBytes && (ctx.Err() != nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)) {
-			return TransferStats{}, fmt.Errorf("blast incomplete: received %d bytes, want %d", received, expectedBytes)
+			return currentStats(time.Now()), fmt.Errorf("blast incomplete: received %d bytes, want %d", received, expectedBytes)
 		}
-		return TransferStats{}, err
+		return currentStats(time.Now()), err
 	default:
 	}
 	if repairGraceExpired.Load() && incompleteDoneRuns.Load() > 0 {
-		return TransferStats{}, fmt.Errorf("blast incomplete: received %d bytes before repair grace expired", bytesReceived.Load())
+		return currentStats(time.Now()), fmt.Errorf("blast incomplete: received %d bytes before repair grace expired", bytesReceived.Load())
 	}
 	received := bytesReceived.Load()
 	sessionTracef("parallel recv return expected=%d received=%d ctx_err=%v repair_expired=%t incomplete_done_runs=%d", expectedBytes, received, ctx.Err(), repairGraceExpired.Load(), incompleteDoneRuns.Load())
 	if cfg.RequireComplete && expectedBytes > 0 && received < expectedBytes {
-		return TransferStats{}, fmt.Errorf("blast incomplete: received %d bytes, want %d", received, expectedBytes)
+		return currentStats(time.Now()), fmt.Errorf("blast incomplete: received %d bytes, want %d", received, expectedBytes)
 	}
 	if expectedBytes > 0 && received < expectedBytes && (received == 0 || ctx.Err() != nil) {
-		return TransferStats{}, fmt.Errorf("blast incomplete: received %d bytes, want %d", received, expectedBytes)
+		return currentStats(time.Now()), fmt.Errorf("blast incomplete: received %d bytes, want %d", received, expectedBytes)
 	}
-	completedAt := time.Now()
-	if firstByteAt.IsZero() && received > 0 {
-		firstByteAt = completedAt
-	}
-	transport := PreviewTransportCaps(conns[0], cfg.Transport)
-	if connected.Load() {
-		transport.Connected = true
-	}
-	return TransferStats{
-		BytesReceived: received,
-		StartedAt:     startedAt,
-		FirstByteAt:   firstByteAt,
-		CompletedAt:   completedAt,
-		Transport:     transport,
-	}, nil
+	return currentStats(time.Now()), nil
 }
 
 type blastStreamReceiveLane struct {
@@ -1978,7 +2013,7 @@ func (c *blastStreamReceiveCoordinator) handleGlobalPacketLocked(ctx context.Con
 		if complete {
 			return true, nil
 		}
-		c.repairDeadline = time.Now().Add(parallelBlastRepairGrace)
+		c.repairDeadline = time.Now().Add(parallelBlastRepairGraceForExpectedBytes(c.expectedBytes))
 		if err := c.requestMissingRepairs(ctx, runID, state); err != nil {
 			return false, err
 		}
@@ -2023,7 +2058,7 @@ func (c *blastStreamReceiveCoordinator) handleStripedPacketLocked(ctx context.Co
 		if err != nil || complete {
 			return complete, err
 		}
-		c.repairDeadline = time.Now().Add(parallelBlastRepairGrace)
+		c.repairDeadline = time.Now().Add(parallelBlastRepairGraceForExpectedBytes(c.expectedBytes))
 		if err := c.requestMissingStripedRepairs(ctx, runID, state); err != nil {
 			return false, err
 		}
@@ -2183,7 +2218,7 @@ func (c *blastStreamReceiveCoordinator) handleRepairTick(ctx context.Context, no
 				continue
 			}
 			if c.repairDeadline.IsZero() {
-				c.repairDeadline = now.Add(parallelBlastRepairGrace)
+				c.repairDeadline = now.Add(parallelBlastRepairGraceForExpectedBytes(c.expectedBytes))
 			}
 			if now.After(c.repairDeadline) {
 				return fmt.Errorf("striped blast incomplete: received %d bytes before repair grace expired", c.bytesReceived)
@@ -2197,7 +2232,7 @@ func (c *blastStreamReceiveCoordinator) handleRepairTick(ctx context.Context, no
 			continue
 		}
 		if c.repairDeadline.IsZero() {
-			c.repairDeadline = now.Add(parallelBlastRepairGrace)
+			c.repairDeadline = now.Add(parallelBlastRepairGraceForExpectedBytes(c.expectedBytes))
 		}
 		if now.After(c.repairDeadline) {
 			return fmt.Errorf("blast incomplete: received %d bytes before repair grace expired", c.bytesReceived)
@@ -3373,6 +3408,9 @@ func receiveBlastParallelConn(ctx context.Context, conn net.PacketConn, dst io.W
 						return err
 					}
 				}
+				if cfg.RequireComplete && state.done && state.repairPending && !state.complete() {
+					startRepairGrace()
+				}
 				if fastMode() && state.done && state.totalBytes > 0 && state.receivedBytes >= state.totalBytes {
 					done, err := maybeFinishFastRun(runID, state)
 					if err != nil {
@@ -3415,6 +3453,9 @@ func receiveBlastParallelConn(ctx context.Context, conn net.PacketConn, dst io.W
 				state.storeFECParity(seq, offset, groupCount, payload)
 				if err := recoverFEC(runID, state); err != nil {
 					return err
+				}
+				if cfg.RequireComplete && state.done && state.repairPending && !state.complete() {
+					startRepairGrace()
 				}
 			case PacketTypeDone:
 				state := runState(runID, addr)

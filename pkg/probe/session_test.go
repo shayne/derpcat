@@ -36,6 +36,23 @@ func writeProbePacket(t *testing.T, conn net.PacketConn, dst net.Addr, packet Pa
 	}
 }
 
+type notifyingWriter struct {
+	mu    sync.Mutex
+	buf   bytes.Buffer
+	wrote chan struct{}
+}
+
+func (w *notifyingWriter) Write(p []byte) (int, error) {
+	w.mu.Lock()
+	n, err := w.buf.Write(p)
+	w.mu.Unlock()
+	select {
+	case w.wrote <- struct{}{}:
+	default:
+	}
+	return n, err
+}
+
 func readProbePacket(t *testing.T, conn net.PacketConn, timeout time.Duration) Packet {
 	t.Helper()
 	buf := make([]byte, 64<<10)
@@ -1498,6 +1515,82 @@ func TestReceiveBlastParallelToWriterRequireCompleteWaitsForDone(t *testing.T) {
 	}
 }
 
+func TestReceiveBlastParallelToWriterExtendsRepairGraceOnProgress(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 7*time.Second)
+	defer cancel()
+
+	server, err := net.ListenPacket("udp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer server.Close()
+	client, err := net.ListenPacket("udp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+
+	runID := testRunID(0x4c)
+	payloads := [][]byte{[]byte("seq-0"), []byte("seq-1"), []byte("seq-2")}
+	totalBytes := uint64(len(payloads[0]) + len(payloads[1]) + len(payloads[2]))
+	errCh := make(chan error, 1)
+	statsCh := make(chan TransferStats, 1)
+	go func() {
+		stats, err := ReceiveBlastParallelToWriter(ctx, []net.PacketConn{server}, io.Discard, ReceiveConfig{Blast: true, RequireComplete: true}, int64(totalBytes))
+		if err != nil {
+			errCh <- err
+			return
+		}
+		statsCh <- stats
+	}()
+
+	writeProbePacket(t, client, server.LocalAddr(), Packet{Version: ProtocolVersion, Type: PacketTypeHello, RunID: runID})
+	for {
+		packet := readProbePacket(t, client, 500*time.Millisecond)
+		if packet.Type == PacketTypeHelloAck {
+			break
+		}
+	}
+	writeProbePacket(t, client, server.LocalAddr(), Packet{Version: ProtocolVersion, Type: PacketTypeData, RunID: runID, Seq: 0, Offset: 0, Payload: payloads[0]})
+	writeProbePacket(t, client, server.LocalAddr(), Packet{Version: ProtocolVersion, Type: PacketTypeDone, RunID: runID, Seq: 3, Offset: totalBytes})
+
+	time.Sleep(parallelBlastRepairGrace - 100*time.Millisecond)
+	writeProbePacket(t, client, server.LocalAddr(), Packet{Version: ProtocolVersion, Type: PacketTypeData, RunID: runID, Seq: 1, Offset: uint64(len(payloads[0])), Payload: payloads[1]})
+
+	select {
+	case err := <-errCh:
+		t.Fatalf("ReceiveBlastParallelToWriter() returned after repair progress with error %v", err)
+	case stats := <-statsCh:
+		t.Fatalf("ReceiveBlastParallelToWriter() completed after one repair with %d bytes, want wait for remaining repair", stats.BytesReceived)
+	case <-time.After(250 * time.Millisecond):
+	}
+
+	writeProbePacket(t, client, server.LocalAddr(), Packet{Version: ProtocolVersion, Type: PacketTypeData, RunID: runID, Seq: 2, Offset: uint64(len(payloads[0]) + len(payloads[1])), Payload: payloads[2]})
+
+	select {
+	case err := <-errCh:
+		t.Fatalf("ReceiveBlastParallelToWriter() error = %v", err)
+	case stats := <-statsCh:
+		if stats.BytesReceived != int64(totalBytes) {
+			t.Fatalf("BytesReceived = %d, want %d", stats.BytesReceived, totalBytes)
+		}
+	case <-ctx.Done():
+		t.Fatalf("timed out waiting for repaired receive: %v", ctx.Err())
+	}
+}
+
+func TestParallelBlastRepairGraceScalesWithExpectedBytes(t *testing.T) {
+	if got := parallelBlastRepairGraceForExpectedBytes(15); got != parallelBlastRepairGrace {
+		t.Fatalf("small repair grace = %v, want %v", got, parallelBlastRepairGrace)
+	}
+	if got := parallelBlastRepairGraceForExpectedBytes(128 << 20); got <= parallelBlastRepairGrace {
+		t.Fatalf("large repair grace = %v, want more than %v", got, parallelBlastRepairGrace)
+	}
+	if got := parallelBlastRepairGraceForExpectedBytes(2 << 30); got != parallelBlastRepairGraceMax {
+		t.Fatalf("capped repair grace = %v, want %v", got, parallelBlastRepairGraceMax)
+	}
+}
+
 func TestReceiveBlastParallelToWriterRequestsKnownGapBeforeDone(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -2619,6 +2712,65 @@ func TestReceiveBlastParallelToWriterErrorsWhenContextEndsBeforeExpectedBytes(t 
 		}
 		if !strings.Contains(err.Error(), "blast incomplete") {
 			t.Fatalf("ReceiveBlastParallelToWriter() error = %v, want blast incomplete", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for context-canceled receive")
+	}
+}
+
+func TestReceiveBlastParallelToWriterReturnsPartialStatsOnContextError(t *testing.T) {
+	server, err := net.ListenPacket("udp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer server.Close()
+	client, err := net.ListenPacket("udp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	writer := &notifyingWriter{wrote: make(chan struct{}, 1)}
+	type receiveResult struct {
+		stats TransferStats
+		err   error
+	}
+	resultCh := make(chan receiveResult, 1)
+	payload := []byte("partial-before-context-cancel")
+	go func() {
+		stats, err := ReceiveBlastParallelToWriter(ctx, []net.PacketConn{server}, writer, ReceiveConfig{Blast: true}, int64(len(payload)+1))
+		resultCh <- receiveResult{stats: stats, err: err}
+	}()
+
+	runID := testRunID(0x51)
+	writeProbePacket(t, client, server.LocalAddr(), Packet{Version: ProtocolVersion, Type: PacketTypeHello, RunID: runID})
+	if err := client.SetReadDeadline(time.Now().Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	ackBuf := make([]byte, 64<<10)
+	if _, _, err := client.ReadFrom(ackBuf); err != nil {
+		t.Fatalf("waiting for hello ack: %v", err)
+	}
+	writeProbePacket(t, client, server.LocalAddr(), Packet{Version: ProtocolVersion, Type: PacketTypeData, RunID: runID, Payload: payload})
+	select {
+	case <-writer.wrote:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for partial write")
+	}
+	cancel()
+
+	select {
+	case result := <-resultCh:
+		if result.err == nil {
+			t.Fatal("ReceiveBlastParallelToWriter() error = nil, want incomplete blast error")
+		}
+		if !strings.Contains(result.err.Error(), "blast incomplete") {
+			t.Fatalf("ReceiveBlastParallelToWriter() error = %v, want blast incomplete", result.err)
+		}
+		if result.stats.BytesReceived != int64(len(payload)) {
+			t.Fatalf("BytesReceived = %d, want %d", result.stats.BytesReceived, len(payload))
 		}
 	case <-time.After(time.Second):
 		t.Fatal("timed out waiting for context-canceled receive")

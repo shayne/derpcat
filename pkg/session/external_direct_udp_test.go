@@ -1,9 +1,11 @@
 package session
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -34,6 +36,57 @@ func TestExternalDirectUDPDefaultUsesEightSectionedLanesWithoutFEC(t *testing.T)
 	}
 }
 
+func TestExternalDirectUDPWaitCoversPunchHandshakeWindow(t *testing.T) {
+	minWait := externalDirectUDPHandshakeWait + 500*time.Millisecond
+	if externalDirectUDPWait < minWait {
+		t.Fatalf("externalDirectUDPWait = %v, want at least %v", externalDirectUDPWait, minWait)
+	}
+}
+
+func writeExternalDirectUDPProbePacket(t *testing.T, conn net.PacketConn, dst net.Addr, packet probe.Packet) {
+	t.Helper()
+	wire, err := probe.MarshalPacket(packet, nil)
+	if err != nil {
+		t.Fatalf("MarshalPacket() error = %v", err)
+	}
+	if _, err := conn.WriteTo(wire, dst); err != nil {
+		t.Fatalf("WriteTo() error = %v", err)
+	}
+}
+
+func readExternalDirectUDPProbePacket(t *testing.T, conn net.PacketConn, timeout time.Duration) probe.Packet {
+	t.Helper()
+	buf := make([]byte, 64<<10)
+	if err := conn.SetReadDeadline(time.Now().Add(timeout)); err != nil {
+		t.Fatalf("SetReadDeadline() error = %v", err)
+	}
+	n, _, err := conn.ReadFrom(buf)
+	if err != nil {
+		t.Fatalf("ReadFrom() error = %v", err)
+	}
+	packet, err := probe.UnmarshalPacket(buf[:n], nil)
+	if err != nil {
+		t.Fatalf("UnmarshalPacket() error = %v", err)
+	}
+	return packet
+}
+
+func TestWaitForPeerAckWithTimeoutReturnsWhenPeerNeverAcks(t *testing.T) {
+	ackCh := make(chan derpbind.Packet)
+	start := time.Now()
+
+	err := waitForPeerAckWithTimeout(context.Background(), ackCh, 25*time.Millisecond)
+	if err == nil {
+		t.Fatal("waitForPeerAckWithTimeout() error = nil, want timeout")
+	}
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("waitForPeerAckWithTimeout() error = %v, want %v", err, context.DeadlineExceeded)
+	}
+	if elapsed := time.Since(start); elapsed < 25*time.Millisecond {
+		t.Fatalf("waitForPeerAckWithTimeout() returned after %v, want to wait for timeout", elapsed)
+	}
+}
+
 func TestExternalDirectUDPBufferedWriterUsesDiscardForNullDevice(t *testing.T) {
 	devNull, err := os.OpenFile(os.DevNull, os.O_WRONLY, 0)
 	if err != nil {
@@ -47,6 +100,29 @@ func TestExternalDirectUDPBufferedWriterUsesDiscardForNullDevice(t *testing.T) {
 	}
 	if err := flush(); err != nil {
 		t.Fatalf("flush() error = %v", err)
+	}
+}
+
+func TestEmitExternalDirectUDPStatsIncludesDataGoodputFromFirstByte(t *testing.T) {
+	var buf bytes.Buffer
+	emitter := telemetry.New(&buf, telemetry.LevelVerbose)
+	startedAt := time.Unix(0, 0)
+	firstByteAt := startedAt.Add(500 * time.Millisecond)
+	completedAt := startedAt.Add(1500 * time.Millisecond)
+
+	emitExternalDirectUDPStats(emitter, "udp-receive", 125_000_000, startedAt, firstByteAt, completedAt)
+
+	got := buf.String()
+	for _, want := range []string{
+		"udp-receive-duration-ms=1500\n",
+		"udp-receive-goodput-mbps=666.67\n",
+		"udp-receive-first-byte-ms=500\n",
+		"udp-receive-data-duration-ms=1000\n",
+		"udp-receive-data-goodput-mbps=1000.00\n",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("emitted stats = %q, want %q", got, want)
+		}
 	}
 }
 
@@ -286,6 +362,91 @@ func TestExternalDirectUDPReceiveSectionLayoutUsesSenderSizes(t *testing.T) {
 	}
 	if fmt.Sprint(offsets) != fmt.Sprint([]int64{0, 7}) {
 		t.Fatalf("offsets = %v, want [0 7]", offsets)
+	}
+}
+
+func TestExternalDirectUDPReceiveSectionTargetUsesRegularFileDirectly(t *testing.T) {
+	file, err := os.CreateTemp(t.TempDir(), "derpcat-section-target-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer file.Close()
+
+	target, copyToDst, cleanup, err := externalDirectUDPReceiveSectionTarget(file, 64)
+	if err != nil {
+		t.Fatalf("externalDirectUDPReceiveSectionTarget() error = %v", err)
+	}
+	defer cleanup()
+	if target != file {
+		t.Fatal("externalDirectUDPReceiveSectionTarget() did not use regular file directly")
+	}
+	if copyToDst {
+		t.Fatal("externalDirectUDPReceiveSectionTarget() copyToDst = true, want false for regular file")
+	}
+	info, err := file.Stat()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Size() != 64 {
+		t.Fatalf("direct target size = %d, want 64", info.Size())
+	}
+}
+
+func TestExternalDirectUDPSectionWriterForTargetBypassesBufferForRegularFiles(t *testing.T) {
+	file, err := os.CreateTemp(t.TempDir(), "derpcat-section-target-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer file.Close()
+	buffered := bufio.NewWriter(file)
+
+	target, flush := externalDirectUDPSectionWriterForTarget(file, buffered, buffered.Flush)
+	if target != file {
+		t.Fatal("externalDirectUDPSectionWriterForTarget() did not use the raw regular file")
+	}
+	if err := flush(); err != nil {
+		t.Fatalf("flush() error = %v", err)
+	}
+}
+
+func TestExternalDirectUDPReceiveSectionTargetSpoolsNonFiles(t *testing.T) {
+	var dst bytes.Buffer
+
+	target, copyToDst, cleanup, err := externalDirectUDPReceiveSectionTarget(&dst, 64)
+	if err != nil {
+		t.Fatalf("externalDirectUDPReceiveSectionTarget() error = %v", err)
+	}
+	defer cleanup()
+	if target == nil {
+		t.Fatal("externalDirectUDPReceiveSectionTarget() target = nil")
+	}
+	if !copyToDst {
+		t.Fatal("externalDirectUDPReceiveSectionTarget() copyToDst = false, want true for non-file writer")
+	}
+}
+
+func TestExternalDirectUDPFinishSectionTargetSeeksDirectFileToEnd(t *testing.T) {
+	file, err := os.CreateTemp(t.TempDir(), "derpcat-section-target-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer file.Close()
+
+	if _, err := file.WriteAt([]byte("abc"), 0); err != nil {
+		t.Fatal(err)
+	}
+	if err := externalDirectUDPFinishSectionTarget(file, false, file, 3); err != nil {
+		t.Fatalf("externalDirectUDPFinishSectionTarget() error = %v", err)
+	}
+	if _, err := file.WriteString("d"); err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(file.Name())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "abcd" {
+		t.Fatalf("file contents = %q, want %q", got, "abcd")
 	}
 }
 
@@ -629,6 +790,71 @@ func TestExternalDirectUDPSectionSpoolRoundTripsAcrossLoopback(t *testing.T) {
 	}
 	if !bytes.Equal(got.Bytes(), src) {
 		t.Fatalf("received bytes length=%d want=%d equal=%t", got.Len(), len(src), bytes.Equal(got.Bytes(), src))
+	}
+}
+
+func TestExternalDirectUDPReceiveSectionSpoolParallelReturnsPartialStatsOnReceiveError(t *testing.T) {
+	server, err := net.ListenPacket("udp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer server.Close()
+	client, err := net.ListenPacket("udp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	type receiveResult struct {
+		stats probe.TransferStats
+		err   error
+	}
+	resultCh := make(chan receiveResult, 1)
+	payload := []byte("section-partial-before-cancel")
+	pending := []byte("held-pending-gap")
+	totalBytes := len(payload) + 1 + len(pending)
+	go func() {
+		stats, err := externalDirectUDPReceiveSectionSpoolParallel(ctx, []net.PacketConn{server}, io.Discard, probe.ReceiveConfig{
+			Blast:     true,
+			Transport: externalDirectUDPTransportLabel,
+		}, int64(totalBytes), nil)
+		resultCh <- receiveResult{stats: stats, err: err}
+	}()
+
+	runID := [16]byte{0x53}
+	writeExternalDirectUDPProbePacket(t, client, server.LocalAddr(), probe.Packet{Version: probe.ProtocolVersion, Type: probe.PacketTypeHello, RunID: runID})
+	for {
+		packet := readExternalDirectUDPProbePacket(t, client, 500*time.Millisecond)
+		if packet.Type == probe.PacketTypeHelloAck {
+			break
+		}
+	}
+	writeExternalDirectUDPProbePacket(t, client, server.LocalAddr(), probe.Packet{Version: probe.ProtocolVersion, Type: probe.PacketTypeData, RunID: runID, Seq: 0, Offset: 0, Payload: payload})
+	writeExternalDirectUDPProbePacket(t, client, server.LocalAddr(), probe.Packet{Version: probe.ProtocolVersion, Type: probe.PacketTypeData, RunID: runID, Seq: 2, Offset: uint64(len(payload) + 1), Payload: pending})
+	writeExternalDirectUDPProbePacket(t, client, server.LocalAddr(), probe.Packet{Version: probe.ProtocolVersion, Type: probe.PacketTypeDone, RunID: runID, Seq: 3, Offset: uint64(totalBytes)})
+	for {
+		packet := readExternalDirectUDPProbePacket(t, client, time.Second)
+		if packet.Type == probe.PacketTypeRepairRequest {
+			break
+		}
+	}
+
+	cancel()
+	select {
+	case result := <-resultCh:
+		if result.err == nil {
+			t.Fatal("externalDirectUDPReceiveSectionSpoolParallel() error = nil, want incomplete blast error")
+		}
+		if !strings.Contains(result.err.Error(), "blast incomplete") {
+			t.Fatalf("externalDirectUDPReceiveSectionSpoolParallel() error = %v, want blast incomplete", result.err)
+		}
+		if result.stats.BytesReceived != int64(len(payload)) {
+			t.Fatalf("BytesReceived = %d, want %d", result.stats.BytesReceived, len(payload))
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for canceled section receive")
 	}
 }
 

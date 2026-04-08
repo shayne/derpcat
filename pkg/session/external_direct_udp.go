@@ -31,10 +31,11 @@ const (
 	externalDirectUDPParallelism     = 8
 	externalDirectUDPChunkSize       = 1400
 	externalDirectUDPRateMbps        = 2150
-	externalDirectUDPWait            = 750 * time.Millisecond
+	externalDirectUDPWait            = 2 * time.Second
 	externalDirectUDPPunchWait       = 1200 * time.Millisecond
 	externalDirectUDPHandshakeWait   = 1500 * time.Millisecond
 	externalDirectUDPStartWait       = 30 * time.Second
+	externalDirectUDPAckWait         = 30 * time.Second
 	externalDirectUDPBufferSize      = 4 << 20
 	externalDirectUDPRepairPayloads  = true
 	externalDirectUDPTailReplayBytes = 0
@@ -151,90 +152,86 @@ func sendExternalViaDirectUDP(ctx context.Context, cfg SendConfig) error {
 	}
 
 	var sendErr error
-	if cfg.ForceRelay {
+	if cfg.ForceRelay || len(remoteCandidates) == 0 {
 		sendErr = sendExternalRelayUDP(ctx, src, transportManager, tok.SessionID, cfg.Emitter)
 	} else if peerAddr, err := waitExternalDirectUDPAddr(ctx, probeConn, transportManager); err == nil {
-		if len(remoteCandidates) == 0 {
-			sendErr = sendExternalRelayUDP(ctx, src, transportManager, tok.SessionID, cfg.Emitter)
-		} else {
-			if err := sendEnvelope(ctx, derpClient, listenerDERP, envelope{Type: envelopeDirectUDPReady}); err != nil {
+		if err := sendEnvelope(ctx, derpClient, listenerDERP, envelope{Type: envelopeDirectUDPReady}); err != nil {
+			return err
+		}
+		readyAck, err := waitForDirectUDPReadyAck(ctx, readyAckCh)
+		if err != nil {
+			if externalDirectUDPWaitCanFallback(ctx, err) {
+				sendErr = sendExternalRelayUDP(ctx, src, transportManager, tok.SessionID, cfg.Emitter)
+			} else {
 				return err
 			}
-			readyAck, err := waitForDirectUDPReadyAck(ctx, readyAckCh)
-			if err != nil {
-				if externalDirectUDPWaitCanFallback(ctx, err) {
-					sendErr = sendExternalRelayUDP(ctx, src, transportManager, tok.SessionID, cfg.Emitter)
-				} else {
-					return err
-				}
-			} else {
-				transportManager.StopDirectReads()
-				pathEmitter.Emit(StateDirect)
-				remoteAddrs := externalDirectUDPSelectRemoteAddrs(ctx, probeConns, remoteCandidates, peerAddr, cfg.Emitter)
-				probeConns, remoteAddrs = externalDirectUDPPairs(probeConns, remoteAddrs)
-				if len(probeConns) == 0 {
-					return errors.New("direct UDP established without usable remote addresses")
-				}
-				if cfg.Emitter != nil {
-					cfg.Emitter.Debug("udp-blast=true")
-					cfg.Emitter.Debug("udp-lanes=" + strconv.Itoa(len(probeConns)))
-					cfg.Emitter.Debug("udp-rate-mbps=" + strconv.Itoa(externalDirectUDPRateMbps))
-					cfg.Emitter.Debug("udp-repair-payloads=" + strconv.FormatBool(externalDirectUDPRepairPayloads))
-					cfg.Emitter.Debug("udp-tail-replay-bytes=" + strconv.Itoa(externalDirectUDPTailReplayBytes))
-					cfg.Emitter.Debug("udp-fec-group-size=" + strconv.Itoa(externalDirectUDPFECGroupSize))
-					cfg.Emitter.Debug("udp-striped-blast=false")
-					cfg.Emitter.Debug("udp-fast-discard=" + strconv.FormatBool(readyAck.FastDiscard))
-					cfg.Emitter.Debug("udp-direct-addr=" + peerAddr.String())
-					cfg.Emitter.Debug("udp-direct-addrs=" + strings.Join(remoteAddrs, ","))
-				}
-				sendCfg := probe.SendConfig{
-					Blast:                    true,
-					Transport:                externalDirectUDPTransportLabel,
-					ChunkSize:                externalDirectUDPChunkSize,
-					RateMbps:                 externalDirectUDPRateMbps,
-					RunID:                    tok.SessionID,
-					RepairPayloads:           externalDirectUDPRepairPayloads,
-					TailReplayBytes:          externalDirectUDPTailReplayBytes,
-					FECGroupSize:             externalDirectUDPFECGroupSize,
-					StripedBlast:             externalDirectUDPStripedBlast && !readyAck.FastDiscard,
-					AllowPartialParallel:     true,
-					ParallelHandshakeTimeout: externalDirectUDPHandshakeWait,
-				}
-				var stats probe.TransferStats
-				spool, spoolErr := externalDirectUDPSpoolDiscardLanes(ctx, externalDirectUDPBufferedReader(src), len(probeConns), sendCfg.ChunkSize)
-				if spoolErr != nil {
-					return spoolErr
-				}
-				defer spool.Close()
-				emitExternalDirectUDPReceiveStartDebug(cfg.Emitter, spool.TotalBytes)
-				if err := sendEnvelope(ctx, derpClient, listenerDERP, envelope{
-					Type: envelopeDirectUDPStart,
-					DirectUDPStart: &directUDPStart{
-						ExpectedBytes: spool.TotalBytes,
-						SectionSizes:  append([]int64(nil), spool.Sizes...),
-						SectionAddrs:  append([]string(nil), remoteAddrs...),
-					},
-				}); err != nil {
-					return err
-				}
-				if err := waitForDirectUDPStartAck(ctx, startAckCh); err != nil {
-					return err
-				}
-				sectionSendCfg := sendCfg
-				// Sectioned direct UDP mirrors the probe harness: each independent lane gets its own generated run ID.
-				sectionSendCfg.RunID = [16]byte{}
-				externalDirectUDPStopPunchingForBlast(punchCancel)
-				stats, err = externalDirectUDPSendDiscardSpoolParallel(ctx, probeConns, remoteAddrs, spool, sectionSendCfg)
-				if cfg.Emitter != nil {
-					cfg.Emitter.Debug("udp-send-transport=" + stats.Transport.Summary())
-					if stats.Lanes > 0 {
-						cfg.Emitter.Debug("udp-send-active-lanes=" + strconv.Itoa(stats.Lanes))
-					}
-					cfg.Emitter.Debug("udp-send-retransmits=" + strconv.FormatInt(stats.Retransmits, 10))
-					emitExternalDirectUDPStats(cfg.Emitter, "udp-send", stats.BytesSent, stats.StartedAt, stats.CompletedAt)
-				}
-				sendErr = err
+		} else {
+			transportManager.StopDirectReads()
+			pathEmitter.Emit(StateDirect)
+			remoteAddrs := externalDirectUDPSelectRemoteAddrs(ctx, probeConns, remoteCandidates, peerAddr, cfg.Emitter)
+			probeConns, remoteAddrs = externalDirectUDPPairs(probeConns, remoteAddrs)
+			if len(probeConns) == 0 {
+				return errors.New("direct UDP established without usable remote addresses")
 			}
+			if cfg.Emitter != nil {
+				cfg.Emitter.Debug("udp-blast=true")
+				cfg.Emitter.Debug("udp-lanes=" + strconv.Itoa(len(probeConns)))
+				cfg.Emitter.Debug("udp-rate-mbps=" + strconv.Itoa(externalDirectUDPRateMbps))
+				cfg.Emitter.Debug("udp-repair-payloads=" + strconv.FormatBool(externalDirectUDPRepairPayloads))
+				cfg.Emitter.Debug("udp-tail-replay-bytes=" + strconv.Itoa(externalDirectUDPTailReplayBytes))
+				cfg.Emitter.Debug("udp-fec-group-size=" + strconv.Itoa(externalDirectUDPFECGroupSize))
+				cfg.Emitter.Debug("udp-striped-blast=false")
+				cfg.Emitter.Debug("udp-fast-discard=" + strconv.FormatBool(readyAck.FastDiscard))
+				cfg.Emitter.Debug("udp-direct-addr=" + peerAddr.String())
+				cfg.Emitter.Debug("udp-direct-addrs=" + strings.Join(remoteAddrs, ","))
+			}
+			sendCfg := probe.SendConfig{
+				Blast:                    true,
+				Transport:                externalDirectUDPTransportLabel,
+				ChunkSize:                externalDirectUDPChunkSize,
+				RateMbps:                 externalDirectUDPRateMbps,
+				RunID:                    tok.SessionID,
+				RepairPayloads:           externalDirectUDPRepairPayloads,
+				TailReplayBytes:          externalDirectUDPTailReplayBytes,
+				FECGroupSize:             externalDirectUDPFECGroupSize,
+				StripedBlast:             externalDirectUDPStripedBlast && !readyAck.FastDiscard,
+				AllowPartialParallel:     true,
+				ParallelHandshakeTimeout: externalDirectUDPHandshakeWait,
+			}
+			var stats probe.TransferStats
+			spool, spoolErr := externalDirectUDPSpoolDiscardLanes(ctx, externalDirectUDPBufferedReader(src), len(probeConns), sendCfg.ChunkSize)
+			if spoolErr != nil {
+				return spoolErr
+			}
+			defer spool.Close()
+			emitExternalDirectUDPReceiveStartDebug(cfg.Emitter, spool.TotalBytes)
+			if err := sendEnvelope(ctx, derpClient, listenerDERP, envelope{
+				Type: envelopeDirectUDPStart,
+				DirectUDPStart: &directUDPStart{
+					ExpectedBytes: spool.TotalBytes,
+					SectionSizes:  append([]int64(nil), spool.Sizes...),
+					SectionAddrs:  append([]string(nil), remoteAddrs...),
+				},
+			}); err != nil {
+				return err
+			}
+			if err := waitForDirectUDPStartAck(ctx, startAckCh); err != nil {
+				return err
+			}
+			sectionSendCfg := sendCfg
+			// Sectioned direct UDP mirrors the probe harness: each independent lane gets its own generated run ID.
+			sectionSendCfg.RunID = [16]byte{}
+			externalDirectUDPStopPunchingForBlast(punchCancel)
+			stats, err = externalDirectUDPSendDiscardSpoolParallel(ctx, probeConns, remoteAddrs, spool, sectionSendCfg)
+			if cfg.Emitter != nil {
+				cfg.Emitter.Debug("udp-send-transport=" + stats.Transport.Summary())
+				if stats.Lanes > 0 {
+					cfg.Emitter.Debug("udp-send-active-lanes=" + strconv.Itoa(stats.Lanes))
+				}
+				cfg.Emitter.Debug("udp-send-retransmits=" + strconv.FormatInt(stats.Retransmits, 10))
+				emitExternalDirectUDPStats(cfg.Emitter, "udp-send", stats.BytesSent, stats.StartedAt, stats.FirstByteAt, stats.CompletedAt)
+			}
+			sendErr = err
 		}
 	} else if externalDirectUDPWaitCanFallback(ctx, err) {
 		sendErr = sendExternalRelayUDP(ctx, src, transportManager, tok.SessionID, cfg.Emitter)
@@ -244,7 +241,7 @@ func sendExternalViaDirectUDP(ctx context.Context, cfg SendConfig) error {
 	if sendErr != nil {
 		return sendErr
 	}
-	if err := waitForPeerAck(ctx, ackCh); err != nil {
+	if err := waitForPeerAckWithTimeout(ctx, ackCh, externalDirectUDPAckWait); err != nil {
 		return err
 	}
 	pathEmitter.Complete(transportManager)
@@ -356,7 +353,7 @@ func listenExternalViaDirectUDP(ctx context.Context, cfg ListenConfig) (string, 
 		}
 
 		var receiveErr error
-		if cfg.ForceRelay {
+		if cfg.ForceRelay || len(remoteCandidates) == 0 {
 			receiveErr = receiveExternalRelayUDP(ctx, dst, transportManager, session.token.SessionID, cfg.Emitter)
 		} else if _, err := waitExternalDirectUDPAddr(ctx, session.probeConn, transportManager); err == nil {
 			peerAddr, _ := transportManager.DirectAddr()
@@ -382,6 +379,9 @@ func listenExternalViaDirectUDP(ctx context.Context, cfg ListenConfig) (string, 
 					pathEmitter.Emit(StateDirect)
 					receiveDst, flushDst := externalDirectUDPBufferedWriter(dst)
 					fastDiscard := receiveDst == io.Discard
+					if !fastDiscard {
+						receiveDst, flushDst = externalDirectUDPSectionWriterForTarget(dst, receiveDst, flushDst)
+					}
 					if err := sendEnvelope(ctx, session.derp, peerDERP, envelope{
 						Type: envelopeDirectUDPReadyAck,
 						DirectUDPReadyAck: &directUDPReadyAck{
@@ -431,7 +431,7 @@ func listenExternalViaDirectUDP(ctx context.Context, cfg ListenConfig) (string, 
 							cfg.Emitter.Debug("udp-receive-active-lanes=" + strconv.Itoa(stats.Lanes))
 						}
 						cfg.Emitter.Debug("udp-receive-retransmits=" + strconv.FormatInt(stats.Retransmits, 10))
-						emitExternalDirectUDPStats(cfg.Emitter, "udp-receive", stats.BytesReceived, stats.StartedAt, stats.CompletedAt)
+						emitExternalDirectUDPStats(cfg.Emitter, "udp-receive", stats.BytesReceived, stats.StartedAt, stats.FirstByteAt, stats.CompletedAt)
 					}
 					if receiveErr == nil {
 						receiveErr = flushDst()
@@ -999,7 +999,7 @@ func externalDirectUDPWaitCanFallback(ctx context.Context, err error) bool {
 	return err != nil && ctx.Err() == nil && errors.Is(err, context.DeadlineExceeded)
 }
 
-func emitExternalDirectUDPStats(emitter *telemetry.Emitter, prefix string, bytes int64, startedAt time.Time, completedAt time.Time) {
+func emitExternalDirectUDPStats(emitter *telemetry.Emitter, prefix string, bytes int64, startedAt time.Time, firstByteAt time.Time, completedAt time.Time) {
 	if emitter == nil || bytes <= 0 || startedAt.IsZero() || completedAt.IsZero() || !completedAt.After(startedAt) {
 		return
 	}
@@ -1007,6 +1007,15 @@ func emitExternalDirectUDPStats(emitter *telemetry.Emitter, prefix string, bytes
 	emitter.Debug(prefix + "-duration-ms=" + strconv.FormatInt(duration.Milliseconds(), 10))
 	mbps := float64(bytes*8) / duration.Seconds() / 1_000_000
 	emitter.Debug(prefix + "-goodput-mbps=" + strconv.FormatFloat(mbps, 'f', 2, 64))
+	if firstByteAt.IsZero() || firstByteAt.Before(startedAt) || !completedAt.After(firstByteAt) {
+		return
+	}
+	firstByteDelay := firstByteAt.Sub(startedAt)
+	dataDuration := completedAt.Sub(firstByteAt)
+	dataMbps := float64(bytes*8) / dataDuration.Seconds() / 1_000_000
+	emitter.Debug(prefix + "-first-byte-ms=" + strconv.FormatInt(firstByteDelay.Milliseconds(), 10))
+	emitter.Debug(prefix + "-data-duration-ms=" + strconv.FormatInt(dataDuration.Milliseconds(), 10))
+	emitter.Debug(prefix + "-data-goodput-mbps=" + strconv.FormatFloat(dataMbps, 'f', 2, 64))
 }
 
 func emitExternalDirectUDPReceiveStartDebug(emitter *telemetry.Emitter, expectedBytes int64) {
@@ -1299,15 +1308,11 @@ func externalDirectUDPReceiveSectionSpoolParallel(ctx context.Context, conns []n
 	if dst == nil {
 		dst = io.Discard
 	}
-	file, err := os.CreateTemp("", "derpcat-receive-spool-*")
+	file, copyToDst, cleanup, err := externalDirectUDPReceiveSectionTarget(dst, totalBytes)
 	if err != nil {
 		return probe.TransferStats{}, err
 	}
-	path := file.Name()
-	defer func() {
-		_ = file.Close()
-		_ = os.Remove(path)
-	}()
+	defer cleanup()
 
 	receiveCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -1341,25 +1346,82 @@ func externalDirectUDPReceiveSectionSpoolParallel(ctx context.Context, conns []n
 		externalDirectUDPMergeReceiveStats(&stats, result.stats)
 	}
 	if receiveErr != nil {
-		return probe.TransferStats{}, receiveErr
-	}
-	if _, err := file.Seek(0, io.SeekStart); err != nil {
-		return probe.TransferStats{}, err
-	}
-	if totalBytes > 0 {
-		written, err := io.CopyN(dst, file, totalBytes)
-		if err != nil {
-			return probe.TransferStats{}, err
+		stats.CompletedAt = time.Now()
+		if stats.FirstByteAt.IsZero() && stats.BytesReceived > 0 {
+			stats.FirstByteAt = startedAt
 		}
-		if written != totalBytes {
-			return probe.TransferStats{}, io.ErrShortWrite
-		}
+		return stats, receiveErr
+	}
+	if err := externalDirectUDPFinishSectionTarget(file, copyToDst, dst, totalBytes); err != nil {
+		stats.CompletedAt = time.Now()
+		return stats, err
 	}
 	stats.CompletedAt = time.Now()
 	if stats.FirstByteAt.IsZero() && stats.BytesReceived > 0 {
 		stats.FirstByteAt = startedAt
 	}
 	return stats, nil
+}
+
+func externalDirectUDPReceiveSectionTarget(dst io.Writer, totalBytes int64) (*os.File, bool, func(), error) {
+	if file, ok := dst.(*os.File); ok && file != nil {
+		info, err := file.Stat()
+		if err == nil && info.Mode().IsRegular() {
+			if totalBytes > 0 {
+				if err := file.Truncate(totalBytes); err != nil {
+					return nil, false, nil, err
+				}
+			}
+			return file, false, func() {}, nil
+		}
+	}
+	file, err := os.CreateTemp("", "derpcat-receive-spool-*")
+	if err != nil {
+		return nil, false, nil, err
+	}
+	path := file.Name()
+	cleanup := func() {
+		_ = file.Close()
+		_ = os.Remove(path)
+	}
+	return file, true, cleanup, nil
+}
+
+func externalDirectUDPSectionWriterForTarget(dst io.Writer, buffered io.Writer, flush func() error) (io.Writer, func() error) {
+	if file, ok := dst.(*os.File); ok && file != nil {
+		info, err := file.Stat()
+		if err == nil && info.Mode().IsRegular() {
+			return file, func() error { return nil }
+		}
+	}
+	if buffered == nil {
+		buffered = dst
+	}
+	if flush == nil {
+		flush = func() error { return nil }
+	}
+	return buffered, flush
+}
+
+func externalDirectUDPFinishSectionTarget(file *os.File, copyToDst bool, dst io.Writer, totalBytes int64) error {
+	if file == nil || totalBytes <= 0 {
+		return nil
+	}
+	if !copyToDst {
+		_, err := file.Seek(totalBytes, io.SeekStart)
+		return err
+	}
+	if _, err := file.Seek(0, io.SeekStart); err != nil {
+		return err
+	}
+	written, err := io.CopyN(dst, file, totalBytes)
+	if err != nil {
+		return err
+	}
+	if written != totalBytes {
+		return io.ErrShortWrite
+	}
+	return nil
 }
 
 func externalDirectUDPReceiveSectionLayout(totalBytes int64, connCount int, sectionSizes []int64) ([]int64, []int64, error) {
