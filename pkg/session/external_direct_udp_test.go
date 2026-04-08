@@ -710,7 +710,7 @@ func TestExternalDirectUDPSelectRateFromProbeSamplesBacksOffTwoTiersAtTopProbeCo
 	}
 }
 
-func TestExternalDirectUDPSelectRateFromProbeSamplesKeepsHighThroughputKnee(t *testing.T) {
+func TestExternalDirectUDPSelectRateFromProbeSamplesBacksOffAtLossyHighThroughputKnee(t *testing.T) {
 	sent := []directUDPRateProbeSample{
 		{RateMbps: 150, BytesSent: 3_595_200, DurationMillis: 200},
 		{RateMbps: 350, BytesSent: 8_590_500, DurationMillis: 200},
@@ -726,8 +726,50 @@ func TestExternalDirectUDPSelectRateFromProbeSamplesKeepsHighThroughputKnee(t *t
 		{RateMbps: 2250, BytesReceived: 44_984_750, DurationMillis: 200},
 	}
 
-	if got, want := externalDirectUDPSelectRateFromProbeSamples(2250, sent, received), 2069; got != want {
-		t.Fatalf("externalDirectUDPSelectRateFromProbeSamples(high-throughput knee) = %d, want %d", got, want)
+	if got, want := externalDirectUDPSelectRateFromProbeSamples(2250, sent, received), 700; got != want {
+		t.Fatalf("externalDirectUDPSelectRateFromProbeSamples(lossy high-throughput knee) = %d, want %d", got, want)
+	}
+}
+
+func TestExternalDirectUDPSelectRateFromProbeSamplesUsesCleanTopProbeObservedCeiling(t *testing.T) {
+	sent := []directUDPRateProbeSample{
+		{RateMbps: 150, BytesSent: 3_598_400, DurationMillis: 200},
+		{RateMbps: 350, BytesSent: 8_602_944, DurationMillis: 200},
+		{RateMbps: 700, BytesSent: 17_395_496, DurationMillis: 200},
+		{RateMbps: 1200, BytesSent: 30_000_968, DurationMillis: 200},
+		{RateMbps: 2250, BytesSent: 40_189_976, DurationMillis: 200},
+	}
+	received := []directUDPRateProbeSample{
+		{RateMbps: 150, BytesReceived: 3_598_400, DurationMillis: 200},
+		{RateMbps: 350, BytesReceived: 8_602_944, DurationMillis: 200},
+		{RateMbps: 700, BytesReceived: 17_395_496, DurationMillis: 200},
+		{RateMbps: 1200, BytesReceived: 30_000_968, DurationMillis: 200},
+		{RateMbps: 2250, BytesReceived: 40_189_976, DurationMillis: 200},
+	}
+
+	if got, want := externalDirectUDPSelectRateFromProbeSamples(2250, sent, received), 1849; got != want {
+		t.Fatalf("externalDirectUDPSelectRateFromProbeSamples(clean top probe observed ceiling) = %d, want %d", got, want)
+	}
+}
+
+func TestExternalDirectUDPSelectRateFromProbeSamplesBacksOffAtLossyTopProbeEvenWhenGoodputIsHigh(t *testing.T) {
+	sent := []directUDPRateProbeSample{
+		{RateMbps: 150, BytesSent: 3_598_400, DurationMillis: 200},
+		{RateMbps: 350, BytesSent: 8_558_656, DurationMillis: 200},
+		{RateMbps: 700, BytesSent: 17_348_440, DurationMillis: 200},
+		{RateMbps: 1200, BytesSent: 29_815_512, DurationMillis: 200},
+		{RateMbps: 2250, BytesSent: 55_808_070, DurationMillis: 200},
+	}
+	received := []directUDPRateProbeSample{
+		{RateMbps: 150, BytesReceived: 3_598_400, DurationMillis: 200},
+		{RateMbps: 350, BytesReceived: 8_558_656, DurationMillis: 200},
+		{RateMbps: 700, BytesReceived: 17_348_440, DurationMillis: 200},
+		{RateMbps: 1200, BytesReceived: 29_815_512, DurationMillis: 200},
+		{RateMbps: 2250, BytesReceived: 44_646_456, DurationMillis: 200},
+	}
+
+	if got, want := externalDirectUDPSelectRateFromProbeSamples(2250, sent, received), 700; got != want {
+		t.Fatalf("externalDirectUDPSelectRateFromProbeSamples(lossy top probe high goodput) = %d, want %d", got, want)
 	}
 }
 

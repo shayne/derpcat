@@ -52,6 +52,7 @@ const (
 	externalDirectUDPRateProbeMinMbps   = 64
 	externalDirectUDPRateProbeHighShare = 0.79
 	externalDirectUDPRateProbeHighGain  = 1.40
+	externalDirectUDPRateProbeClean     = 0.98
 )
 
 var externalDirectUDPRateProbeMagic = [16]byte{0, 'd', 'e', 'r', 'p', 'c', 'a', 't', '-', 'r', 'a', 't', 'e', '-', 'v', '1'}
@@ -1253,8 +1254,20 @@ func externalDirectUDPSelectRateFromProbeSamples(maxRateMbps int, sent []directU
 		if current.rate > 0 {
 			efficiency = current.goodput / float64(current.rate)
 		}
-		highThroughputKnee := current.goodput >= float64(maxRateMbps)*externalDirectUDPRateProbeHighShare && current.goodput >= prev.goodput*externalDirectUDPRateProbeHighGain
-		if current.delivery >= 0.70 && current.goodput >= prev.goodput*0.75 && (efficiency >= 0.85 || highThroughputKnee) {
+		topProbe := i == len(candidates)-1 || current.rate == maxRateMbps
+		topProbeCleanGain := topProbe && current.delivery >= externalDirectUDPRateProbeClean && current.goodput > prev.goodput
+		if topProbeCleanGain {
+			selected := int(current.goodput*1.15 + 0.5)
+			if selected < externalDirectUDPRateProbeMinMbps {
+				selected = externalDirectUDPRateProbeMinMbps
+			}
+			if selected > maxRateMbps {
+				selected = maxRateMbps
+			}
+			return selected
+		}
+		highThroughputKnee := current.delivery >= externalDirectUDPRateProbeClean && current.goodput >= float64(maxRateMbps)*externalDirectUDPRateProbeHighShare && current.goodput >= prev.goodput*externalDirectUDPRateProbeHighGain
+		if current.delivery >= externalDirectUDPRateProbeClean && current.goodput >= prev.goodput*0.75 && (efficiency >= 0.85 || highThroughputKnee) {
 			continue
 		}
 		midProbeSoftLoss := current.rate < maxRateMbps && current.delivery >= 0.70 && current.goodput >= prev.goodput
@@ -1279,7 +1292,7 @@ func externalDirectUDPSelectRateFromProbeSamples(maxRateMbps int, sent []directU
 			}
 			return selected
 		}
-		topProbeStillGaining := (i == len(candidates)-1 || current.rate == maxRateMbps) && current.delivery >= 0.98 && current.goodput >= prev.goodput*externalDirectUDPRateProbeHighGain
+		topProbeStillGaining := topProbe && current.delivery >= externalDirectUDPRateProbeClean && current.goodput >= prev.goodput*externalDirectUDPRateProbeHighGain
 		if topProbeStillGaining {
 			selected := int(current.goodput*1.15 + 0.5)
 			if selected < externalDirectUDPRateProbeMinMbps {
