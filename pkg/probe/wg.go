@@ -712,7 +712,7 @@ func writeWireGuardDrainAck(conn net.Conn) error {
 		return err
 	}
 	if closer, ok := conn.(interface{ CloseWrite() error }); ok {
-		return closer.CloseWrite()
+		_ = closer.CloseWrite()
 	}
 	return nil
 }
