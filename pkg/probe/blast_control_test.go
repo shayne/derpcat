@@ -138,6 +138,25 @@ func TestHandleBlastSendControlEventUpdatesAdaptiveRate(t *testing.T) {
 	}
 }
 
+func TestHandleBlastSendControlEventRecordsReceiverAckFloor(t *testing.T) {
+	now := time.Unix(20, 0)
+	control := newBlastSendControl(100, 400, now)
+	event := blastSendControlEvent{
+		typ:        PacketTypeStats,
+		payload:    marshalBlastStatsPayload(blastReceiverStats{ReceivedPayloadBytes: 4 << 20, ReceivedPackets: 3000, MaxSeqPlusOne: 3200, AckFloor: 2048}),
+		receivedAt: now.Add(blastRateFeedbackInterval),
+	}
+
+	_, _, err := handleBlastSendControlEvent(context.Background(), nil, controlTestAddr("peer"), nil, &TransferStats{}, newBlastRepairDeduper(), control, event)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if got := control.AckFloor(); got != 2048 {
+		t.Fatalf("AckFloor() = %d, want 2048", got)
+	}
+}
+
 func TestReadBlastSendControlEventsEmitsRepairComplete(t *testing.T) {
 	runID := [16]byte{5}
 	repairComplete, err := MarshalPacket(Packet{

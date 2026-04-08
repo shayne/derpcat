@@ -34,6 +34,9 @@ func TestExternalDirectUDPDefaultUsesEightSectionedLanesWithFEC(t *testing.T) {
 	if got, want := externalDirectUDPFECGroupSize, 32; got != want {
 		t.Fatalf("externalDirectUDPFECGroupSize = %d, want %d", got, want)
 	}
+	if got, want := externalDirectUDPStreamFECGroupSize, 0; got != want {
+		t.Fatalf("externalDirectUDPStreamFECGroupSize = %d, want %d", got, want)
+	}
 	if externalDirectUDPStripedBlast {
 		t.Fatal("externalDirectUDPStripedBlast = true, want false")
 	}
@@ -122,6 +125,28 @@ func TestEmitExternalDirectUDPStatsIncludesDataGoodputFromFirstByte(t *testing.T
 		"udp-receive-first-byte-ms=500\n",
 		"udp-receive-data-duration-ms=1000\n",
 		"udp-receive-data-goodput-mbps=1000.00\n",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("emitted stats = %q, want %q", got, want)
+		}
+	}
+}
+
+func TestEmitExternalDirectUDPStatsIncludesDataGoodputWithoutFirstByte(t *testing.T) {
+	var buf bytes.Buffer
+	emitter := telemetry.New(&buf, telemetry.LevelVerbose)
+	startedAt := time.Unix(0, 0)
+	completedAt := startedAt.Add(1 * time.Second)
+
+	emitExternalDirectUDPStats(emitter, "udp-send", 125_000_000, startedAt, time.Time{}, completedAt)
+
+	got := buf.String()
+	for _, want := range []string{
+		"udp-send-duration-ms=1000\n",
+		"udp-send-goodput-mbps=1000.00\n",
+		"udp-send-first-byte-ms=0\n",
+		"udp-send-data-duration-ms=1000\n",
+		"udp-send-data-goodput-mbps=1000.00\n",
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("emitted stats = %q, want %q", got, want)
@@ -259,6 +284,7 @@ func TestWaitForDirectUDPStartReturnsExpectedBytes(t *testing.T) {
 			ExpectedBytes: 12345,
 			SectionSizes:  []int64{6173, 6172},
 			SectionAddrs:  []string{"68.20.14.192:38183", "68.20.14.192:34375"},
+			Stream:        true,
 		},
 	})
 	if err != nil {
@@ -282,6 +308,9 @@ func TestWaitForDirectUDPStartReturnsExpectedBytes(t *testing.T) {
 	}
 	if fmt.Sprint(got.SectionAddrs) != fmt.Sprint([]string{"68.20.14.192:38183", "68.20.14.192:34375"}) {
 		t.Fatalf("waitForDirectUDPStart() SectionAddrs = %v, want selected section addresses", got.SectionAddrs)
+	}
+	if !got.Stream {
+		t.Fatal("waitForDirectUDPStart() Stream = false, want true")
 	}
 }
 

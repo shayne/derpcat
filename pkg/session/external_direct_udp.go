@@ -43,7 +43,9 @@ const (
 	externalDirectUDPBufferSize         = 4 << 20
 	externalDirectUDPRepairPayloads     = true
 	externalDirectUDPTailReplayBytes    = 0
+	externalDirectUDPStreamReplayBytes  = 256 << 20
 	externalDirectUDPFECGroupSize       = 32
+	externalDirectUDPStreamFECGroupSize = 0
 	externalDirectUDPStripedBlast       = false
 	externalDirectUDPDiscardQueue       = 32
 	externalDirectUDPRateProbeMinBytes  = 256 << 20
@@ -158,11 +160,6 @@ func sendExternalViaDirectUDP(ctx context.Context, cfg SendConfig) error {
 		return pkt.From == listenerDERP && isDirectUDPStartAckPayload(pkt.Payload)
 	})
 	defer unsubscribeStartAck()
-	rateProbeCh, unsubscribeRateProbe := derpClient.SubscribeLossless(func(pkt derpbind.Packet) bool {
-		return pkt.From == listenerDERP && isDirectUDPRateProbePayload(pkt.Payload)
-	})
-	defer unsubscribeRateProbe()
-
 	pathEmitter := newTransportPathEmitter(cfg.Emitter)
 	pathEmitter.Emit(StateProbing)
 	transportCtx, transportCancel := context.WithCancel(ctx)
@@ -204,16 +201,18 @@ func sendExternalViaDirectUDP(ctx context.Context, cfg SendConfig) error {
 			if len(probeConns) == 0 {
 				return errors.New("direct UDP established without usable remote addresses")
 			}
-			maxRateMbps := externalDirectUDPRateMbpsForLanes(externalDirectUDPRateMbps, len(probeConns))
+			streamProbeConn := probeConns[0]
+			streamRemoteAddr := remoteAddrs[0]
+			maxRateMbps := externalDirectUDPRateMbps
 			activeRateMbps := maxRateMbps
 			if cfg.Emitter != nil {
 				cfg.Emitter.Debug("udp-blast=true")
-				cfg.Emitter.Debug("udp-lanes=" + strconv.Itoa(len(probeConns)))
+				cfg.Emitter.Debug("udp-lanes=" + strconv.Itoa(1))
 				cfg.Emitter.Debug("udp-rate-max-mbps=" + strconv.Itoa(maxRateMbps))
 				cfg.Emitter.Debug("udp-adaptive-rate=true")
 				cfg.Emitter.Debug("udp-repair-payloads=" + strconv.FormatBool(externalDirectUDPRepairPayloads))
-				cfg.Emitter.Debug("udp-tail-replay-bytes=" + strconv.Itoa(externalDirectUDPTailReplayBytes))
-				cfg.Emitter.Debug("udp-fec-group-size=" + strconv.Itoa(externalDirectUDPFECGroupSize))
+				cfg.Emitter.Debug("udp-tail-replay-bytes=0")
+				cfg.Emitter.Debug("udp-fec-group-size=" + strconv.Itoa(externalDirectUDPStreamFECGroupSize))
 				cfg.Emitter.Debug("udp-striped-blast=false")
 				cfg.Emitter.Debug("udp-fast-discard=" + strconv.FormatBool(readyAck.FastDiscard))
 				cfg.Emitter.Debug("udp-direct-addr=" + peerAddr.String())
@@ -231,31 +230,20 @@ func sendExternalViaDirectUDP(ctx context.Context, cfg SendConfig) error {
 				RateCeilingMbps:          maxRateMbps,
 				RunID:                    tok.SessionID,
 				RepairPayloads:           externalDirectUDPRepairPayloads,
-				TailReplayBytes:          externalDirectUDPTailReplayBytes,
-				FECGroupSize:             externalDirectUDPFECGroupSize,
+				TailReplayBytes:          0,
+				StreamReplayWindowBytes:  externalDirectUDPStreamReplayBytes,
+				FECGroupSize:             externalDirectUDPStreamFECGroupSize,
 				StripedBlast:             externalDirectUDPStripedBlast && !readyAck.FastDiscard,
 				PacketAEAD:               packetAEAD,
 				AllowPartialParallel:     true,
 				ParallelHandshakeTimeout: externalDirectUDPHandshakeWait,
 			}
 			var stats probe.TransferStats
-			spool, spoolErr := externalDirectUDPSpoolDiscardLanes(ctx, externalDirectUDPBufferedReader(src), len(probeConns), sendCfg.ChunkSize)
-			if spoolErr != nil {
-				return spoolErr
-			}
-			defer spool.Close()
-			rateProbeRates := externalDirectUDPRateProbeRates(activeRateMbps, spool.TotalBytes)
-			if cfg.Emitter != nil && len(rateProbeRates) > 0 {
-				cfg.Emitter.Debug("udp-rate-probe-rates=" + externalDirectUDPFormatInts(rateProbeRates))
-			}
-			emitExternalDirectUDPReceiveStartDebug(cfg.Emitter, spool.TotalBytes)
+			emitExternalDirectUDPReceiveStartDebug(cfg.Emitter, 0)
 			if err := sendEnvelope(ctx, derpClient, listenerDERP, envelope{
 				Type: envelopeDirectUDPStart,
 				DirectUDPStart: &directUDPStart{
-					ExpectedBytes: spool.TotalBytes,
-					SectionSizes:  append([]int64(nil), spool.Sizes...),
-					SectionAddrs:  append([]string(nil), remoteAddrs...),
-					ProbeRates:    append([]int(nil), rateProbeRates...),
+					Stream: true,
 				},
 			}); err != nil {
 				return err
@@ -263,42 +251,18 @@ func sendExternalViaDirectUDP(ctx context.Context, cfg SendConfig) error {
 			if err := waitForDirectUDPStartAck(ctx, startAckCh); err != nil {
 				return err
 			}
-			if len(rateProbeRates) > 0 {
-				sentSamples, probeErr := externalDirectUDPSendRateProbes(ctx, probeConns, remoteAddrs, rateProbeRates)
-				if probeErr != nil {
-					if cfg.Emitter != nil {
-						cfg.Emitter.Debug("udp-rate-probe-error=" + probeErr.Error())
-					}
-				} else {
-					probeResult, resultErr := waitForDirectUDPRateProbeResult(ctx, rateProbeCh, len(rateProbeRates))
-					if resultErr != nil {
-						if cfg.Emitter != nil {
-							cfg.Emitter.Debug("udp-rate-probe-result-error=" + resultErr.Error())
-						}
-					} else {
-						activeRateMbps = externalDirectUDPSelectRateFromProbeSamples(activeRateMbps, sentSamples, probeResult.Samples)
-						sendCfg.RateMbps = activeRateMbps
-						if cfg.Emitter != nil {
-							cfg.Emitter.Debug("udp-rate-probe-samples=" + externalDirectUDPFormatRateProbeSamples(sentSamples, probeResult.Samples))
-							cfg.Emitter.Debug("udp-rate-mbps=" + strconv.Itoa(activeRateMbps))
-						}
-					}
-				}
-			}
-			if cfg.Emitter != nil && len(rateProbeRates) == 0 {
+			if cfg.Emitter != nil {
 				cfg.Emitter.Debug("udp-rate-mbps=" + strconv.Itoa(activeRateMbps))
+				cfg.Emitter.Debug("udp-stream=true")
+				cfg.Emitter.Debug("udp-stream-replay-window-bytes=" + strconv.FormatUint(sendCfg.StreamReplayWindowBytes, 10))
 			}
-			sectionSendCfg := sendCfg
-			// Sectioned direct UDP derives stable per-lane run IDs so stale probe packets cannot enter the payload receiver.
-			sectionSendCfg.RunID = tok.SessionID
 			externalDirectUDPStopPunchingForBlast(punchCancel)
-			stats, err = externalDirectUDPSendDiscardSpoolParallel(ctx, probeConns, remoteAddrs, spool, sectionSendCfg)
+			stats, err = probe.Send(ctx, streamProbeConn, streamRemoteAddr, externalDirectUDPBufferedReader(src), sendCfg)
 			if cfg.Emitter != nil {
 				cfg.Emitter.Debug("udp-send-transport=" + stats.Transport.Summary())
-				if stats.Lanes > 0 {
-					cfg.Emitter.Debug("udp-send-active-lanes=" + strconv.Itoa(stats.Lanes))
-				}
+				cfg.Emitter.Debug("udp-send-active-lanes=1")
 				cfg.Emitter.Debug("udp-send-retransmits=" + strconv.FormatInt(stats.Retransmits, 10))
+				cfg.Emitter.Debug("udp-send-max-replay-bytes=" + strconv.FormatUint(stats.MaxReplayBytes, 10))
 				emitExternalDirectUDPStats(cfg.Emitter, "udp-send", stats.BytesSent, stats.StartedAt, stats.FirstByteAt, stats.CompletedAt)
 			}
 			sendErr = err
@@ -464,7 +428,7 @@ func listenExternalViaDirectUDP(ctx context.Context, cfg ListenConfig) (string, 
 						cfg.Emitter.Debug("udp-blast=true")
 						cfg.Emitter.Debug("udp-lanes=" + strconv.Itoa(len(probeConns)))
 						cfg.Emitter.Debug("udp-require-complete=" + strconv.FormatBool(!fastDiscard))
-						cfg.Emitter.Debug("udp-fec-group-size=" + strconv.Itoa(externalDirectUDPFECGroupSize))
+						cfg.Emitter.Debug("udp-fec-group-size=" + strconv.Itoa(externalDirectUDPStreamFECGroupSize))
 						cfg.Emitter.Debug("udp-striped-blast=false")
 						cfg.Emitter.Debug("udp-fast-discard=" + strconv.FormatBool(fastDiscard))
 						if peerAddr != nil {
@@ -483,6 +447,9 @@ func listenExternalViaDirectUDP(ctx context.Context, cfg ListenConfig) (string, 
 					start, receiveErr = waitForDirectUDPStart(ctx, startCh)
 					if receiveErr != nil {
 						return tok, receiveErr
+					}
+					if cfg.Emitter != nil {
+						cfg.Emitter.Debug("udp-stream=" + strconv.FormatBool(start.Stream))
 					}
 					emitExternalDirectUDPReceiveStartDebug(cfg.Emitter, start.ExpectedBytes)
 					if receiveErr = sendEnvelope(ctx, session.derp, peerDERP, envelope{Type: envelopeDirectUDPStartAck}); receiveErr != nil {
@@ -506,7 +473,12 @@ func listenExternalViaDirectUDP(ctx context.Context, cfg ListenConfig) (string, 
 							return tok, receiveErr
 						}
 					}
-					if fastDiscard {
+					if start.Stream {
+						receiveCfg.RequireComplete = true
+						receiveCfg.FECGroupSize = externalDirectUDPStreamFECGroupSize
+						receiveCfg.ExpectedRunID = session.token.SessionID
+						stats, receiveErr = probe.ReceiveBlastParallelToWriter(ctx, probeConns, receiveDst, receiveCfg, start.ExpectedBytes)
+					} else if fastDiscard {
 						stats, receiveErr = probe.ReceiveBlastParallelToWriter(ctx, probeConns, receiveDst, receiveCfg, start.ExpectedBytes)
 					} else {
 						receiveCfg.RequireComplete = true
@@ -1037,91 +1009,6 @@ func externalDirectUDPRateProbeRates(maxRateMbps int, totalBytes int64) []int {
 	return out
 }
 
-func externalDirectUDPSendRateProbes(ctx context.Context, conns []net.PacketConn, remoteAddrs []string, rates []int) ([]directUDPRateProbeSample, error) {
-	if len(rates) == 0 {
-		return nil, nil
-	}
-	if len(conns) == 0 {
-		return nil, errors.New("no packet conns")
-	}
-	if len(conns) != len(remoteAddrs) {
-		return nil, fmt.Errorf("packet conn count %d does not match remote addr count %d", len(conns), len(remoteAddrs))
-	}
-	peers := make([]net.Addr, len(remoteAddrs))
-	for i, addr := range remoteAddrs {
-		peer, err := net.ResolveUDPAddr("udp", addr)
-		if err != nil {
-			return nil, err
-		}
-		peers[i] = peer
-	}
-	samples := make([]directUDPRateProbeSample, len(rates))
-	for i, rate := range rates {
-		sent, err := externalDirectUDPSendRateProbe(ctx, conns, peers, i, rate)
-		samples[i] = directUDPRateProbeSample{
-			RateMbps:       rate,
-			BytesSent:      sent,
-			DurationMillis: externalDirectUDPRateProbeDuration.Milliseconds(),
-		}
-		if err != nil {
-			return samples, err
-		}
-	}
-	return samples, nil
-}
-
-func externalDirectUDPSendRateProbe(ctx context.Context, conns []net.PacketConn, peers []net.Addr, sampleIndex int, rateMbps int) (int64, error) {
-	if rateMbps <= 0 {
-		return 0, nil
-	}
-	laneRate := externalDirectUDPPerLaneRateMbps(rateMbps, len(conns))
-	results := make(chan externalDirectUDPRateProbeSendResult, len(conns))
-	startedAt := time.Now()
-	deadline := startedAt.Add(externalDirectUDPRateProbeDuration)
-	for i, conn := range conns {
-		go func(conn net.PacketConn, peer net.Addr) {
-			sent, err := externalDirectUDPSendRateProbeLane(ctx, conn, peer, sampleIndex, laneRate, startedAt, deadline)
-			results <- externalDirectUDPRateProbeSendResult{bytes: sent, err: err}
-		}(conn, peers[i])
-	}
-	var total int64
-	var firstErr error
-	for range conns {
-		result := <-results
-		total += result.bytes
-		if result.err != nil && firstErr == nil {
-			firstErr = result.err
-		}
-	}
-	return total, firstErr
-}
-
-type externalDirectUDPRateProbeSendResult struct {
-	bytes int64
-	err   error
-}
-
-func externalDirectUDPSendRateProbeLane(ctx context.Context, conn net.PacketConn, peer net.Addr, sampleIndex int, rateMbps int, startedAt time.Time, deadline time.Time) (int64, error) {
-	packet := make([]byte, externalDirectUDPChunkSize)
-	copy(packet, externalDirectUDPRateProbeMagic[:])
-	binary.BigEndian.PutUint32(packet[16:20], uint32(sampleIndex))
-	var sent int64
-	for time.Now().Before(deadline) {
-		if err := ctx.Err(); err != nil {
-			return sent, err
-		}
-		n, err := conn.WriteTo(packet, peer)
-		if err != nil {
-			return sent, err
-		}
-		sent += int64(n)
-		if err := externalDirectUDPPace(ctx, startedAt, uint64(sent), rateMbps); err != nil {
-			return sent, err
-		}
-	}
-	return sent, nil
-}
-
 func externalDirectUDPReceiveRateProbes(ctx context.Context, conns []net.PacketConn, rates []int) ([]directUDPRateProbeSample, error) {
 	if len(rates) == 0 {
 		return nil, nil
@@ -1339,14 +1226,6 @@ func externalDirectUDPSampleGoodputMbps(bytes int64, durationMillis int64) float
 	return float64(bytes*8) / float64(durationMillis) / 1000
 }
 
-func externalDirectUDPFormatInts(values []int) string {
-	parts := make([]string, 0, len(values))
-	for _, value := range values {
-		parts = append(parts, strconv.Itoa(value))
-	}
-	return strings.Join(parts, ",")
-}
-
 func externalDirectUDPFormatRateProbeSamples(sent []directUDPRateProbeSample, received []directUDPRateProbeSample) string {
 	sentByRate := make(map[int]directUDPRateProbeSample, len(sent))
 	for _, sample := range sent {
@@ -1366,25 +1245,6 @@ func externalDirectUDPFormatRateProbeSamples(sent []directUDPRateProbeSample, re
 		parts = append(parts, fmt.Sprintf("%d:rx=%d:goodput=%.2f:delivery=%.2f", sample.RateMbps, sample.BytesReceived, goodput, delivery))
 	}
 	return strings.Join(parts, ",")
-}
-
-func externalDirectUDPPace(ctx context.Context, startedAt time.Time, bytesSent uint64, rateMbps int) error {
-	if rateMbps <= 0 || bytesSent == 0 {
-		return nil
-	}
-	target := time.Duration((float64(bytesSent*8) / float64(rateMbps*1000*1000)) * float64(time.Second))
-	sleepFor := time.Until(startedAt.Add(target))
-	if sleepFor <= 0 {
-		return nil
-	}
-	timer := time.NewTimer(sleepFor)
-	defer timer.Stop()
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case <-timer.C:
-		return nil
-	}
 }
 
 func externalDirectUDPOrderConnsForSections(conns []net.PacketConn, localCandidates []string, sectionAddrs []string) ([]net.PacketConn, error) {
@@ -1480,8 +1340,10 @@ func emitExternalDirectUDPStats(emitter *telemetry.Emitter, prefix string, bytes
 	emitter.Debug(prefix + "-duration-ms=" + strconv.FormatInt(duration.Milliseconds(), 10))
 	mbps := float64(bytes*8) / duration.Seconds() / 1_000_000
 	emitter.Debug(prefix + "-goodput-mbps=" + strconv.FormatFloat(mbps, 'f', 2, 64))
-	if firstByteAt.IsZero() || firstByteAt.Before(startedAt) || !completedAt.After(firstByteAt) {
-		return
+	if firstByteAt.IsZero() {
+		firstByteAt = startedAt
+	} else if firstByteAt.Before(startedAt) || !completedAt.After(firstByteAt) {
+		firstByteAt = startedAt
 	}
 	firstByteDelay := firstByteAt.Sub(startedAt)
 	dataDuration := completedAt.Sub(firstByteAt)
@@ -1563,27 +1425,6 @@ func waitForDirectUDPStartAck(ctx context.Context, startAckCh <-chan derpbind.Pa
 	return nil
 }
 
-func waitForDirectUDPRateProbeResult(ctx context.Context, rateProbeCh <-chan derpbind.Packet, samples int) (directUDPRateProbeResult, error) {
-	wait := externalDirectUDPStartWait
-	if samples > 0 {
-		wait = time.Duration(samples)*externalDirectUDPRateProbeDuration + 5*time.Second
-	}
-	waitCtx, cancel := context.WithTimeout(ctx, wait)
-	defer cancel()
-	pkt, err := receiveSubscribedPacket(waitCtx, rateProbeCh)
-	if err != nil {
-		return directUDPRateProbeResult{}, err
-	}
-	env, err := decodeEnvelope(pkt.Payload)
-	if err != nil || env.Type != envelopeDirectUDPRateProbe {
-		return directUDPRateProbeResult{}, errors.New("unexpected direct UDP rate probe result")
-	}
-	if env.DirectUDPRateProbe == nil {
-		return directUDPRateProbeResult{}, nil
-	}
-	return *env.DirectUDPRateProbe, nil
-}
-
 func isDirectUDPReadyPayload(payload []byte) bool {
 	if len(payload) == 0 || payload[0] != '{' {
 		return false
@@ -1606,14 +1447,6 @@ func isDirectUDPStartAckPayload(payload []byte) bool {
 	}
 	env, err := decodeEnvelope(payload)
 	return err == nil && env.Type == envelopeDirectUDPStartAck
-}
-
-func isDirectUDPRateProbePayload(payload []byte) bool {
-	if len(payload) == 0 || payload[0] != '{' {
-		return false
-	}
-	env, err := decodeEnvelope(payload)
-	return err == nil && env.Type == envelopeDirectUDPRateProbe
 }
 
 type externalDirectUDPDiscardSendResult struct {

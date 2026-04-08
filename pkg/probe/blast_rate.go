@@ -33,6 +33,7 @@ type blastSendControl struct {
 	adaptive         bool
 	controller       *blastRateController
 	sentPayloadBytes uint64
+	ackFloor         uint64
 }
 
 type blastPacer struct {
@@ -79,6 +80,13 @@ func (c *blastSendControl) SetSentPayloadBytes(bytes uint64) {
 	c.sentPayloadBytes = bytes
 }
 
+func (c *blastSendControl) AckFloor() uint64 {
+	if c == nil {
+		return 0
+	}
+	return c.ackFloor
+}
+
 func (c *blastSendControl) ObserveReceiverStats(payload []byte, now time.Time) {
 	if c == nil || c.controller == nil {
 		return
@@ -86,6 +94,9 @@ func (c *blastSendControl) ObserveReceiverStats(payload []byte, now time.Time) {
 	stats, ok := unmarshalBlastStatsPayload(payload)
 	if !ok {
 		return
+	}
+	if stats.AckFloor > c.ackFloor {
+		c.ackFloor = stats.AckFloor
 	}
 	before := c.controller.RateMbps()
 	c.controller.Observe(now, blastRateFeedback{

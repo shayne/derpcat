@@ -9,6 +9,7 @@ func TestMarshalBlastStatsPayloadRoundTripsReceiverProgress(t *testing.T) {
 		ReceivedPayloadBytes: 12345,
 		ReceivedPackets:      67,
 		MaxSeqPlusOne:        89,
+		AckFloor:             55,
 	}
 
 	payload := marshalBlastStatsPayload(want)

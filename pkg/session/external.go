@@ -112,6 +112,7 @@ type directUDPStart struct {
 	SectionSizes  []int64  `json:"section_sizes,omitempty"`
 	SectionAddrs  []string `json:"section_addrs,omitempty"`
 	ProbeRates    []int    `json:"probe_rates,omitempty"`
+	Stream        bool     `json:"stream,omitempty"`
 }
 
 type directUDPRateProbeResult struct {
