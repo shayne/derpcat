@@ -34,9 +34,9 @@ const (
 	blastDoneLinger                 = 5 * defaultRetryInterval
 	blastDoneInterval               = defaultRetryInterval
 	parallelBlastDoneGrace          = 10 * blastDoneLinger
-	parallelBlastRepairGrace        = 3 * time.Second
-	parallelBlastRepairGraceMax     = 12 * time.Second
-	parallelBlastRepairGraceBytes   = 32 << 20
+	parallelBlastRepairGrace        = 4 * time.Second
+	parallelBlastRepairGraceMax     = 60 * time.Second
+	parallelBlastRepairGraceBytes   = 4 << 20
 	blastRepairQuietGrace           = 500 * time.Millisecond
 	blastRepairResendInterval       = 2 * blastRepairInterval
 	blastKnownGapRepairDelay        = 10 * time.Millisecond
@@ -47,6 +47,7 @@ const (
 	blastRepairMemorySlab           = 4 << 20
 	parallelBlastStripeBlockPackets = 128
 	maxRepairRequestSeqs            = 128
+	maxRepairRequestBatches         = 4
 	maxAckMaskBits                  = 64
 	extendedAckBits                 = 4096
 	extendedAckBytes                = extendedAckBits / 8
@@ -61,6 +62,17 @@ func parallelBlastRepairGraceForExpectedBytes(expectedBytes int64) time.Duration
 	grace := parallelBlastRepairGrace + time.Duration(expectedBytes/parallelBlastRepairGraceBytes)*time.Second
 	if grace > parallelBlastRepairGraceMax {
 		return parallelBlastRepairGraceMax
+	}
+	return grace
+}
+
+func blastRepairQuietGraceForExpectedBytes(expectedBytes int64, hadRepair bool) time.Duration {
+	if !hadRepair || expectedBytes <= 0 {
+		return blastRepairQuietGrace
+	}
+	grace := parallelBlastRepairGraceForExpectedBytes(expectedBytes)
+	if grace < blastRepairQuietGrace {
+		return blastRepairQuietGrace
 	}
 	return grace
 }
@@ -487,6 +499,11 @@ func sendBlast(ctx context.Context, batcher packetBatcher, conn net.PacketConn, 
 	}
 	defer history.Close()
 	fec := newBlastFECGroup(runID, chunkSize, fecGroupSize)
+	repairReadBufs := make([]batchReadBuffer, batcher.MaxBatch())
+	for i := range repairReadBufs {
+		repairReadBufs[i].Bytes = make([]byte, 64<<10)
+	}
+	repairDeduper := newBlastRepairDeduper()
 	var seq uint64
 	var offset uint64
 	startedAt := time.Now()
@@ -556,6 +573,9 @@ func sendBlast(ctx context.Context, batcher packetBatcher, conn net.PacketConn, 
 			if err := paceBlastSend(ctx, startedAt, offset, rateMbps); err != nil {
 				return TransferStats{}, err
 			}
+			if _, err := serviceBlastRepairRequests(ctx, batcher, peer, runID, history, &stats, repairDeduper, repairReadBufs, 0); err != nil {
+				return TransferStats{}, err
+			}
 		}
 		if eof {
 			break
@@ -588,6 +608,38 @@ func sendBlast(ctx context.Context, batcher packetBatcher, conn net.PacketConn, 
 		stats.PacketsSent++
 	}
 	return serveBlastRepairs(ctx, batcher, peer, runID, history, stats)
+}
+
+func serviceBlastRepairRequests(ctx context.Context, batcher packetBatcher, peer net.Addr, runID [16]byte, history *blastRepairHistory, stats *TransferStats, deduper *blastRepairDeduper, readBufs []batchReadBuffer, timeout time.Duration) (bool, error) {
+	if batcher == nil || history == nil || len(readBufs) == 0 {
+		return false, nil
+	}
+	n, err := batcher.ReadBatch(ctx, timeout, readBufs)
+	if err != nil {
+		if ctx.Err() != nil {
+			return false, ctx.Err()
+		}
+		if isNetTimeout(err) {
+			return false, nil
+		}
+		if errors.Is(err, net.ErrClosed) {
+			return false, err
+		}
+		return false, nil
+	}
+	repaired := false
+	now := time.Now()
+	for i := 0; i < n; i++ {
+		packetType, payload, packetRunID, _, _, ok := decodeBlastPacketFull(readBufs[i].Bytes[:readBufs[i].N])
+		if !ok || packetRunID != runID || packetType != PacketTypeRepairRequest {
+			continue
+		}
+		repaired = true
+		if err := sendBlastRepairs(ctx, batcher, peer, history, payload, stats, deduper, now); err != nil {
+			return repaired, err
+		}
+	}
+	return repaired, nil
 }
 
 type blastParallelSendLane struct {
@@ -1042,6 +1094,7 @@ func serveBlastRepairsParallel(ctx context.Context, lanes []*blastParallelSendLa
 
 	quietTimer := time.NewTimer(blastRepairQuietGrace)
 	defer quietTimer.Stop()
+	hadRepair := false
 	resetQuiet := func() {
 		if !quietTimer.Stop() {
 			select {
@@ -1049,7 +1102,7 @@ func serveBlastRepairsParallel(ctx context.Context, lanes []*blastParallelSendLa
 			default:
 			}
 		}
-		quietTimer.Reset(blastRepairQuietGrace)
+		quietTimer.Reset(blastRepairQuietGraceForExpectedBytes(stats.BytesSent, hadRepair))
 	}
 	deduper := newBlastRepairDeduper()
 	for {
@@ -1070,11 +1123,12 @@ func serveBlastRepairsParallel(ctx context.Context, lanes []*blastParallelSendLa
 				cancel()
 				return stats, nil
 			case PacketTypeRepairRequest:
-				resetQuiet()
 				repairHistory := history
 				if event.lane != nil && event.lane.history != nil && event.stripe == event.lane.stripeID {
 					repairHistory = event.lane.history
 				}
+				hadRepair = hadRepair || repairHistory.CanRepair()
+				resetQuiet()
 				if err := sendBlastRepairs(ctx, event.lane.batcher, event.lane.peer, repairHistory, event.payload, &stats, blastRepairDeduperForLane(deduper, event.lane), time.Now()); err != nil {
 					return TransferStats{}, err
 				}
@@ -1300,6 +1354,27 @@ func (h *blastRepairHistory) Complete() bool {
 	return h.complete
 }
 
+func (h *blastRepairHistory) TotalBytes() int64 {
+	if h == nil {
+		return 0
+	}
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	if h.totalBytes > uint64(maxInt()) {
+		return int64(maxInt())
+	}
+	return int64(h.totalBytes)
+}
+
+func (h *blastRepairHistory) CanRepair() bool {
+	if h == nil {
+		return false
+	}
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	return h.retainPayloads
+}
+
 func (h *blastRepairHistory) ensurePayloadCapacity(end uint64) error {
 	if h == nil || end == 0 {
 		return nil
@@ -1338,11 +1413,16 @@ func (h *blastRepairHistory) packet(seq uint64) []byte {
 	}
 	h.mu.RLock()
 	defer h.mu.RUnlock()
-	if h.chunkSize <= 0 || seq >= h.packets {
+	if h.chunkSize <= 0 {
 		return nil
 	}
 	if len(h.packetSlabs) > 0 {
-		return h.packetFromBufferLocked(seq)
+		if packet := h.packetFromBufferLocked(seq); packet != nil {
+			return packet
+		}
+	}
+	if h.packets == 0 || seq >= h.packets {
+		return nil
 	}
 	offset := seq * uint64(h.chunkSize)
 	if offset >= h.totalBytes {
@@ -1498,10 +1578,11 @@ func serveBlastRepairs(ctx context.Context, batcher packetBatcher, peer net.Addr
 	}
 	quietDeadline := time.Time{}
 	deduper := newBlastRepairDeduper()
+	hadRepair := false
 	for {
 		complete := history.Complete()
 		if complete && quietDeadline.IsZero() {
-			quietDeadline = time.Now().Add(blastRepairQuietGrace)
+			quietDeadline = time.Now().Add(blastRepairQuietGraceForExpectedBytes(history.TotalBytes(), hadRepair))
 		}
 		wait := parallelBlastDataIdle
 		if complete {
@@ -1537,8 +1618,9 @@ func serveBlastRepairs(ctx context.Context, batcher packetBatcher, peer net.Addr
 				stats.CompletedAt = time.Now()
 				return stats, nil
 			case PacketTypeRepairRequest:
+				hadRepair = hadRepair || history.CanRepair()
 				if history.Complete() {
-					quietDeadline = time.Now().Add(blastRepairQuietGrace)
+					quietDeadline = time.Now().Add(blastRepairQuietGraceForExpectedBytes(history.TotalBytes(), hadRepair))
 				}
 				if err := sendBlastRepairs(ctx, batcher, peer, history, payload, &stats, deduper, time.Now()); err != nil {
 					return TransferStats{}, err
@@ -2269,11 +2351,12 @@ func (c *blastStreamReceiveCoordinator) handleRepairTick(ctx context.Context, no
 }
 
 func (c *blastStreamReceiveCoordinator) requestMissingRepairs(ctx context.Context, runID [16]byte, state *blastReceiveRunState) error {
-	missing := state.missingSeqs(maxRepairRequestSeqs)
-	if len(missing) == 0 {
-		return nil
+	for _, missing := range state.missingSeqBatches(maxRepairRequestSeqs, maxRepairRequestBatches) {
+		if err := sendBlastStreamRepairRequestAll(ctx, c.lanes, runID, missing); err != nil {
+			return err
+		}
 	}
-	return sendBlastStreamRepairRequestAll(ctx, c.lanes, runID, missing)
+	return nil
 }
 
 func (c *blastStreamReceiveCoordinator) requestKnownRepairs(ctx context.Context, now time.Time) error {
@@ -2304,14 +2387,16 @@ func (c *blastStreamReceiveCoordinator) requestKnownRepairs(ctx context.Context,
 		if now.Sub(state.gapFirstObservedAt) < blastKnownGapRepairDelay {
 			continue
 		}
-		missing := state.knownMissingSeqs(maxRepairRequestSeqs)
-		if len(missing) == 0 {
+		batches := state.knownMissingSeqBatches(maxRepairRequestSeqs, maxRepairRequestBatches)
+		if len(batches) == 0 {
 			state.gapFirstObservedAt = time.Time{}
 			continue
 		}
 		state.lastRepairRequestAt = now
-		if err := sendBlastStreamRepairRequestAll(ctx, c.lanes, runID, missing); err != nil {
-			return err
+		for _, missing := range batches {
+			if err := sendBlastStreamRepairRequestAll(ctx, c.lanes, runID, missing); err != nil {
+				return err
+			}
 		}
 	}
 	return nil
@@ -2866,14 +2951,6 @@ func (s *blastReceiveRunState) complete() bool {
 	return s != nil && s.done && s.seen.Len() >= s.totalPackets
 }
 
-func (s *blastReceiveRunState) missingSeqs(limit int) []uint64 {
-	batches := s.missingSeqBatches(limit, 1)
-	if len(batches) == 0 {
-		return nil
-	}
-	return batches[0]
-}
-
 func (s *blastReceiveRunState) missingSeqBatches(batchSize int, maxBatches int) [][]uint64 {
 	if s == nil || !s.done || batchSize <= 0 {
 		return nil
@@ -2915,14 +2992,6 @@ func (s *blastReceiveRunState) missingSeqBatches(batchSize int, maxBatches int) 
 		s.nextRepairSeq = (last + 1) % s.totalPackets
 	}
 	return batches
-}
-
-func (s *blastReceiveRunState) knownMissingSeqs(limit int) []uint64 {
-	batches := s.knownMissingSeqBatches(limit, 1)
-	if len(batches) == 0 {
-		return nil
-	}
-	return batches[0]
 }
 
 func (s *blastReceiveRunState) knownMissingSeqBatches(batchSize int, maxBatches int) [][]uint64 {
@@ -3164,11 +3233,7 @@ func receiveBlastParallelConn(ctx context.Context, conn net.PacketConn, dst io.W
 			if state == nil || !state.repairPending {
 				continue
 			}
-			missing := state.missingSeqs(maxRepairRequestSeqs)
-			if len(missing) == 0 {
-				continue
-			}
-			if err := sendRepairRequest(ctx, batcher, state.addr, runID, missing); err != nil {
+			if err := sendRepairRequestBatches(ctx, batcher, state.addr, runID, 0, state.missingSeqBatches(maxRepairRequestSeqs, maxRepairRequestBatches)); err != nil {
 				return err
 			}
 		}
@@ -3176,6 +3241,9 @@ func receiveBlastParallelConn(ctx context.Context, conn net.PacketConn, dst io.W
 	}
 	requestKnownRepairs := func(runID [16]byte, state *blastReceiveRunState, now time.Time) error {
 		if state == nil || !cfg.RequireComplete {
+			return nil
+		}
+		if !state.done {
 			return nil
 		}
 		if !state.lastRepairRequestAt.IsZero() && now.Sub(state.lastRepairRequestAt) < blastRepairInterval {
@@ -3192,8 +3260,8 @@ func receiveBlastParallelConn(ctx context.Context, conn net.PacketConn, dst io.W
 		if now.Sub(state.gapFirstObservedAt) < blastKnownGapRepairDelay {
 			return nil
 		}
-		missing := state.knownMissingSeqs(maxRepairRequestSeqs)
-		if len(missing) == 0 {
+		batches := state.knownMissingSeqBatches(maxRepairRequestSeqs, maxRepairRequestBatches)
+		if len(batches) == 0 {
 			state.gapFirstObservedAt = time.Time{}
 			return nil
 		}
@@ -3201,7 +3269,7 @@ func receiveBlastParallelConn(ctx context.Context, conn net.PacketConn, dst io.W
 		if repairActive != nil {
 			repairActive.Store(true)
 		}
-		return sendRepairRequest(ctx, batcher, state.addr, runID, missing)
+		return sendRepairRequestBatches(ctx, batcher, state.addr, runID, 0, batches)
 	}
 	requestKnownRepairsForAll := func(now time.Time) error {
 		for runID, state := range runs {
@@ -3901,6 +3969,18 @@ func sendHelloAckBatch(ctx context.Context, batcher packetBatcher, peer net.Addr
 
 func sendRepairRequest(ctx context.Context, batcher packetBatcher, peer net.Addr, runID [16]byte, seqs []uint64) error {
 	return sendRepairRequestStripe(ctx, batcher, peer, runID, 0, seqs)
+}
+
+func sendRepairRequestBatches(ctx context.Context, batcher packetBatcher, peer net.Addr, runID [16]byte, stripeID uint16, batches [][]uint64) error {
+	for _, seqs := range batches {
+		if len(seqs) == 0 {
+			continue
+		}
+		if err := sendRepairRequestStripe(ctx, batcher, peer, runID, stripeID, seqs); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func sendRepairRequestStripe(ctx context.Context, batcher packetBatcher, peer net.Addr, runID [16]byte, stripeID uint16, seqs []uint64) error {

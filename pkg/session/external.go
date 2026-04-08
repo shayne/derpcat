@@ -41,6 +41,7 @@ const (
 	envelopeDirectUDPReadyAck  = "direct_udp_ready_ack"
 	envelopeDirectUDPStart     = "direct_udp_start"
 	envelopeDirectUDPStartAck  = "direct_udp_start_ack"
+	envelopeDirectUDPRateProbe = "direct_udp_rate_probe"
 	envelopeQUICModeReq        = "quic_mode_request"
 	envelopeQUICModeResp       = "quic_mode_response"
 	envelopeQUICModeAck        = "quic_mode_ack"
@@ -92,6 +93,7 @@ type envelope struct {
 	Control            *transport.ControlMessage `json:"control,omitempty"`
 	DirectUDPReadyAck  *directUDPReadyAck        `json:"direct_udp_ready_ack,omitempty"`
 	DirectUDPStart     *directUDPStart           `json:"direct_udp_start,omitempty"`
+	DirectUDPRateProbe *directUDPRateProbeResult `json:"direct_udp_rate_probe,omitempty"`
 	QUICModeReq        *quicModeRequest          `json:"quic_mode_request,omitempty"`
 	QUICModeResp       *quicModeResponse         `json:"quic_mode_response,omitempty"`
 	QUICModeAck        *quicModeAck              `json:"quic_mode_ack,omitempty"`
@@ -109,6 +111,18 @@ type directUDPStart struct {
 	ExpectedBytes int64    `json:"expected_bytes,omitempty"`
 	SectionSizes  []int64  `json:"section_sizes,omitempty"`
 	SectionAddrs  []string `json:"section_addrs,omitempty"`
+	ProbeRates    []int    `json:"probe_rates,omitempty"`
+}
+
+type directUDPRateProbeResult struct {
+	Samples []directUDPRateProbeSample `json:"samples,omitempty"`
+}
+
+type directUDPRateProbeSample struct {
+	RateMbps       int   `json:"rate_mbps,omitempty"`
+	BytesSent      int64 `json:"bytes_sent,omitempty"`
+	BytesReceived  int64 `json:"bytes_received,omitempty"`
+	DurationMillis int64 `json:"duration_millis,omitempty"`
 }
 
 type quicModeRequest struct {

@@ -8,6 +8,8 @@ tmp="$(mktemp -d)"
 remote_base="/tmp/derpcat-promotion-$$"
 remote_upload="/tmp/derpcat-promotion-bin-$$"
 remote_user="${DERPCAT_REMOTE_USER:-root}"
+remote_bin_dir="${DERPCAT_REMOTE_BIN_DIR:-/usr/local/bin}"
+remote_bin="${remote_bin_dir%/}/derpcat"
 remote_env=()
 
 if [[ "${DERPCAT_TEST_DISABLE_TAILSCALE_CANDIDATES:-}" == "1" ]]; then
@@ -106,7 +108,7 @@ require_direct_blast_log() {
 }
 
 cleanup() {
-  remote "if [[ -f '${remote_base}.pid' ]]; then kill \$(cat '${remote_base}.pid') 2>/dev/null || true; fi; rm -f '${remote_base}.pid' '${remote_base}.out' '${remote_base}.err'" >/dev/null 2>&1 || true
+  remote "if [[ -f '${remote_base}.pid' ]]; then kill \$(cat '${remote_base}.pid') 2>/dev/null || true; fi; rm -f '${remote_base}.pid' '${remote_base}.out' '${remote_base}.err' '${remote_upload}'; if [[ '${remote_bin_dir}' == /tmp* ]]; then rm -f '${remote_bin}'; fi" >/dev/null 2>&1 || true
   rm -rf "${tmp}"
 }
 
@@ -144,7 +146,7 @@ trap 'status=$?; if [[ ${status} -ne 0 ]]; then dump_failure; fi; cleanup; if [[
 mise run build
 mise run build-linux-amd64
 scp dist/derpcat-linux-amd64 "${remote_user}@${target}:${remote_upload}" >/dev/null
-remote "install -m 0755 '${remote_upload}' /usr/local/bin/derpcat && rm -f '${remote_upload}' && /usr/local/bin/derpcat --help >/dev/null 2>&1"
+remote "mkdir -p '${remote_bin_dir}' && install -m 0755 '${remote_upload}' '${remote_bin}' && rm -f '${remote_upload}' && '${remote_bin}' --help >/dev/null 2>&1"
 
 payload="${tmp}/payload.bin"
 send_log="${tmp}/send.err"
@@ -154,7 +156,7 @@ echo "generating ${size_mib} MiB random payload"
 dd if=/dev/urandom of="${payload}" bs=1048576 count="${size_mib}" 2>/dev/null
 local_sha="$(shasum -a 256 "${payload}" | awk '{print $1}')"
 
-remote "rm -f '${remote_base}.pid' '${remote_base}.out' '${remote_base}.err'; nohup /usr/local/bin/derpcat --verbose listen >'${remote_base}.out' 2>'${remote_base}.err' </dev/null & echo \$! > '${remote_base}.pid'"
+remote "rm -f '${remote_base}.pid' '${remote_base}.out' '${remote_base}.err'; nohup '${remote_bin}' --verbose listen >'${remote_base}.out' 2>'${remote_base}.err' </dev/null & echo \$! > '${remote_base}.pid'"
 
 token=""
 for _ in $(seq 1 200); do

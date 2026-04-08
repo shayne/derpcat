@@ -21,7 +21,7 @@ import (
 	"tailscale.com/types/key"
 )
 
-func TestExternalDirectUDPDefaultUsesEightSectionedLanesWithoutFEC(t *testing.T) {
+func TestExternalDirectUDPDefaultUsesEightSectionedLanesWithFEC(t *testing.T) {
 	if got, want := externalDirectUDPParallelism, 8; got != want {
 		t.Fatalf("externalDirectUDPParallelism = %d, want %d", got, want)
 	}
@@ -31,7 +31,7 @@ func TestExternalDirectUDPDefaultUsesEightSectionedLanesWithoutFEC(t *testing.T)
 	if got, want := externalDirectUDPTransportLabel, "batched"; got != want {
 		t.Fatalf("externalDirectUDPTransportLabel = %q, want %q", got, want)
 	}
-	if got, want := externalDirectUDPFECGroupSize, 0; got != want {
+	if got, want := externalDirectUDPFECGroupSize, 32; got != want {
 		t.Fatalf("externalDirectUDPFECGroupSize = %d, want %d", got, want)
 	}
 	if externalDirectUDPStripedBlast {
@@ -531,6 +531,182 @@ func TestExternalDirectUDPParallelCandidateStringsPreferLoopbackForFakeTransport
 	want := []string{"127.0.0.1:11111", "127.0.0.1:22222"}
 	if fmt.Sprint(got) != fmt.Sprint(want) {
 		t.Fatalf("externalDirectUDPParallelCandidateStringsForPeer(fake) = %v, want %v", got, want)
+	}
+}
+
+func TestExternalDirectUDPSelectRemoteAddrsByConnLeavesUnverifiedLanesBlank(t *testing.T) {
+	observedByConn := [][]net.Addr{
+		parseCandidateStrings([]string{"198.51.100.1:10001"}),
+		parseCandidateStrings([]string{"198.51.100.1:10001"}),
+		parseCandidateStrings([]string{"198.51.100.1:10003"}),
+		nil,
+	}
+
+	got := externalDirectUDPSelectRemoteAddrsByConn(observedByConn, 4, nil)
+	want := []string{"198.51.100.1:10001", "", "198.51.100.1:10003", ""}
+	if fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Fatalf("externalDirectUDPSelectRemoteAddrsByConn() = %v, want %v", got, want)
+	}
+}
+
+func TestExternalDirectUDPFillMissingSelectedAddrsBackfillsUnusedFallback(t *testing.T) {
+	selected := []string{
+		"198.51.100.1:10001",
+		"",
+		"198.51.100.1:10003",
+	}
+	fallback := []string{
+		"203.0.113.1:10001",
+		"203.0.113.1:10002",
+		"203.0.113.1:10003",
+	}
+
+	got := externalDirectUDPFillMissingSelectedAddrs(selected, fallback)
+	want := []string{
+		"198.51.100.1:10001",
+		"203.0.113.1:10002",
+		"198.51.100.1:10003",
+	}
+	if fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Fatalf("externalDirectUDPFillMissingSelectedAddrs() = %v, want %v", got, want)
+	}
+}
+
+func TestExternalDirectUDPRateMbpsForLanesScalesToVerifiedLaneCount(t *testing.T) {
+	tests := []struct {
+		name  string
+		rate  int
+		lanes int
+		want  int
+	}{
+		{name: "disabled", rate: 0, lanes: 4, want: 0},
+		{name: "none", rate: externalDirectUDPRateMbps, lanes: 0, want: 0},
+		{name: "one", rate: externalDirectUDPRateMbps, lanes: 1, want: 281},
+		{name: "four", rate: externalDirectUDPRateMbps, lanes: 4, want: 1124},
+		{name: "full", rate: externalDirectUDPRateMbps, lanes: externalDirectUDPParallelism, want: externalDirectUDPRateMbps},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := externalDirectUDPRateMbpsForLanes(tt.rate, tt.lanes); got != tt.want {
+				t.Fatalf("externalDirectUDPRateMbpsForLanes(%d, %d) = %d, want %d", tt.rate, tt.lanes, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestExternalDirectUDPRateProbeRatesScaleUpToMax(t *testing.T) {
+	got := externalDirectUDPRateProbeRates(2250, 1<<30)
+	want := []int{150, 350, 700, 1200, 2250}
+	if fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Fatalf("externalDirectUDPRateProbeRates() = %v, want %v", got, want)
+	}
+}
+
+func TestExternalDirectUDPRateProbeRatesSkipSmallTransfers(t *testing.T) {
+	if got := externalDirectUDPRateProbeRates(2250, 64<<20); len(got) != 0 {
+		t.Fatalf("externalDirectUDPRateProbeRates(small) = %v, want none", got)
+	}
+}
+
+func TestExternalDirectUDPSelectRateFromProbeSamplesUsesDeliveredGoodput(t *testing.T) {
+	sent := []directUDPRateProbeSample{
+		{RateMbps: 350, BytesSent: 9_000_000, DurationMillis: 200},
+		{RateMbps: 700, BytesSent: 18_000_000, DurationMillis: 200},
+		{RateMbps: 2250, BytesSent: 56_000_000, DurationMillis: 200},
+	}
+	received := []directUDPRateProbeSample{
+		{RateMbps: 350, BytesReceived: 8_500_000, DurationMillis: 200},
+		{RateMbps: 700, BytesReceived: 9_000_000, DurationMillis: 200},
+		{RateMbps: 2250, BytesReceived: 4_000_000, DurationMillis: 200},
+	}
+
+	if got, want := externalDirectUDPSelectRateFromProbeSamples(2250, sent, received), 350; got != want {
+		t.Fatalf("externalDirectUDPSelectRateFromProbeSamples() = %d, want %d", got, want)
+	}
+}
+
+func TestExternalDirectUDPSelectRateFromProbeSamplesBacksOffAtRateCollapse(t *testing.T) {
+	sent := []directUDPRateProbeSample{
+		{RateMbps: 150, BytesSent: 3_606_400, DurationMillis: 200},
+		{RateMbps: 350, BytesSent: 8_601_600, DurationMillis: 200},
+		{RateMbps: 700, BytesSent: 17_403_400, DurationMillis: 200},
+		{RateMbps: 1200, BytesSent: 30_000_600, DurationMillis: 200},
+		{RateMbps: 2250, BytesSent: 52_000_000, DurationMillis: 200},
+	}
+	received := []directUDPRateProbeSample{
+		{RateMbps: 150, BytesReceived: 3_606_400, DurationMillis: 200},
+		{RateMbps: 350, BytesReceived: 8_601_600, DurationMillis: 200},
+		{RateMbps: 700, BytesReceived: 17_403_400, DurationMillis: 200},
+		{RateMbps: 1200, BytesReceived: 30_000_600, DurationMillis: 200},
+		{RateMbps: 2250, BytesReceived: 10_021_200, DurationMillis: 200},
+	}
+
+	if got, want := externalDirectUDPSelectRateFromProbeSamples(2250, sent, received), 700; got != want {
+		t.Fatalf("externalDirectUDPSelectRateFromProbeSamples(collapse) = %d, want %d", got, want)
+	}
+}
+
+func TestExternalDirectUDPSelectRateFromProbeSamplesKeepsHighThroughputKnee(t *testing.T) {
+	sent := []directUDPRateProbeSample{
+		{RateMbps: 150, BytesSent: 3_595_200, DurationMillis: 200},
+		{RateMbps: 350, BytesSent: 8_590_500, DurationMillis: 200},
+		{RateMbps: 700, BytesSent: 17_337_500, DurationMillis: 200},
+		{RateMbps: 1200, BytesSent: 29_971_250, DurationMillis: 200},
+		{RateMbps: 2250, BytesSent: 56_230_000, DurationMillis: 200},
+	}
+	received := []directUDPRateProbeSample{
+		{RateMbps: 150, BytesReceived: 3_595_200, DurationMillis: 200},
+		{RateMbps: 350, BytesReceived: 8_590_500, DurationMillis: 200},
+		{RateMbps: 700, BytesReceived: 17_337_500, DurationMillis: 200},
+		{RateMbps: 1200, BytesReceived: 29_971_250, DurationMillis: 200},
+		{RateMbps: 2250, BytesReceived: 44_984_750, DurationMillis: 200},
+	}
+
+	if got, want := externalDirectUDPSelectRateFromProbeSamples(2250, sent, received), 2069; got != want {
+		t.Fatalf("externalDirectUDPSelectRateFromProbeSamples(high-throughput knee) = %d, want %d", got, want)
+	}
+}
+
+func TestExternalDirectUDPSelectRateFromProbeSamplesBacksOffMarginalHighRateGain(t *testing.T) {
+	sent := []directUDPRateProbeSample{
+		{RateMbps: 150, BytesSent: 3_606_400, DurationMillis: 200},
+		{RateMbps: 350, BytesSent: 8_601_600, DurationMillis: 200},
+		{RateMbps: 700, BytesSent: 17_403_400, DurationMillis: 200},
+		{RateMbps: 1200, BytesSent: 30_000_600, DurationMillis: 200},
+		{RateMbps: 1967, BytesSent: 43_723_000, DurationMillis: 200},
+	}
+	received := []directUDPRateProbeSample{
+		{RateMbps: 150, BytesReceived: 3_606_400, DurationMillis: 200},
+		{RateMbps: 350, BytesReceived: 8_601_600, DurationMillis: 200},
+		{RateMbps: 700, BytesReceived: 17_403_400, DurationMillis: 200},
+		{RateMbps: 1200, BytesReceived: 29_971_250, DurationMillis: 200},
+		{RateMbps: 1967, BytesReceived: 38_450_000, DurationMillis: 200},
+	}
+
+	if got, want := externalDirectUDPSelectRateFromProbeSamples(1967, sent, received), 700; got != want {
+		t.Fatalf("externalDirectUDPSelectRateFromProbeSamples(marginal high-rate gain) = %d, want %d", got, want)
+	}
+}
+
+func TestExternalDirectUDPSelectRateFromProbeSamplesBacksOffBelowCeilingBurst(t *testing.T) {
+	sent := []directUDPRateProbeSample{
+		{RateMbps: 150, BytesSent: 3_606_400, DurationMillis: 200},
+		{RateMbps: 350, BytesSent: 8_601_600, DurationMillis: 200},
+		{RateMbps: 700, BytesSent: 17_403_400, DurationMillis: 200},
+		{RateMbps: 1200, BytesSent: 30_000_600, DurationMillis: 200},
+		{RateMbps: 2250, BytesSent: 45_995_000, DurationMillis: 200},
+	}
+	received := []directUDPRateProbeSample{
+		{RateMbps: 150, BytesReceived: 3_606_400, DurationMillis: 200},
+		{RateMbps: 350, BytesReceived: 8_601_600, DurationMillis: 200},
+		{RateMbps: 700, BytesReceived: 17_403_400, DurationMillis: 200},
+		{RateMbps: 1200, BytesReceived: 30_000_600, DurationMillis: 200},
+		{RateMbps: 2250, BytesReceived: 43_695_400, DurationMillis: 200},
+	}
+
+	if got, want := externalDirectUDPSelectRateFromProbeSamples(2250, sent, received), 700; got != want {
+		t.Fatalf("externalDirectUDPSelectRateFromProbeSamples(below-ceiling burst) = %d, want %d", got, want)
 	}
 }
 

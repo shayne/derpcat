@@ -1586,12 +1586,27 @@ func TestParallelBlastRepairGraceScalesWithExpectedBytes(t *testing.T) {
 	if got := parallelBlastRepairGraceForExpectedBytes(128 << 20); got <= parallelBlastRepairGrace {
 		t.Fatalf("large repair grace = %v, want more than %v", got, parallelBlastRepairGrace)
 	}
-	if got := parallelBlastRepairGraceForExpectedBytes(2 << 30); got != parallelBlastRepairGraceMax {
+	if got := parallelBlastRepairGraceForExpectedBytes(128 << 20); got < 36*time.Second {
+		t.Fatalf("large section repair grace = %v, want at least 36s", got)
+	}
+	if got := parallelBlastRepairGraceForExpectedBytes(2 << 30); got != 60*time.Second {
 		t.Fatalf("capped repair grace = %v, want %v", got, parallelBlastRepairGraceMax)
 	}
 }
 
-func TestReceiveBlastParallelToWriterRequestsKnownGapBeforeDone(t *testing.T) {
+func TestBlastRepairQuietGraceScalesAfterRepairs(t *testing.T) {
+	if got := blastRepairQuietGraceForExpectedBytes(128<<20, false); got != blastRepairQuietGrace {
+		t.Fatalf("quiet grace without repairs = %v, want %v", got, blastRepairQuietGrace)
+	}
+	if got, want := blastRepairQuietGraceForExpectedBytes(128<<20, true), parallelBlastRepairGraceForExpectedBytes(128<<20); got != want {
+		t.Fatalf("quiet grace after repairs = %v, want %v", got, want)
+	}
+	if got := blastRepairQuietGraceForExpectedBytes(2<<30, true); got != 60*time.Second {
+		t.Fatalf("capped active quiet grace = %v, want %v", got, parallelBlastRepairGraceMax)
+	}
+}
+
+func TestReceiveBlastParallelToWriterRequestsKnownGapAfterDone(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -1622,14 +1637,15 @@ func TestReceiveBlastParallelToWriterRequestsKnownGapBeforeDone(t *testing.T) {
 	}
 	writeProbePacket(t, client, server.LocalAddr(), Packet{Version: ProtocolVersion, Type: PacketTypeData, RunID: runID, Seq: 0, Offset: 0, Payload: []byte("seq-0")})
 	writeProbePacket(t, client, server.LocalAddr(), Packet{Version: ProtocolVersion, Type: PacketTypeData, RunID: runID, Seq: 2, Offset: 10, Payload: []byte("seq-2")})
+	writeProbePacket(t, client, server.LocalAddr(), Packet{Version: ProtocolVersion, Type: PacketTypeDone, RunID: runID, Seq: 3, Offset: 15})
 
-	deadline := time.After(blastKnownGapRepairDelay + 500*time.Millisecond)
+	deadline := time.After(500 * time.Millisecond)
 	for {
 		select {
 		case err := <-errCh:
-			t.Fatalf("ReceiveBlastParallelToWriter() returned before DONE with error %v", err)
+			t.Fatalf("ReceiveBlastParallelToWriter() returned before repair with error %v", err)
 		case <-deadline:
-			t.Fatal("timed out waiting for pre-DONE repair request")
+			t.Fatal("timed out waiting for post-DONE repair request")
 		default:
 		}
 		packet := readProbePacket(t, client, 500*time.Millisecond)
@@ -1649,7 +1665,50 @@ func TestReceiveBlastParallelToWriterRequestsKnownGapBeforeDone(t *testing.T) {
 	}
 }
 
-func TestReceiveBlastParallelToWriterDoesNotRequestKnownGapBeforeDelay(t *testing.T) {
+func TestSendRepairRequestBatchesSplitsLargeGapsIntoMTUSafeRequests(t *testing.T) {
+	runID := testRunID(0x53)
+	batcher := &capturingBatcher{}
+	batches := [][]uint64{
+		make([]uint64, maxRepairRequestSeqs),
+		make([]uint64, maxRepairRequestSeqs),
+		make([]uint64, maxRepairRequestSeqs),
+	}
+	for batchIndex := range batches {
+		for seq := range batches[batchIndex] {
+			batches[batchIndex][seq] = uint64(batchIndex*maxRepairRequestSeqs + seq)
+		}
+	}
+
+	if err := sendRepairRequestBatches(context.Background(), batcher, nil, runID, 0, batches); err != nil {
+		t.Fatalf("sendRepairRequestBatches() error = %v", err)
+	}
+	if got := len(batcher.writes); got != len(batches) {
+		t.Fatalf("repair request writes = %d, want %d", got, len(batches))
+	}
+	for i, wire := range batcher.writes {
+		packet, err := UnmarshalPacket(wire, nil)
+		if err != nil {
+			t.Fatalf("UnmarshalPacket(repair request %d) error = %v", i, err)
+		}
+		if packet.Type != PacketTypeRepairRequest {
+			t.Fatalf("repair request %d type = %v, want %v", i, packet.Type, PacketTypeRepairRequest)
+		}
+		if packet.RunID != runID {
+			t.Fatalf("repair request %d RunID = %x, want %x", i, packet.RunID, runID)
+		}
+		if len(packet.Payload) != maxRepairRequestSeqs*8 {
+			t.Fatalf("repair request %d payload len = %d, want %d", i, len(packet.Payload), maxRepairRequestSeqs*8)
+		}
+		if len(wire) >= defaultChunkSize {
+			t.Fatalf("repair request %d wire len = %d, want below data chunk size %d", i, len(wire), defaultChunkSize)
+		}
+		if got, want := binary.BigEndian.Uint64(packet.Payload[:8]), batches[i][0]; got != want {
+			t.Fatalf("repair request %d first seq = %d, want %d", i, got, want)
+		}
+	}
+}
+
+func TestReceiveBlastParallelToWriterDoesNotRequestKnownGapBeforeDone(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -1684,7 +1743,7 @@ func TestReceiveBlastParallelToWriterDoesNotRequestKnownGapBeforeDelay(t *testin
 	select {
 	case err := <-errCh:
 		t.Fatalf("ReceiveBlastParallelToWriter() returned before DONE with error %v", err)
-	case <-time.After(blastKnownGapRepairDelay / 2):
+	case <-time.After(blastKnownGapRepairDelay + 50*time.Millisecond):
 	}
 
 	if err := client.SetReadDeadline(time.Now().Add(25 * time.Millisecond)); err != nil {
@@ -1704,7 +1763,7 @@ func TestReceiveBlastParallelToWriterDoesNotRequestKnownGapBeforeDelay(t *testin
 			continue
 		}
 		if packet.Type == PacketTypeRepairRequest {
-			t.Fatalf("received repair request before known gap delay")
+			t.Fatalf("received repair request before DONE")
 		}
 	}
 }
@@ -2563,6 +2622,46 @@ func TestSendBlastRepairsSuppressesImmediateDuplicateSeqs(t *testing.T) {
 	}
 	if stats.Retransmits != 2 {
 		t.Fatalf("Retransmits after resend interval = %d, want 2", stats.Retransmits)
+	}
+}
+
+func TestSendBlastServicesRepairRequestsDuringDataPhase(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	runID := testRunID(0x52)
+	batcher := &inflightRepairBatcher{runID: runID, repairSeq: 0}
+	src := bytes.Repeat([]byte("abcd"), 160)
+
+	if _, err := sendBlast(ctx, batcher, nil, nil, runID, bytes.NewReader(src), 4, 0, true, 0, 0, TransferStats{}); err != nil {
+		t.Fatalf("sendBlast() error = %v", err)
+	}
+
+	repairIndex := -1
+	doneIndex := -1
+	batcher.mu.Lock()
+	for i, packet := range batcher.writes {
+		packetType, _, _, seq, _, ok := decodeBlastPacketFull(packet)
+		if !ok {
+			continue
+		}
+		if packetType == PacketTypeData && seq == 0 && repairIndex == -1 && i > 0 {
+			repairIndex = i
+		}
+		if packetType == PacketTypeDone && doneIndex == -1 {
+			doneIndex = i
+		}
+	}
+	batcher.mu.Unlock()
+
+	if repairIndex == -1 {
+		t.Fatal("repair packet was not sent")
+	}
+	if doneIndex == -1 {
+		t.Fatal("done packet was not sent")
+	}
+	if repairIndex > doneIndex {
+		t.Fatalf("repair packet index = %d, want before done index %d", repairIndex, doneIndex)
 	}
 }
 
@@ -3455,6 +3554,60 @@ func (b *capturingBatcher) ReadBatch(ctx context.Context, timeout time.Duration,
 		return 0, err
 	}
 	return 0, testTimeoutError{}
+}
+
+type inflightRepairBatcher struct {
+	mu          sync.Mutex
+	runID       [16]byte
+	repairSeq   uint64
+	queued      bool
+	delivered   bool
+	writes      [][]byte
+	repairIndex int
+}
+
+func (b *inflightRepairBatcher) Capabilities() TransportCaps { return TransportCaps{Kind: "test"} }
+func (b *inflightRepairBatcher) MaxBatch() int               { return 128 }
+
+func (b *inflightRepairBatcher) WriteBatch(ctx context.Context, peer net.Addr, packets [][]byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	for _, packet := range packets {
+		packetCopy := append([]byte(nil), packet...)
+		packetType, _, runID, seq, _, ok := decodeBlastPacketFull(packetCopy)
+		if ok && packetType == PacketTypeData && runID == b.runID && seq == b.repairSeq && !b.queued {
+			b.queued = true
+			b.repairIndex = len(b.writes)
+		}
+		b.writes = append(b.writes, packetCopy)
+	}
+	return len(packets), ctx.Err()
+}
+
+func (b *inflightRepairBatcher) ReadBatch(ctx context.Context, timeout time.Duration, bufs []batchReadBuffer) (int, error) {
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if !b.queued || b.delivered || len(bufs) == 0 {
+		return 0, testTimeoutError{}
+	}
+	payload := make([]byte, 8)
+	binary.BigEndian.PutUint64(payload, b.repairSeq)
+	packet, err := MarshalPacket(Packet{
+		Version: ProtocolVersion,
+		Type:    PacketTypeRepairRequest,
+		RunID:   b.runID,
+		Payload: payload,
+	}, nil)
+	if err != nil {
+		return 0, err
+	}
+	copy(bufs[0].Bytes, packet)
+	bufs[0].N = len(packet)
+	b.delivered = true
+	return 1, nil
 }
 
 type testTimeoutError struct{}

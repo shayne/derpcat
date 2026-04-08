@@ -8,6 +8,8 @@ tmp="$(mktemp -d)"
 remote_base="/tmp/derpcat-promotion-reverse-$$"
 remote_upload="/tmp/derpcat-promotion-reverse-bin-$$"
 remote_user="${DERPCAT_REMOTE_USER:-root}"
+remote_bin_dir="${DERPCAT_REMOTE_BIN_DIR:-/usr/local/bin}"
+remote_bin="${remote_bin_dir%/}/derpcat"
 remote_env=()
 
 if [[ "${DERPCAT_TEST_DISABLE_TAILSCALE_CANDIDATES:-}" == "1" ]]; then
@@ -107,7 +109,7 @@ require_direct_blast_log() {
 }
 
 cleanup() {
-  remote "rm -f '${remote_base}.payload' '${remote_base}.err' '${remote_upload}'" >/dev/null 2>&1 || true
+  remote "rm -f '${remote_base}.payload' '${remote_base}.err' '${remote_upload}'; if [[ '${remote_bin_dir}' == /tmp* ]]; then rm -f '${remote_bin}'; fi" >/dev/null 2>&1 || true
   rm -rf "${tmp}"
 }
 
@@ -145,7 +147,7 @@ trap 'rc=$?; if [[ ${rc} -ne 0 ]]; then dump_failure; fi; cleanup; if [[ ${rc} -
 mise run build
 mise run build-linux-amd64
 scp dist/derpcat-linux-amd64 "${remote_user}@${target}:${remote_upload}" >/dev/null
-remote "install -m 0755 '${remote_upload}' /usr/local/bin/derpcat && rm -f '${remote_upload}' && /usr/local/bin/derpcat --help >/dev/null 2>&1"
+remote "mkdir -p '${remote_bin_dir}' && install -m 0755 '${remote_upload}' '${remote_bin}' && rm -f '${remote_upload}' && '${remote_bin}' --help >/dev/null 2>&1"
 
 payload="${remote_base}.payload"
 sender_log="${tmp}/send.err"
@@ -175,7 +177,7 @@ if [[ -z "${token}" ]]; then
 fi
 
 SECONDS=0
-remote "/usr/local/bin/derpcat --verbose send ${parallel_args_remote} '${token}' <'${payload}' >/dev/null 2>'${remote_base}.err'"
+remote "'${remote_bin}' --verbose send ${parallel_args_remote} '${token}' <'${payload}' >/dev/null 2>'${remote_base}.err'"
 duration="${SECONDS}"
 
 wait "${listener_pid}"

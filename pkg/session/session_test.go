@@ -918,10 +918,10 @@ func TestExternalListenSendPromotesToDirectUDPWhenBothSidesAreDirectReady(t *tes
 	if !bytes.Equal(listenerOut.Bytes(), payload) {
 		t.Fatalf("listener output length = %d, want %d", listenerOut.Len(), len(payload))
 	}
-	if got := senderStatus.String(); !strings.Contains(got, string(StateDirect)) || !strings.Contains(got, "udp-blast=true") || !strings.Contains(got, "udp-repair-payloads=true") || !strings.Contains(got, "udp-fec-group-size=0") || strings.Contains(got, "sender-tcp-direct") {
+	if got := senderStatus.String(); !strings.Contains(got, string(StateDirect)) || !strings.Contains(got, "udp-blast=true") || !strings.Contains(got, "udp-repair-payloads=true") || !strings.Contains(got, "udp-fec-group-size=32") || strings.Contains(got, "sender-tcp-direct") {
 		t.Fatalf("sender status = %q, want direct UDP promotion", got)
 	}
-	if got := listenerStatus.String(); !strings.Contains(got, string(StateDirect)) || !strings.Contains(got, "udp-blast=true") || !strings.Contains(got, "udp-fec-group-size=0") || strings.Contains(got, "listener-tcp-direct") {
+	if got := listenerStatus.String(); !strings.Contains(got, string(StateDirect)) || !strings.Contains(got, "udp-blast=true") || !strings.Contains(got, "udp-fec-group-size=32") || strings.Contains(got, "listener-tcp-direct") {
 		t.Fatalf("listener status = %q, want direct UDP promotion", got)
 	}
 }
@@ -3246,13 +3246,7 @@ func TestExternalDirectUDPParallelCandidatesPreserveWANLaneOrder(t *testing.T) {
 	}
 }
 
-func TestExternalDirectUDPSelectRemoteAddrsByConnKeepsFallbackLaneEndpoint(t *testing.T) {
-	fallback := []string{
-		"68.20.14.192:38183",
-		"68.20.14.192:34375",
-		"68.20.14.192:44442",
-		"68.20.14.192:40282",
-	}
+func TestExternalDirectUDPSelectRemoteAddrsByConnKeepsObservedLaneEndpoint(t *testing.T) {
 	observedByConn := [][]net.Addr{
 		{&net.UDPAddr{IP: net.IPv4(68, 20, 14, 192), Port: 38183}},
 		{&net.UDPAddr{IP: net.IPv4(68, 20, 14, 192), Port: 34375}},
@@ -3266,7 +3260,7 @@ func TestExternalDirectUDPSelectRemoteAddrsByConnKeepsFallbackLaneEndpoint(t *te
 		},
 	}
 
-	got := externalDirectUDPSelectRemoteAddrsByConn(observedByConn, fallback, 4, nil)
+	got := externalDirectUDPSelectRemoteAddrsByConn(observedByConn, 4, nil)
 	want := []string{
 		"68.20.14.192:38183",
 		"68.20.14.192:34375",
