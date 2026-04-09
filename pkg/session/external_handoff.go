@@ -242,6 +242,17 @@ func (s *externalHandoffSpool) AckedWatermark() int64 {
 	return s.ackedWatermark
 }
 
+func (s *externalHandoffSpool) SetMaxUnacked(maxUnacked int64) {
+	if maxUnacked <= 0 {
+		return
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.maxUnacked = maxUnacked
+	s.cond.Broadcast()
+}
+
 func (s *externalHandoffSpool) Snapshot() externalHandoffSpoolSnapshot {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -342,7 +353,7 @@ func (s *externalHandoffSpool) pumpSource() {
 			continue
 		}
 		payload := make([]byte, readSize)
-		n, err := io.ReadFull(s.src, payload)
+		n, err := s.src.Read(payload)
 		payload = payload[:n]
 
 		s.mu.Lock()
@@ -355,7 +366,7 @@ func (s *externalHandoffSpool) pumpSource() {
 		}
 		switch {
 		case err == nil:
-		case errors.Is(err, io.EOF), errors.Is(err, io.ErrUnexpectedEOF):
+		case errors.Is(err, io.EOF):
 			s.eof = true
 		default:
 			if s.readErr == nil {
@@ -520,6 +531,46 @@ func receiveExternalHandoffCarrier(ctx context.Context, carrier io.ReadWriteClos
 		default:
 		}
 	}
+}
+
+type externalHandoffSpoolReader struct {
+	spool         *externalHandoffSpool
+	pending       []byte
+	pendingOffset int64
+}
+
+func newExternalHandoffSpoolReader(spool *externalHandoffSpool) *externalHandoffSpoolReader {
+	return &externalHandoffSpoolReader{spool: spool}
+}
+
+func (r *externalHandoffSpoolReader) Read(p []byte) (int, error) {
+	if r == nil || r.spool == nil {
+		return 0, io.EOF
+	}
+	if len(p) == 0 {
+		return 0, nil
+	}
+	for len(r.pending) == 0 {
+		chunk, err := r.spool.NextChunk()
+		switch {
+		case err == nil:
+			r.pending = chunk.Payload
+			r.pendingOffset = chunk.Offset
+		case errors.Is(err, errExternalHandoffUnackedWindowFull), errors.Is(err, errExternalHandoffSourcePending):
+			time.Sleep(time.Millisecond)
+			continue
+		default:
+			return 0, err
+		}
+	}
+
+	n := copy(p, r.pending)
+	r.pending = r.pending[n:]
+	r.pendingOffset += int64(n)
+	if err := r.spool.AckTo(r.pendingOffset); err != nil {
+		return n, err
+	}
+	return n, nil
 }
 
 func externalHandoffCarrierClosed(err error) bool {

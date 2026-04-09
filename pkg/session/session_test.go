@@ -697,11 +697,11 @@ func TestExternalListenSendUsesRelayUDPWhenDirectNeverBecomesReady(t *testing.T)
 	if got := listenerOut.String(); got != "native-direct" {
 		t.Fatalf("listener output = %q, want %q", got, "native-direct")
 	}
-	if got := senderStatus.String(); !strings.Contains(got, string(StateRelay)) || !strings.Contains(got, "udp-relay=true") || strings.Contains(got, string(StateDirect)) {
-		t.Fatalf("sender status = %q, want relay UDP without direct promotion", got)
+	if got := senderStatus.String(); !strings.Contains(got, string(StateRelay)) || strings.Contains(got, "udp-relay=true") || strings.Contains(got, string(StateDirect)) || strings.Contains(got, "udp-stream=true") {
+		t.Fatalf("sender status = %q, want relay-prefix completion without UDP fallback or direct promotion", got)
 	}
-	if got := listenerStatus.String(); !strings.Contains(got, string(StateRelay)) || !strings.Contains(got, "udp-relay=true") || strings.Contains(got, string(StateDirect)) {
-		t.Fatalf("listener status = %q, want relay UDP without direct promotion", got)
+	if got := listenerStatus.String(); !strings.Contains(got, string(StateRelay)) || strings.Contains(got, "udp-relay=true") || strings.Contains(got, string(StateDirect)) || strings.Contains(got, "udp-stream=true") {
+		t.Fatalf("listener status = %q, want relay-prefix completion without UDP fallback or direct promotion", got)
 	}
 }
 
@@ -754,6 +754,80 @@ func TestExternalListenSendSmallRelayPayloadDoesNotWaitForDelayedNativeMode(t *t
 	}
 	if got := listenerOut.String(); got != strings.Repeat("relay-now", 1024) {
 		t.Fatalf("listener output length = %d, want %d", len(got), len(strings.Repeat("relay-now", 1024)))
+	}
+}
+
+func TestExternalListenSendSmallPayloadFinishesOverRelayBeforeDelayedDirectUDP(t *testing.T) {
+	t.Setenv("DERPCAT_FAKE_TRANSPORT", "1")
+	t.Setenv("DERPCAT_FAKE_TRANSPORT_ENABLE_DIRECT_AT", "0")
+
+	prevInterfaceAddrs := publicInterfaceAddrs
+	publicInterfaceAddrs = func() ([]net.Addr, error) {
+		return []net.Addr{
+			&net.IPNet{
+				IP:   net.IPv4(127, 0, 0, 1),
+				Mask: net.CIDRMask(8, 32),
+			},
+		}, nil
+	}
+	t.Cleanup(func() { publicInterfaceAddrs = prevInterfaceAddrs })
+
+	prevWaitDirectUDPAddr := waitExternalDirectUDPAddr
+	waitExternalDirectUDPAddr = func(ctx context.Context, conn net.PacketConn, manager *transport.Manager) (net.Addr, error) {
+		select {
+		case <-time.After(1500 * time.Millisecond):
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+		return prevWaitDirectUDPAddr(ctx, conn, manager)
+	}
+	t.Cleanup(func() { waitExternalDirectUDPAddr = prevWaitDirectUDPAddr })
+
+	srv := newSessionTestDERPServer(t)
+	t.Setenv("DERPCAT_TEST_DERP_MAP_URL", srv.MapURL)
+	t.Setenv("DERPCAT_TEST_DERP_SERVER_URL", srv.DERPURL)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	payload := bytes.Repeat([]byte("relay-prefix-now"), 1024)
+	var listenerOut bytes.Buffer
+	var listenerStatus syncBuffer
+	var senderStatus syncBuffer
+
+	tokenSink := make(chan string, 1)
+	listenErr := make(chan error, 1)
+	go func() {
+		_, err := Listen(ctx, ListenConfig{
+			Emitter:       telemetry.New(&listenerStatus, telemetry.LevelVerbose),
+			TokenSink:     tokenSink,
+			StdioOut:      &listenerOut,
+			UsePublicDERP: true,
+		})
+		listenErr <- err
+	}()
+
+	token := <-tokenSink
+	start := time.Now()
+	if err := Send(ctx, SendConfig{
+		Token:         token,
+		Emitter:       telemetry.New(&senderStatus, telemetry.LevelVerbose),
+		StdioIn:       bytes.NewReader(payload),
+		UsePublicDERP: true,
+	}); err != nil {
+		t.Fatalf("Send() error = %v listener=%q sender=%q", err, listenerStatus.String(), senderStatus.String())
+	}
+	if err := <-listenErr; err != nil {
+		t.Fatalf("Listen() error = %v listener=%q sender=%q", err, listenerStatus.String(), senderStatus.String())
+	}
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Fatalf("small payload took %v, want relay completion before delayed direct UDP; listener=%q sender=%q", elapsed, listenerStatus.String(), senderStatus.String())
+	}
+	if !bytes.Equal(listenerOut.Bytes(), payload) {
+		t.Fatalf("listener output length = %d, want %d", listenerOut.Len(), len(payload))
+	}
+	if got := senderStatus.String(); strings.Contains(got, "udp-stream=true") {
+		t.Fatalf("sender status = %q, want payload completion before direct UDP stream starts", got)
 	}
 }
 
@@ -853,7 +927,7 @@ func TestExternalListenSendPromotesToDirectUDPWhenBothSidesAreDirectReady(t *tes
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 
-	payload := bytes.Repeat([]byte("native-quic-direct:"), (4*externalCopyBufferSize)/len("native-quic-direct:"))
+	payload := bytes.Repeat([]byte("native-quic-direct:"), (2<<20)/len("native-quic-direct:"))
 	var listenerOut bytes.Buffer
 	var listenerStatus syncBuffer
 	var senderStatus syncBuffer
@@ -883,12 +957,12 @@ func TestExternalListenSendPromotesToDirectUDPWhenBothSidesAreDirectReady(t *tes
 
 		gateCtx, gateCancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer gateCancel()
-		if err := waitForSessionTestStatusContains(gateCtx, &senderStatus, string(StateDirect)); err != nil {
-			writerErr <- fmt.Errorf("waiting for sender direct UDP promotion: %w; listener=%q sender=%q", err, listenerStatus.String(), senderStatus.String())
+		if err := waitForSessionTestStatusContains(gateCtx, &senderStatus, "udp-stream=true"); err != nil {
+			writerErr <- fmt.Errorf("waiting for sender UDP stream: %w; listener=%q sender=%q", err, listenerStatus.String(), senderStatus.String())
 			return
 		}
-		if err := waitForSessionTestStatusContains(gateCtx, &listenerStatus, string(StateDirect)); err != nil {
-			writerErr <- fmt.Errorf("waiting for listener direct UDP promotion: %w; listener=%q sender=%q", err, listenerStatus.String(), senderStatus.String())
+		if err := waitForSessionTestStatusContains(gateCtx, &listenerStatus, "udp-stream=true"); err != nil {
+			writerErr <- fmt.Errorf("waiting for listener UDP stream: %w; listener=%q sender=%q", err, listenerStatus.String(), senderStatus.String())
 			return
 		}
 
@@ -1302,7 +1376,20 @@ func TestExternalListenSendUsesDirectUDPEvenWhenNativeTCPWouldBeAllowed(t *testi
 			writerErr <- err
 			return
 		}
-		time.Sleep(250 * time.Millisecond)
+		for _, wait := range []struct {
+			status *syncBuffer
+			needle string
+		}{
+			{status: &senderStatus, needle: "udp-blast=true"},
+			{status: &senderStatus, needle: string(StateDirect)},
+			{status: &listenerStatus, needle: "udp-blast=true"},
+			{status: &listenerStatus, needle: string(StateDirect)},
+		} {
+			if err := waitForSessionTestStatusContains(ctx, wait.status, wait.needle); err != nil {
+				writerErr <- fmt.Errorf("waiting for %q: %w; listener=%q sender=%q", wait.needle, err, listenerStatus.String(), senderStatus.String())
+				return
+			}
+		}
 		_, err := stdinWriter.Write(payload[midpoint:])
 		writerErr <- err
 	}()
@@ -1490,11 +1577,11 @@ func TestExternalListenSendUsesRelayUDPWhenDirectPromotionIsTooLate(t *testing.T
 	if got := listenerOut.String(); got != "delayed-native-direct" {
 		t.Fatalf("listener output = %q, want %q", got, "delayed-native-direct")
 	}
-	if got := senderStatus.String(); !strings.Contains(got, string(StateRelay)) || !strings.Contains(got, "udp-relay=true") || strings.Contains(got, string(StateDirect)) {
-		t.Fatalf("sender status = %q, want relay UDP without direct promotion", got)
+	if got := senderStatus.String(); !strings.Contains(got, string(StateRelay)) || strings.Contains(got, "udp-relay=true") || strings.Contains(got, string(StateDirect)) || strings.Contains(got, "udp-stream=true") {
+		t.Fatalf("sender status = %q, want relay-prefix completion without UDP fallback or direct promotion", got)
 	}
-	if got := listenerStatus.String(); !strings.Contains(got, string(StateRelay)) || !strings.Contains(got, "udp-relay=true") || strings.Contains(got, string(StateDirect)) {
-		t.Fatalf("listener status = %q, want relay UDP without direct promotion", got)
+	if got := listenerStatus.String(); !strings.Contains(got, string(StateRelay)) || strings.Contains(got, "udp-relay=true") || strings.Contains(got, string(StateDirect)) || strings.Contains(got, "udp-stream=true") {
+		t.Fatalf("listener status = %q, want relay-prefix completion without UDP fallback or direct promotion", got)
 	}
 }
 
