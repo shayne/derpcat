@@ -160,6 +160,29 @@ func TestEmitExternalDirectUDPStatsIncludesDataGoodputWithoutFirstByte(t *testin
 	}
 }
 
+func TestEmitExternalDirectUDPSendStatsIncludesReplayPressure(t *testing.T) {
+	var buf bytes.Buffer
+	emitter := telemetry.New(&buf, telemetry.LevelVerbose)
+	stats := probe.TransferStats{
+		MaxReplayBytes:               64 << 20,
+		ReplayWindowFullWaits:        7,
+		ReplayWindowFullWaitDuration: 250 * time.Millisecond,
+	}
+
+	emitExternalDirectUDPSendReplayStats(emitter, stats)
+
+	got := buf.String()
+	for _, want := range []string{
+		"udp-send-max-replay-bytes=67108864\n",
+		"udp-send-replay-window-full-waits=7\n",
+		"udp-send-replay-window-full-wait-ms=250\n",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("emitted stats = %q, want %q", got, want)
+		}
+	}
+}
+
 func TestExternalDirectUDPConnsUseDedicatedBlastSockets(t *testing.T) {
 	base, err := net.ListenPacket("udp4", "127.0.0.1:0")
 	if err != nil {

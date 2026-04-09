@@ -331,7 +331,7 @@ func sendExternalViaDirectUDPOnly(ctx context.Context, src io.Reader, tok token.
 				cfg.Emitter.Debug("udp-send-transport=" + stats.Transport.Summary())
 				cfg.Emitter.Debug("udp-send-active-lanes=1")
 				cfg.Emitter.Debug("udp-send-retransmits=" + strconv.FormatInt(stats.Retransmits, 10))
-				cfg.Emitter.Debug("udp-send-max-replay-bytes=" + strconv.FormatUint(stats.MaxReplayBytes, 10))
+				emitExternalDirectUDPSendReplayStats(cfg.Emitter, stats)
 				emitExternalDirectUDPStats(cfg.Emitter, "udp-send", stats.BytesSent, stats.StartedAt, stats.FirstByteAt, stats.CompletedAt)
 			}
 			return err
@@ -2036,6 +2036,15 @@ func emitExternalDirectUDPReceiveStartDebug(emitter *telemetry.Emitter, expected
 		return
 	}
 	emitter.Debug("udp-fast-discard-expected-bytes=" + strconv.FormatInt(expectedBytes, 10))
+}
+
+func emitExternalDirectUDPSendReplayStats(emitter *telemetry.Emitter, stats probe.TransferStats) {
+	if emitter == nil {
+		return
+	}
+	emitter.Debug("udp-send-max-replay-bytes=" + strconv.FormatUint(stats.MaxReplayBytes, 10))
+	emitter.Debug("udp-send-replay-window-full-waits=" + strconv.FormatInt(stats.ReplayWindowFullWaits, 10))
+	emitter.Debug("udp-send-replay-window-full-wait-ms=" + strconv.FormatInt(stats.ReplayWindowFullWaitDuration.Milliseconds(), 10))
 }
 
 func emitExternalDirectUDPReceiveResultDebug(emitter *telemetry.Emitter, stats probe.TransferStats, err error) {
