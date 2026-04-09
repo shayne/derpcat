@@ -171,6 +171,10 @@ func sendExternalViaDirectUDP(ctx context.Context, cfg SendConfig) error {
 		return pkt.From == listenerDERP && isDirectUDPStartAckPayload(pkt.Payload)
 	})
 	defer unsubscribeStartAck()
+	rateProbeCh, unsubscribeRateProbe := derpClient.SubscribeLossless(func(pkt derpbind.Packet) bool {
+		return pkt.From == listenerDERP && isDirectUDPRateProbePayload(pkt.Payload)
+	})
+	defer unsubscribeRateProbe()
 	pathEmitter := newTransportPathEmitter(cfg.Emitter)
 	pathEmitter.Emit(StateProbing)
 	transportCtx, transportCancel := context.WithCancel(ctx)
@@ -209,6 +213,7 @@ func sendExternalViaDirectUDP(ctx context.Context, cfg SendConfig) error {
 			remoteCandidates: remoteCandidates,
 			readyAckCh:       readyAckCh,
 			startAckCh:       startAckCh,
+			rateProbeCh:      rateProbeCh,
 			cfg:              cfg,
 		})
 	}
@@ -222,7 +227,7 @@ func sendExternalViaDirectUDP(ctx context.Context, cfg SendConfig) error {
 	return nil
 }
 
-func sendExternalViaDirectUDPOnly(ctx context.Context, src io.Reader, tok token.Token, derpClient *derpbind.Client, listenerDERP key.NodePublic, transportManager *transport.Manager, pathEmitter *transportPathEmitter, punchCancel context.CancelFunc, probeConn net.PacketConn, probeConns []net.PacketConn, remoteCandidates []net.Addr, readyAckCh <-chan derpbind.Packet, startAckCh <-chan derpbind.Packet, cfg SendConfig) error {
+func sendExternalViaDirectUDPOnly(ctx context.Context, src io.Reader, tok token.Token, derpClient *derpbind.Client, listenerDERP key.NodePublic, transportManager *transport.Manager, pathEmitter *transportPathEmitter, punchCancel context.CancelFunc, probeConn net.PacketConn, probeConns []net.PacketConn, remoteCandidates []net.Addr, readyAckCh <-chan derpbind.Packet, startAckCh <-chan derpbind.Packet, rateProbeCh <-chan derpbind.Packet, cfg SendConfig) error {
 	if peerAddr, err := waitExternalDirectUDPAddr(ctx, probeConn, transportManager); err == nil {
 		if err := sendEnvelope(ctx, derpClient, listenerDERP, envelope{Type: envelopeDirectUDPReady}); err != nil {
 			return err
@@ -246,7 +251,8 @@ func sendExternalViaDirectUDPOnly(ctx context.Context, src io.Reader, tok token.
 			streamProbeConn := probeConns[0]
 			streamRemoteAddr := remoteAddrs[0]
 			maxRateMbps := externalDirectUDPMaxRateMbps
-			activeRateMbps := maxRateMbps
+			probeRates := externalDirectUDPRateProbeRates(maxRateMbps, -1)
+			activeRateMbps := externalDirectUDPInitialProbeFallbackMbps
 			if cfg.Emitter != nil {
 				cfg.Emitter.Debug("udp-blast=true")
 				cfg.Emitter.Debug("udp-lanes=" + strconv.Itoa(1))
@@ -282,18 +288,39 @@ func sendExternalViaDirectUDPOnly(ctx context.Context, src io.Reader, tok token.
 			}
 			var stats probe.TransferStats
 			emitExternalDirectUDPReceiveStartDebug(cfg.Emitter, 0)
+			start := externalDirectUDPStreamStart(maxRateMbps, -1)
 			if err := sendEnvelope(ctx, derpClient, listenerDERP, envelope{
-				Type: envelopeDirectUDPStart,
-				DirectUDPStart: &directUDPStart{
-					Stream: true,
-				},
+				Type:           envelopeDirectUDPStart,
+				DirectUDPStart: &start,
 			}); err != nil {
 				return err
 			}
 			if err := waitForDirectUDPStartAck(ctx, startAckCh); err != nil {
 				return err
 			}
+			var sentProbeSamples []directUDPRateProbeSample
+			var probeResult directUDPRateProbeResult
+			if len(probeRates) > 0 {
+				var probeErr error
+				sentProbeSamples, probeErr = externalDirectUDPSendRateProbes(ctx, streamProbeConn, streamRemoteAddr, probeRates)
+				if probeErr != nil {
+					return probeErr
+				}
+				probeResult, probeErr = waitForDirectUDPRateProbe(ctx, rateProbeCh)
+				if probeErr != nil {
+					return probeErr
+				}
+				activeRateMbps = externalDirectUDPSelectInitialRateMbps(maxRateMbps, sentProbeSamples, probeResult.Samples)
+				sendCfg.RateMbps = activeRateMbps
+				sendCfg.RateCeilingMbps = maxRateMbps
+			}
 			if cfg.Emitter != nil {
+				cfg.Emitter.Debug("udp-rate-ceiling-mbps=" + strconv.Itoa(maxRateMbps))
+				if len(probeRates) > 0 {
+					cfg.Emitter.Debug("udp-rate-probe-rates=" + strings.Trim(strings.Join(strings.Fields(fmt.Sprint(probeRates)), ","), "[]"))
+					cfg.Emitter.Debug("udp-rate-probe-samples=" + externalDirectUDPFormatRateProbeSamples(sentProbeSamples, probeResult.Samples))
+				}
+				cfg.Emitter.Debug("udp-rate-selected-mbps=" + strconv.Itoa(activeRateMbps))
 				cfg.Emitter.Debug("udp-rate-mbps=" + strconv.Itoa(activeRateMbps))
 				cfg.Emitter.Debug("udp-stream=true")
 				cfg.Emitter.Debug("udp-stream-replay-window-bytes=" + strconv.FormatUint(sendCfg.StreamReplayWindowBytes, 10))
@@ -584,12 +611,13 @@ type externalRelayPrefixSendConfig struct {
 	remoteCandidates []net.Addr
 	readyAckCh       <-chan derpbind.Packet
 	startAckCh       <-chan derpbind.Packet
+	rateProbeCh      <-chan derpbind.Packet
 	cfg              SendConfig
 }
 
 func sendExternalViaRelayPrefixThenDirectUDP(ctx context.Context, rcfg externalRelayPrefixSendConfig) error {
 	if rcfg.decision.Accept == nil {
-		return sendExternalViaDirectUDPOnly(ctx, rcfg.src, rcfg.tok, rcfg.derpClient, rcfg.listenerDERP, rcfg.transportManager, rcfg.pathEmitter, rcfg.punchCancel, rcfg.probeConn, rcfg.probeConns, rcfg.remoteCandidates, rcfg.readyAckCh, rcfg.startAckCh, rcfg.cfg)
+		return sendExternalViaDirectUDPOnly(ctx, rcfg.src, rcfg.tok, rcfg.derpClient, rcfg.listenerDERP, rcfg.transportManager, rcfg.pathEmitter, rcfg.punchCancel, rcfg.probeConn, rcfg.probeConns, rcfg.remoteCandidates, rcfg.readyAckCh, rcfg.startAckCh, rcfg.rateProbeCh, rcfg.cfg)
 	}
 	spool, err := newExternalHandoffSpool(rcfg.src, externalRelayPrefixDERPChunkSize, externalRelayPrefixDERPMaxUnacked)
 	if err != nil {
@@ -657,7 +685,7 @@ func sendExternalViaRelayPrefixThenDirectUDP(ctx context.Context, rcfg externalR
 	if err := spool.RewindTo(spool.AckedWatermark()); err != nil {
 		return err
 	}
-	return sendExternalViaDirectUDPOnly(ctx, newExternalHandoffSpoolReader(spool), rcfg.tok, rcfg.derpClient, rcfg.listenerDERP, rcfg.transportManager, rcfg.pathEmitter, rcfg.punchCancel, rcfg.probeConn, rcfg.probeConns, rcfg.remoteCandidates, rcfg.readyAckCh, rcfg.startAckCh, rcfg.cfg)
+	return sendExternalViaDirectUDPOnly(ctx, newExternalHandoffSpoolReader(spool), rcfg.tok, rcfg.derpClient, rcfg.listenerDERP, rcfg.transportManager, rcfg.pathEmitter, rcfg.punchCancel, rcfg.probeConn, rcfg.probeConns, rcfg.remoteCandidates, rcfg.readyAckCh, rcfg.startAckCh, rcfg.rateProbeCh, rcfg.cfg)
 }
 
 type externalRelayPrefixReceiveConfig struct {
@@ -1561,6 +1589,13 @@ func externalDirectUDPRateProbeRates(maxRateMbps int, totalBytes int64) []int {
 	return out
 }
 
+func externalDirectUDPStreamStart(maxRateMbps int, totalBytes int64) directUDPStart {
+	return directUDPStart{
+		Stream:     true,
+		ProbeRates: externalDirectUDPRateProbeRates(maxRateMbps, totalBytes),
+	}
+}
+
 func externalDirectUDPRateProbePayload(index int, size int) ([]byte, error) {
 	if index < 0 {
 		return nil, fmt.Errorf("negative rate probe index %d", index)
@@ -1854,6 +1889,14 @@ func externalDirectUDPSelectRateFromProbeSamples(maxRateMbps int, sent []directU
 	return selected
 }
 
+func externalDirectUDPSelectInitialRateMbps(maxRateMbps int, sent []directUDPRateProbeSample, received []directUDPRateProbeSample) int {
+	selected := externalDirectUDPSelectRateFromProbeSamples(maxRateMbps, sent, received)
+	if selected <= 0 || selected > maxRateMbps {
+		selected = externalDirectUDPInitialProbeFallbackMbps
+	}
+	return selected
+}
+
 func externalDirectUDPSampleGoodputMbps(bytes int64, durationMillis int64) float64 {
 	if bytes <= 0 || durationMillis <= 0 {
 		return 0
@@ -2060,6 +2103,23 @@ func waitForDirectUDPStartAck(ctx context.Context, startAckCh <-chan derpbind.Pa
 	return nil
 }
 
+func waitForDirectUDPRateProbe(ctx context.Context, rateProbeCh <-chan derpbind.Packet) (directUDPRateProbeResult, error) {
+	waitCtx, cancel := context.WithTimeout(ctx, externalDirectUDPStartWait)
+	defer cancel()
+	pkt, err := receiveSubscribedPacket(waitCtx, rateProbeCh)
+	if err != nil {
+		return directUDPRateProbeResult{}, err
+	}
+	env, err := decodeEnvelope(pkt.Payload)
+	if err != nil || env.Type != envelopeDirectUDPRateProbe {
+		return directUDPRateProbeResult{}, errors.New("unexpected direct UDP rate probe response")
+	}
+	if env.DirectUDPRateProbe == nil {
+		return directUDPRateProbeResult{}, errors.New("direct UDP rate probe response missing samples")
+	}
+	return *env.DirectUDPRateProbe, nil
+}
+
 func isDirectUDPReadyPayload(payload []byte) bool {
 	if len(payload) == 0 || payload[0] != '{' {
 		return false
@@ -2082,6 +2142,14 @@ func isDirectUDPStartAckPayload(payload []byte) bool {
 	}
 	env, err := decodeEnvelope(payload)
 	return err == nil && env.Type == envelopeDirectUDPStartAck
+}
+
+func isDirectUDPRateProbePayload(payload []byte) bool {
+	if len(payload) == 0 || payload[0] != '{' {
+		return false
+	}
+	env, err := decodeEnvelope(payload)
+	return err == nil && env.Type == envelopeDirectUDPRateProbe
 }
 
 type externalDirectUDPDiscardSendResult struct {

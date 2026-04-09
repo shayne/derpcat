@@ -2589,6 +2589,7 @@ func isTransportDataPayload(payload []byte) bool {
 		externalRelayPrefixDERPFrameKindOf(payload) == 0 &&
 		!isAckPayload(payload) &&
 		!isDirectUDPReadyAckPayload(payload) &&
+		!isDirectUDPRateProbePayload(payload) &&
 		!isClaimPayload(payload) &&
 		!isDecisionPayload(payload) &&
 		!isQUICModeRequestPayload(payload) &&

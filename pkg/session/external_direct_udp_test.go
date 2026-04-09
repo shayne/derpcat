@@ -732,6 +732,75 @@ func TestExternalDirectUDPSendRateProbesWritesSyntheticPackets(t *testing.T) {
 	}
 }
 
+func TestIsDirectUDPRateProbePayloadAcceptsRateProbeEnvelope(t *testing.T) {
+	payload, err := json.Marshal(envelope{
+		Type: envelopeDirectUDPRateProbe,
+		DirectUDPRateProbe: &directUDPRateProbeResult{
+			Samples: []directUDPRateProbeSample{{RateMbps: 150, BytesReceived: 1, DurationMillis: 200}},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !isDirectUDPRateProbePayload(payload) {
+		t.Fatal("isDirectUDPRateProbePayload() = false, want true")
+	}
+}
+
+func TestWaitForDirectUDPRateProbeReturnsSamples(t *testing.T) {
+	payload, err := json.Marshal(envelope{
+		Type: envelopeDirectUDPRateProbe,
+		DirectUDPRateProbe: &directUDPRateProbeResult{
+			Samples: []directUDPRateProbeSample{{RateMbps: 350, BytesReceived: 8_000_000, DurationMillis: 200}},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ch := make(chan derpbind.Packet, 1)
+	ch <- derpbind.Packet{Payload: payload}
+
+	got, err := waitForDirectUDPRateProbe(context.Background(), ch)
+	if err != nil {
+		t.Fatalf("waitForDirectUDPRateProbe() error = %v", err)
+	}
+	if len(got.Samples) != 1 || got.Samples[0].RateMbps != 350 {
+		t.Fatalf("waitForDirectUDPRateProbe() = %#v, want 350 Mbps sample", got)
+	}
+}
+
+func TestExternalDirectUDPSelectInitialRateUsesProbeSamples(t *testing.T) {
+	sent := []directUDPRateProbeSample{
+		{RateMbps: 8, BytesSent: 200_000, DurationMillis: 200},
+		{RateMbps: 25, BytesSent: 625_000, DurationMillis: 200},
+		{RateMbps: 75, BytesSent: 1_875_000, DurationMillis: 200},
+		{RateMbps: 150, BytesSent: 3_750_000, DurationMillis: 200},
+		{RateMbps: 350, BytesSent: 8_750_000, DurationMillis: 200},
+	}
+	received := []directUDPRateProbeSample{
+		{RateMbps: 8, BytesReceived: 200_000, DurationMillis: 200},
+		{RateMbps: 25, BytesReceived: 625_000, DurationMillis: 200},
+		{RateMbps: 75, BytesReceived: 1_875_000, DurationMillis: 200},
+		{RateMbps: 150, BytesReceived: 3_700_000, DurationMillis: 200},
+		{RateMbps: 350, BytesReceived: 1_000_000, DurationMillis: 200},
+	}
+	got := externalDirectUDPSelectInitialRateMbps(10_000, sent, received)
+	if got <= 0 || got > 150 {
+		t.Fatalf("externalDirectUDPSelectInitialRateMbps() = %d, want safe rate <= 150", got)
+	}
+}
+
+func TestExternalDirectUDPStreamStartRequestsProbeRatesForUnknownStreams(t *testing.T) {
+	got := externalDirectUDPStreamStart(externalDirectUDPMaxRateMbps, -1)
+	wantRates := []int{8, 25, 75, 150, 350, 700, 1200, 2250, 5000, 10000}
+	if !got.Stream {
+		t.Fatal("externalDirectUDPStreamStart().Stream = false, want true")
+	}
+	if fmt.Sprint(got.ProbeRates) != fmt.Sprint(wantRates) {
+		t.Fatalf("externalDirectUDPStreamStart().ProbeRates = %v, want %v", got.ProbeRates, wantRates)
+	}
+}
+
 func TestExternalDirectUDPSelectRateFromProbeSamplesUsesDeliveredGoodput(t *testing.T) {
 	sent := []directUDPRateProbeSample{
 		{RateMbps: 350, BytesSent: 9_000_000, DurationMillis: 200},

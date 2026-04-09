@@ -60,6 +60,24 @@ func TestDirectUDPReadyAckPayloadIsControl(t *testing.T) {
 	}
 }
 
+func TestDirectUDPRateProbePayloadIsControl(t *testing.T) {
+	payload, err := json.Marshal(envelope{
+		Type: envelopeDirectUDPRateProbe,
+		DirectUDPRateProbe: &directUDPRateProbeResult{
+			Samples: []directUDPRateProbeSample{{RateMbps: 150, BytesReceived: 1, DurationMillis: 200}},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !isDirectUDPRateProbePayload(payload) {
+		t.Fatalf("isDirectUDPRateProbePayload(%s) = false, want true", payload)
+	}
+	if isTransportDataPayload(payload) {
+		t.Fatalf("isTransportDataPayload(%s) = true, want false for direct UDP rate probe", payload)
+	}
+}
+
 func TestRelayOnlyStdioRoundTrip(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
