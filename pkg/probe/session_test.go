@@ -2965,6 +2965,55 @@ func TestSendBlastServicesRepairRequestsDuringDataPhase(t *testing.T) {
 	}
 }
 
+func TestBlastSendControlDecreasesOnReplayPressure(t *testing.T) {
+	now := time.Unix(0, 0)
+	control := newBlastSendControl(1200, 10_000, now)
+	control.ObserveReplayPressure(now.Add(100*time.Millisecond), 200<<20, 256<<20)
+	if got := control.RateMbps(); got >= 1200 {
+		t.Fatalf("RateMbps() = %d, want decrease below 1200 after replay pressure", got)
+	}
+}
+
+func TestBlastSendControlCanDecreaseBelowOneMegabytePerSecond(t *testing.T) {
+	now := time.Unix(0, 0)
+	control := newBlastSendControl(8, 10_000, now)
+	for i := 0; i < 10; i++ {
+		control.ObserveReplayPressure(now.Add(time.Duration(i+1)*time.Second), 8<<20, 8<<20)
+	}
+	if got := control.RateMbps(); got >= 8 {
+		t.Fatalf("RateMbps() = %d, want below 8 Mbps after repeated pressure", got)
+	}
+	if got, want := control.RateMbps(), blastRateMinMbps; got != want {
+		t.Fatalf("RateMbps() = %d, want floor %d", got, want)
+	}
+}
+
+func TestRecordReplayWindowFullWaitUpdatesStats(t *testing.T) {
+	var stats TransferStats
+	recordReplayWindowFullWait(&stats, 64<<10, 25*time.Millisecond)
+	if got, want := stats.ReplayWindowFullWaits, int64(1); got != want {
+		t.Fatalf("ReplayWindowFullWaits = %d, want %d", got, want)
+	}
+	if got, want := stats.ReplayWindowFullWaitDuration, 25*time.Millisecond; got != want {
+		t.Fatalf("ReplayWindowFullWaitDuration = %s, want %s", got, want)
+	}
+	if got, want := stats.MaxReplayBytes, uint64(64<<10); got != want {
+		t.Fatalf("MaxReplayBytes = %d, want %d", got, want)
+	}
+}
+
+func TestBlastSocketPacingUsesCeilingForAdaptiveRamp(t *testing.T) {
+	if got, want := blastSocketPacingRateMbps(150, 10_000), 10_000; got != want {
+		t.Fatalf("blastSocketPacingRateMbps(150, 10000) = %d, want %d", got, want)
+	}
+	if got, want := blastSocketPacingRateMbps(150, 0), 150; got != want {
+		t.Fatalf("blastSocketPacingRateMbps(150, 0) = %d, want %d", got, want)
+	}
+	if got, want := blastSocketPacingRateMbps(1200, 700), 1200; got != want {
+		t.Fatalf("blastSocketPacingRateMbps(1200, 700) = %d, want %d", got, want)
+	}
+}
+
 func TestReceiveBlastParallelToWriterCompletesWhenFECReachesExpectedBytesBeforeDone(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()

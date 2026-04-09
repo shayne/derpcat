@@ -6,12 +6,13 @@ import (
 )
 
 const (
-	blastRateFeedbackInterval   = 100 * time.Millisecond
-	blastRateHoldAfterDecrease  = 600 * time.Millisecond
-	blastPacerMaxScheduleDebt   = 250 * time.Millisecond
-	blastRateIncreaseMultiplier = 1.08
-	blastRateDecreaseMultiplier = 0.75
-	blastRateMinMbps            = 64
+	blastRateFeedbackInterval    = 100 * time.Millisecond
+	blastRateHoldAfterDecrease   = 600 * time.Millisecond
+	blastPacerMaxScheduleDebt    = 250 * time.Millisecond
+	blastRateIncreaseMultiplier  = 1.08
+	blastRateDecreaseMultiplier  = 0.75
+	blastRateMinMbps             = 1
+	blastReplayPressureThreshold = 0.75
 )
 
 type blastRateFeedback struct {
@@ -87,6 +88,25 @@ func (c *blastSendControl) AckFloor() uint64 {
 	return c.ackFloor
 }
 
+func (c *blastSendControl) ObserveReplayPressure(now time.Time, retainedBytes uint64, maxBytes uint64) {
+	if c == nil || c.controller == nil || maxBytes == 0 {
+		return
+	}
+	if now.IsZero() {
+		now = time.Now()
+	}
+	if float64(retainedBytes)/float64(maxBytes) < blastReplayPressureThreshold {
+		return
+	}
+	before := c.controller.RateMbps()
+	c.controller.decrease(now)
+	after := c.controller.RateMbps()
+	if after != before {
+		sessionTracef("blast rate replay pressure rate_mbps=%d previous_mbps=%d retained_bytes=%d max_bytes=%d",
+			after, before, retainedBytes, maxBytes)
+	}
+}
+
 func (c *blastSendControl) ObserveReceiverStats(payload []byte, now time.Time) {
 	if c == nil || c.controller == nil {
 		return
@@ -110,6 +130,13 @@ func (c *blastSendControl) ObserveReceiverStats(payload []byte, now time.Time) {
 		sessionTracef("blast rate update rate_mbps=%d previous_mbps=%d rx_bytes=%d rx_packets=%d rx_max_seq=%d sent_bytes=%d",
 			after, before, stats.ReceivedPayloadBytes, stats.ReceivedPackets, stats.MaxSeqPlusOne, c.sentPayloadBytes)
 	}
+}
+
+func blastSocketPacingRateMbps(initialRateMbps int, ceilingMbps int) int {
+	if ceilingMbps > initialRateMbps {
+		return ceilingMbps
+	}
+	return initialRateMbps
 }
 
 func newBlastPacer(now time.Time) *blastPacer {

@@ -112,17 +112,28 @@ type ReceiveConfig struct {
 }
 
 type TransferStats struct {
-	BytesSent      int64
-	BytesReceived  int64
-	PacketsSent    int64
-	PacketsAcked   int64
-	Retransmits    int64
-	Lanes          int
-	StartedAt      time.Time
-	CompletedAt    time.Time
-	FirstByteAt    time.Time
-	Transport      TransportCaps
-	MaxReplayBytes uint64
+	BytesSent                    int64
+	BytesReceived                int64
+	PacketsSent                  int64
+	PacketsAcked                 int64
+	Retransmits                  int64
+	Lanes                        int
+	StartedAt                    time.Time
+	CompletedAt                  time.Time
+	FirstByteAt                  time.Time
+	Transport                    TransportCaps
+	MaxReplayBytes               uint64
+	ReplayWindowFullWaits        int64
+	ReplayWindowFullWaitDuration time.Duration
+}
+
+func recordReplayWindowFullWait(stats *TransferStats, retainedBytes uint64, waited time.Duration) {
+	if stats == nil {
+		return
+	}
+	stats.ReplayWindowFullWaits++
+	stats.ReplayWindowFullWaitDuration += waited
+	stats.MaxReplayBytes = max(stats.MaxReplayBytes, retainedBytes)
 }
 
 func Send(ctx context.Context, conn net.PacketConn, remoteAddr string, src io.Reader, cfg SendConfig) (TransferStats, error) {
@@ -487,7 +498,7 @@ func sendBlast(ctx context.Context, batcher packetBatcher, conn net.PacketConn, 
 		batcher = newPacketBatcher(conn, stats.Transport.RequestedKind)
 	}
 	stats.Transport = batcher.Capabilities()
-	_ = setSocketPacing(conn, rateMbps)
+	_ = setSocketPacing(conn, blastSocketPacingRateMbps(rateMbps, rateCeilingMbps))
 	buildBatchLimit := batcher.MaxBatch()
 	if buildBatchLimit < 128 {
 		buildBatchLimit = 128
@@ -602,9 +613,14 @@ func sendBlast(ctx context.Context, batcher packetBatcher, conn net.PacketConn, 
 				if history.streamReplay == nil || history.streamReplay.RetainedBytes() < history.streamReplay.MaxBytes() {
 					continue
 				}
+				waitStart := time.Now()
+				if control.Adaptive() {
+					control.ObserveReplayPressure(waitStart, history.streamReplay.RetainedBytes(), history.streamReplay.MaxBytes())
+				}
 				if err := sleepWithContext(ctx, blastRepairInterval); err != nil {
 					return nil, err
 				}
+				recordReplayWindowFullWait(&stats, history.streamReplay.RetainedBytes(), time.Since(waitStart))
 			}
 		}
 		if err := ctx.Err(); err != nil {
