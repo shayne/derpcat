@@ -387,6 +387,92 @@ func TestReceiveExternalHandoffDERPReturnsCurrentWatermarkOnHandoffBelowBoundary
 	}
 }
 
+func TestReceiveExternalHandoffDERPTracksOnlyDeliveredRelayBytes(t *testing.T) {
+	srv := newSessionTestDERPServer(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	node := srv.Map.Regions[1].Nodes[0]
+	listenerDERP, err := derpbind.NewClient(ctx, node, srv.DERPURL)
+	if err != nil {
+		t.Fatalf("NewClient(listener) error = %v", err)
+	}
+	defer listenerDERP.Close()
+	senderDERP, err := derpbind.NewClient(ctx, node, srv.DERPURL)
+	if err != nil {
+		t.Fatalf("NewClient(sender) error = %v", err)
+	}
+	defer senderDERP.Close()
+
+	relayFrames, unsubscribeRelay := listenerDERP.SubscribeLossless(func(pkt derpbind.Packet) bool {
+		return pkt.From == senderDERP.PublicKey() && externalRelayPrefixDERPFrameKindOf(pkt.Payload) != 0
+	})
+	defer unsubscribeRelay()
+	ackFrames, unsubscribeAck := senderDERP.SubscribeLossless(func(pkt derpbind.Packet) bool {
+		return pkt.From == listenerDERP.PublicKey() && externalRelayPrefixDERPFrameKindOf(pkt.Payload) == externalRelayPrefixDERPFrameAck
+	})
+	defer unsubscribeAck()
+
+	var out bytes.Buffer
+	rx := newExternalHandoffReceiver(&out, 32)
+	metrics := newExternalTransferMetrics(time.Now())
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- receiveExternalHandoffDERP(ctx, listenerDERP, senderDERP.PublicKey(), rx, relayFrames, metrics)
+	}()
+
+	if err := externalRelayPrefixDERPSendChunk(ctx, senderDERP, listenerDERP.PublicKey(), externalHandoffChunk{Offset: 0, Payload: []byte("abcd")}); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case pkt := <-ackFrames:
+		ack, err := externalRelayPrefixDERPDecodeAck(pkt.Payload)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if ack != 4 {
+			t.Fatalf("first ack = %d, want 4", ack)
+		}
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("timed out waiting for first DERP prefix ACK")
+	}
+
+	if err := externalRelayPrefixDERPSendChunk(ctx, senderDERP, listenerDERP.PublicKey(), externalHandoffChunk{Offset: 2, Payload: []byte("cdef")}); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case pkt := <-ackFrames:
+		ack, err := externalRelayPrefixDERPDecodeAck(pkt.Payload)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if ack != 6 {
+			t.Fatalf("second ack = %d, want 6", ack)
+		}
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("timed out waiting for second DERP prefix ACK")
+	}
+
+	if err := externalRelayPrefixDERPSendHandoff(ctx, senderDERP, listenerDERP.PublicKey(), 6); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-errCh:
+		if !errors.Is(err, errExternalHandoffCarrierHandoff) {
+			t.Fatalf("receiveExternalHandoffDERP() error = %v, want %v", err, errExternalHandoffCarrierHandoff)
+		}
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("timed out waiting for DERP prefix handoff")
+	}
+
+	if got := out.String(); got != "abcdef" {
+		t.Fatalf("receiver output = %q, want %q", got, "abcdef")
+	}
+	if got := metrics.RelayBytes(); got != 6 {
+		t.Fatalf("relay bytes = %d, want 6", got)
+	}
+}
+
 func TestSendExternalViaRelayPrefixThenDirectUDPCompletesSmallPayloadBeforeSlowDirectSend(t *testing.T) {
 	srv := newSessionTestDERPServer(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)

@@ -594,10 +594,7 @@ func externalExecutePreparedDirectUDPReceive(ctx context.Context, plan externalD
 	if err == nil {
 		err = plan.flushDst()
 	}
-	completedAt := stats.CompletedAt
-	if err == nil {
-		completedAt = time.Now()
-	}
+	completedAt := time.Now()
 	if stats.BytesReceived > 0 {
 		directFirstByteAt := stats.FirstByteAt
 		if directFirstByteAt.IsZero() {
@@ -1306,11 +1303,14 @@ func receiveExternalHandoffDERP(ctx context.Context, client *derpbind.Client, pe
 			if err != nil {
 				return err
 			}
+			prevWatermark := rx.Watermark()
 			if err := rx.AcceptChunk(chunk); err != nil {
 				return err
 			}
 			if metrics != nil {
-				metrics.RecordRelayWrite(int64(len(chunk.Payload)), time.Now())
+				if delivered := rx.Watermark() - prevWatermark; delivered > 0 {
+					metrics.RecordRelayWrite(delivered, time.Now())
+				}
 			}
 			if err := externalRelayPrefixDERPSendAck(ctx, client, peerDERP, rx.Watermark()); err != nil {
 				return err
