@@ -54,7 +54,7 @@ func SummarizeRuns(runs []RunReport) SeriesSummary {
 			peakGoodput = runPeak
 		}
 
-		if run.FirstByteMS > 0 {
+		if isRunSuccessful(run) {
 			summary.FirstByteCount++
 			firstByteTotal += float64(run.FirstByteMS)
 			if run.FirstByteMS > peakFirstByte {
@@ -109,8 +109,8 @@ func isRunSuccessful(run RunReport) bool {
 	if run.Error != "" {
 		return false
 	}
-	if run.successSet {
-		return run.Success
+	if run.Success != nil {
+		return *run.Success
 	}
 	// Preserve legacy zero-value RunReport behavior.
 	return true

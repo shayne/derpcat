@@ -57,8 +57,7 @@ func TestRunReportJSONEncodesCoreMetrics(t *testing.T) {
 		FirstByteMS:     3,
 		LossRate:        0.02,
 		Retransmits:     1,
-		Success:         true,
-		successSet:      true,
+		Success:         boolPtr(true),
 		Local:           TransportCaps{Kind: "legacy", RequestedKind: "batched"},
 		Remote:          TransportCaps{Kind: "batched", RequestedKind: "batched", BatchSize: 128, TXOffload: true},
 	}
@@ -97,8 +96,7 @@ func TestRunReportJSONRoundTripsExplicitFalseSuccess(t *testing.T) {
 		Direction:   "forward",
 		DurationMS:  1,
 		GoodputMbps: 1,
-		Success:     false,
-		successSet:  true,
+		Success:     boolPtr(false),
 	}
 
 	got, err := report.JSON()
@@ -118,11 +116,8 @@ func TestRunReportJSONRoundTripsExplicitFalseSuccess(t *testing.T) {
 	if err := json.Unmarshal(got, &roundTripped); err != nil {
 		t.Fatalf("json.Unmarshal(RunReport) error = %v", err)
 	}
-	if roundTripped.Success {
-		t.Fatalf("roundTripped.Success = true, want false")
-	}
-	if !roundTripped.successSet {
-		t.Fatalf("roundTripped.successSet = false, want true")
+	if roundTripped.Success == nil || *roundTripped.Success {
+		t.Fatalf("roundTripped.Success = %#v, want false", roundTripped.Success)
 	}
 }
 
@@ -152,8 +147,8 @@ func TestRunReportJSONLegacyOmittedSuccessPreservesLegacyBehavior(t *testing.T) 
 	if err := json.Unmarshal(got, &roundTripped); err != nil {
 		t.Fatalf("json.Unmarshal(RunReport) error = %v", err)
 	}
-	if roundTripped.successSet {
-		t.Fatalf("roundTripped.successSet = true, want false")
+	if roundTripped.Success != nil {
+		t.Fatalf("roundTripped.Success = %#v, want nil", roundTripped.Success)
 	}
 	if got := SummarizeRuns([]RunReport{roundTripped}); got.SuccessCount != 1 {
 		t.Fatalf("legacy round-tripped report did not count as successful")
