@@ -120,7 +120,7 @@ func hasMeasuredFirstByte(run RunReport) bool {
 	if !isRunSuccessful(run) {
 		return false
 	}
-	if run.Success != nil {
+	if run.FirstByteMeasured {
 		return true
 	}
 	return run.FirstByteMS > 0

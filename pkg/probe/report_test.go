@@ -44,22 +44,23 @@ func TestMarkdownReportIncludesCoreMetrics(t *testing.T) {
 
 func TestRunReportJSONEncodesCoreMetrics(t *testing.T) {
 	report := RunReport{
-		Host:            "ktzlxc",
-		Mode:            "raw",
-		Transport:       "batched",
-		Direction:       "forward",
-		SizeBytes:       1024,
-		BytesReceived:   1000,
-		DurationMS:      10,
-		GoodputMbps:     8.5,
-		PeakGoodputMbps: 8.5,
-		Direct:          true,
-		FirstByteMS:     3,
-		LossRate:        0.02,
-		Retransmits:     1,
-		Success:         boolPtr(true),
-		Local:           TransportCaps{Kind: "legacy", RequestedKind: "batched"},
-		Remote:          TransportCaps{Kind: "batched", RequestedKind: "batched", BatchSize: 128, TXOffload: true},
+		Host:              "ktzlxc",
+		Mode:              "raw",
+		Transport:         "batched",
+		Direction:         "forward",
+		SizeBytes:         1024,
+		BytesReceived:     1000,
+		DurationMS:        10,
+		GoodputMbps:       8.5,
+		PeakGoodputMbps:   8.5,
+		Direct:            true,
+		FirstByteMS:       3,
+		FirstByteMeasured: true,
+		LossRate:          0.02,
+		Retransmits:       1,
+		Success:           boolPtr(true),
+		Local:             TransportCaps{Kind: "legacy", RequestedKind: "batched"},
+		Remote:            TransportCaps{Kind: "batched", RequestedKind: "batched", BatchSize: 128, TXOffload: true},
 	}
 
 	got, err := report.JSON()
@@ -76,7 +77,7 @@ func TestRunReportJSONEncodesCoreMetrics(t *testing.T) {
 			t.Fatalf("JSON unexpectedly included %q: %#v", forbidden, decoded)
 		}
 	}
-	if decoded["host"] != "ktzlxc" || decoded["mode"] != "raw" || decoded["transport"] != "batched" || decoded["direct"] != true || decoded["first_byte_ms"] != float64(3) || decoded["loss_rate"] != float64(0.02) || decoded["retransmits"] != float64(1) || decoded["bytes_received"] != float64(1000) || decoded["success"] != true || decoded["peak_goodput_mbps"] != float64(8.5) {
+	if decoded["host"] != "ktzlxc" || decoded["mode"] != "raw" || decoded["transport"] != "batched" || decoded["direct"] != true || decoded["first_byte_ms"] != float64(3) || decoded["first_byte_measured"] != true || decoded["loss_rate"] != float64(0.02) || decoded["retransmits"] != float64(1) || decoded["bytes_received"] != float64(1000) || decoded["success"] != true || decoded["peak_goodput_mbps"] != float64(8.5) {
 		t.Fatalf("decoded report = %#v", decoded)
 	}
 	local, ok := decoded["local"].(map[string]any)
@@ -178,5 +179,8 @@ func TestRunReportJSONOmitsEmptyTransportCaps(t *testing.T) {
 	}
 	if _, ok := decoded["remote"]; ok {
 		t.Fatalf("decoded unexpectedly included remote: %#v", decoded)
+	}
+	if _, ok := decoded["first_byte_measured"]; ok {
+		t.Fatalf("decoded unexpectedly included first_byte_measured: %#v", decoded)
 	}
 }

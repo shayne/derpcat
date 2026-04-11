@@ -8,18 +8,20 @@ import (
 func TestSummarizeRunsComputesWallPeakAverageAndFailures(t *testing.T) {
 	runs := []RunReport{
 		{
-			GoodputMbps:     100,
-			PeakGoodputMbps: 150,
-			DurationMS:      10,
-			FirstByteMS:     5,
-			Success:         boolPtr(true),
+			GoodputMbps:       100,
+			PeakGoodputMbps:   150,
+			DurationMS:        10,
+			FirstByteMS:       5,
+			FirstByteMeasured: true,
+			Success:           boolPtr(true),
 		},
 		{
-			GoodputMbps:     150,
-			PeakGoodputMbps: 175,
-			DurationMS:      15,
-			FirstByteMS:     0,
-			Success:         boolPtr(true),
+			GoodputMbps:       150,
+			PeakGoodputMbps:   175,
+			DurationMS:        15,
+			FirstByteMS:       0,
+			FirstByteMeasured: true,
+			Success:           boolPtr(true),
 		},
 		{
 			GoodputMbps: 75,
@@ -28,11 +30,12 @@ func TestSummarizeRunsComputesWallPeakAverageAndFailures(t *testing.T) {
 			Success:     nil,
 		},
 		{
-			GoodputMbps:     200,
-			PeakGoodputMbps: 250,
-			DurationMS:      20,
-			FirstByteMS:     15,
-			Success:         boolPtr(true),
+			GoodputMbps:       200,
+			PeakGoodputMbps:   250,
+			DurationMS:        20,
+			FirstByteMS:       15,
+			FirstByteMeasured: true,
+			Success:           boolPtr(true),
 		},
 		{
 			GoodputMbps:     50,
@@ -83,10 +86,11 @@ func TestSummarizeRunsComputesWallPeakAverageAndFailures(t *testing.T) {
 func TestSummarizeRunsCountsZeroFirstByteForSuccessfulRun(t *testing.T) {
 	runs := []RunReport{
 		{
-			GoodputMbps: 1,
-			DurationMS:  10,
-			FirstByteMS: 0,
-			Success:     boolPtr(true),
+			GoodputMbps:       1,
+			DurationMS:        10,
+			FirstByteMS:       0,
+			FirstByteMeasured: true,
+			Success:           boolPtr(true),
 		},
 	}
 
@@ -100,6 +104,25 @@ func TestSummarizeRunsCountsZeroFirstByteForSuccessfulRun(t *testing.T) {
 	}
 	if got, want := summary.AverageFirstByteMS, 0.0; !almostEqual(got, want) {
 		t.Fatalf("AverageFirstByteMS = %f, want %f", got, want)
+	}
+}
+
+func TestSummarizeRunsDoesNotCountUnmeasuredZeroFirstByteAsMeasured(t *testing.T) {
+	summary := SummarizeRuns([]RunReport{{
+		GoodputMbps: 1,
+		DurationMS:  10,
+		FirstByteMS: 0,
+		Success:     boolPtr(true),
+	}})
+
+	if summary.SuccessCount != 1 {
+		t.Fatalf("SuccessCount = %d, want 1", summary.SuccessCount)
+	}
+	if summary.FirstByteCount != 0 {
+		t.Fatalf("FirstByteCount = %d, want 0", summary.FirstByteCount)
+	}
+	if summary.HasFirstByteMetrics {
+		t.Fatalf("HasFirstByteMetrics = true, want false")
 	}
 }
 

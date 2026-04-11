@@ -29,6 +29,7 @@ var orchestrateDiscoverCandidates = DiscoverCandidates
 var orchestrateSend = Send
 var orchestrateReceive = ReceiveToWriter
 var orchestrateReceiveBlastParallel = ReceiveBlastParallelToWriter
+var orchestrateSendWireGuardOSIperf = SendWireGuardOSIperf
 var orchestrateChildRun func(context.Context, OrchestrateConfig) (RunReport, error)
 
 func init() {
@@ -542,22 +543,23 @@ func runForwardParallelBlastOrchestrate(runCtx context.Context, cfg OrchestrateC
 		return RunReport{}, err
 	}
 	return RunReport{
-		Host:            cfg.Host,
-		Mode:            cfg.Mode,
-		Transport:       cfg.Transport,
-		Direction:       cfg.Direction,
-		SizeBytes:       cfg.SizeBytes,
-		BytesReceived:   bytesReceived,
-		DurationMS:      durationMS,
-		GoodputMbps:     goodputMbps(bytesReceived, durationMS),
-		PeakGoodputMbps: goodputMbps(bytesReceived, durationMS),
-		Direct:          true,
-		FirstByteMS:     done.FirstByteMS,
-		LossRate:        retransmitRatio(sendStats.Retransmits, sendStats.PacketsSent),
-		Retransmits:     sendStats.Retransmits,
-		Success:         boolPtr(true),
-		Local:           sendStats.Transport,
-		Remote:          ready.Transport,
+		Host:              cfg.Host,
+		Mode:              cfg.Mode,
+		Transport:         cfg.Transport,
+		Direction:         cfg.Direction,
+		SizeBytes:         cfg.SizeBytes,
+		BytesReceived:     bytesReceived,
+		DurationMS:        durationMS,
+		GoodputMbps:       goodputMbps(bytesReceived, durationMS),
+		PeakGoodputMbps:   goodputMbps(bytesReceived, durationMS),
+		Direct:            true,
+		FirstByteMS:       done.FirstByteMS,
+		FirstByteMeasured: true,
+		LossRate:          retransmitRatio(sendStats.Retransmits, sendStats.PacketsSent),
+		Retransmits:       sendStats.Retransmits,
+		Success:           boolPtr(true),
+		Local:             sendStats.Transport,
+		Remote:            ready.Transport,
 	}, nil
 }
 
@@ -695,22 +697,23 @@ func runReverseParallelBlastOrchestrate(runCtx context.Context, cfg OrchestrateC
 		return RunReport{}, err
 	}
 	return RunReport{
-		Host:            cfg.Host,
-		Mode:            cfg.Mode,
-		Transport:       cfg.Transport,
-		Direction:       cfg.Direction,
-		SizeBytes:       cfg.SizeBytes,
-		BytesReceived:   bytesReceived,
-		DurationMS:      durationMS,
-		GoodputMbps:     goodputMbps(bytesReceived, durationMS),
-		PeakGoodputMbps: goodputMbps(bytesReceived, durationMS),
-		Direct:          true,
-		FirstByteMS:     elapsedMS(recvStats.StartedAt, recvStats.FirstByteAt),
-		LossRate:        retransmitRatio(done.Retransmits, done.PacketsSent),
-		Retransmits:     done.Retransmits,
-		Success:         boolPtr(true),
-		Local:           recvStats.Transport,
-		Remote:          ready.Transport,
+		Host:              cfg.Host,
+		Mode:              cfg.Mode,
+		Transport:         cfg.Transport,
+		Direction:         cfg.Direction,
+		SizeBytes:         cfg.SizeBytes,
+		BytesReceived:     bytesReceived,
+		DurationMS:        durationMS,
+		GoodputMbps:       goodputMbps(bytesReceived, durationMS),
+		PeakGoodputMbps:   goodputMbps(bytesReceived, durationMS),
+		Direct:            true,
+		FirstByteMS:       elapsedMS(recvStats.StartedAt, recvStats.FirstByteAt),
+		FirstByteMeasured: true,
+		LossRate:          retransmitRatio(done.Retransmits, done.PacketsSent),
+		Retransmits:       done.Retransmits,
+		Success:           boolPtr(true),
+		Local:             recvStats.Transport,
+		Remote:            ready.Transport,
 	}, nil
 }
 
@@ -1207,22 +1210,23 @@ func runForwardOrchestrate(runCtx context.Context, cfg OrchestrateConfig, localC
 	}
 
 	report := RunReport{
-		Host:            cfg.Host,
-		Mode:            cfg.Mode,
-		Transport:       cfg.Transport,
-		Direction:       cfg.Direction,
-		SizeBytes:       cfg.SizeBytes,
-		BytesReceived:   bytesReceived,
-		DurationMS:      durationMS,
-		GoodputMbps:     goodputMbps(bytesReceived, durationMS),
-		PeakGoodputMbps: goodputMbps(bytesReceived, durationMS),
-		Direct:          true,
-		FirstByteMS:     done.FirstByteMS,
-		LossRate:        retransmitRatio(sendStats.Retransmits, sendStats.PacketsSent),
-		Retransmits:     sendStats.Retransmits,
-		Success:         boolPtr(true),
-		Local:           sendStats.Transport,
-		Remote:          ready.Transport,
+		Host:              cfg.Host,
+		Mode:              cfg.Mode,
+		Transport:         cfg.Transport,
+		Direction:         cfg.Direction,
+		SizeBytes:         cfg.SizeBytes,
+		BytesReceived:     bytesReceived,
+		DurationMS:        durationMS,
+		GoodputMbps:       goodputMbps(bytesReceived, durationMS),
+		PeakGoodputMbps:   goodputMbps(bytesReceived, durationMS),
+		Direct:            true,
+		FirstByteMS:       done.FirstByteMS,
+		FirstByteMeasured: true,
+		LossRate:          retransmitRatio(sendStats.Retransmits, sendStats.PacketsSent),
+		Retransmits:       sendStats.Retransmits,
+		Success:           boolPtr(true),
+		Local:             sendStats.Transport,
+		Remote:            ready.Transport,
 	}
 	if report.FirstByteMS <= 0 {
 		report.FirstByteMS = elapsedMS(sendStats.StartedAt, sendStats.CompletedAt)
@@ -1397,22 +1401,23 @@ func runReverseOrchestrate(runCtx context.Context, cfg OrchestrateConfig, localC
 	}
 
 	return RunReport{
-		Host:            cfg.Host,
-		Mode:            cfg.Mode,
-		Transport:       cfg.Transport,
-		Direction:       cfg.Direction,
-		SizeBytes:       cfg.SizeBytes,
-		BytesReceived:   bytesReceived,
-		DurationMS:      durationMS,
-		GoodputMbps:     goodputMbps(bytesReceived, durationMS),
-		PeakGoodputMbps: goodputMbps(bytesReceived, durationMS),
-		Direct:          true,
-		FirstByteMS:     elapsedMS(recvStats.StartedAt, recvStats.FirstByteAt),
-		LossRate:        retransmitRatio(done.Retransmits, done.PacketsSent),
-		Retransmits:     done.Retransmits,
-		Success:         boolPtr(true),
-		Local:           recvStats.Transport,
-		Remote:          ready.Transport,
+		Host:              cfg.Host,
+		Mode:              cfg.Mode,
+		Transport:         cfg.Transport,
+		Direction:         cfg.Direction,
+		SizeBytes:         cfg.SizeBytes,
+		BytesReceived:     bytesReceived,
+		DurationMS:        durationMS,
+		GoodputMbps:       goodputMbps(bytesReceived, durationMS),
+		PeakGoodputMbps:   goodputMbps(bytesReceived, durationMS),
+		Direct:            true,
+		FirstByteMS:       elapsedMS(recvStats.StartedAt, recvStats.FirstByteAt),
+		FirstByteMeasured: true,
+		LossRate:          retransmitRatio(done.Retransmits, done.PacketsSent),
+		Retransmits:       done.Retransmits,
+		Success:           boolPtr(true),
+		Local:             recvStats.Transport,
+		Remote:            ready.Transport,
 	}, nil
 }
 
@@ -1480,7 +1485,7 @@ func runWireGuardOSIperfOrchestrate(runCtx context.Context, cfg OrchestrateConfi
 		return RunReport{}, errors.New("remote server did not report a usable address")
 	}
 
-	sendStats, err := SendWireGuardOSIperf(runCtx, localConn, WireGuardConfig{
+	sendStats, err := orchestrateSendWireGuardOSIperf(runCtx, localConn, WireGuardConfig{
 		Transport:      cfg.Transport,
 		PrivateKeyHex:  wgPlan.senderPrivHex,
 		PeerPublicHex:  wgPlan.listenerPubHex,
