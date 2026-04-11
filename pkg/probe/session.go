@@ -5229,6 +5229,9 @@ func receiveBlastParallelConn(ctx context.Context, conn net.PacketConn, dst io.W
 				if cfg.RequireComplete && state.done && state.repairPending && !state.complete() {
 					startRepairGrace()
 				}
+				if observePeak != nil {
+					observePeak(now, totalReceived)
+				}
 				if fastMode() && state.done && state.totalBytes > 0 && state.receivedBytes >= state.totalBytes {
 					done, err := maybeFinishFastRun(runID, state)
 					if err != nil {
@@ -5237,9 +5240,6 @@ func receiveBlastParallelConn(ctx context.Context, conn net.PacketConn, dst io.W
 					if done {
 						return nil
 					}
-				}
-				if observePeak != nil {
-					observePeak(now, totalReceived)
 				}
 				if expectedBytes > 0 && totalReceived >= expectedBytes {
 					if cfg.RequireComplete {
