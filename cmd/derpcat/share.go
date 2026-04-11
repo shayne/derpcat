@@ -75,7 +75,7 @@ func runShare(args []string, level telemetry.Level, stdout, stderr io.Writer) in
 	done := make(chan error, 1)
 	go func() {
 		_, err := session.Share(ctx, session.ShareConfig{
-			Emitter:       telemetry.New(stderr, level),
+			Emitter:       telemetry.New(stderr, commandSessionTelemetryLevel(level)),
 			TokenSink:     tokenSink,
 			TargetAddr:    parsed.Args.Target,
 			ForceRelay:    parsed.SubCommandFlags.ForceRelay,

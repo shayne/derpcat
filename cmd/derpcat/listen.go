@@ -64,7 +64,7 @@ func runListen(args []string, level telemetry.Level, stdout, stderr io.Writer) i
 		return 2
 	}
 
-	emitter := telemetry.New(stderr, level)
+	emitter := telemetry.New(stderr, commandSessionTelemetryLevel(level))
 	tokenSink := make(chan string, 1)
 	done := make(chan error, 1)
 	go func() {

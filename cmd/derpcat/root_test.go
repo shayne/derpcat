@@ -273,6 +273,7 @@ func TestRunVerbosityFlagsBeforeListen(t *testing.T) {
 		args       []string
 		wantPrefix string
 	}{
+		{name: "default", args: []string{"listen"}, wantPrefix: ""},
 		{name: "quiet", args: []string{"-q", "listen"}, wantPrefix: ""},
 		{name: "silent", args: []string{"-s", "listen"}, wantPrefix: ""},
 		{name: "verbose", args: []string{"-v", "listen"}, wantPrefix: "waiting-for-claim\n"},
@@ -320,6 +321,7 @@ func TestRunVerbosityFlagsBeforeSend(t *testing.T) {
 		args       []string
 		wantPrefix string
 	}{
+		{name: "default", args: []string{"send"}, wantPrefix: ""},
 		{name: "quiet", args: []string{"-q", "send"}, wantPrefix: ""},
 		{name: "silent", args: []string{"-s", "send"}, wantPrefix: ""},
 		{name: "verbose", args: []string{"-v", "send"}, wantPrefix: "probing-direct\n"},

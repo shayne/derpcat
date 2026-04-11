@@ -142,6 +142,13 @@ func rootTelemetryLevel(flags rootGlobalFlags) (telemetry.Level, error) {
 	return level, nil
 }
 
+func commandSessionTelemetryLevel(level telemetry.Level) telemetry.Level {
+	if level == telemetry.LevelDefault {
+		return telemetry.LevelQuiet
+	}
+	return level
+}
+
 func runHelpCommand(args []string, stderr io.Writer) int {
 	if len(args) == 0 {
 		fmt.Fprint(stderr, yargs.GenerateGlobalHelp(rootHelpConfig, rootGlobalFlags{}))

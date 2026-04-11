@@ -77,7 +77,7 @@ func runSend(args []string, level telemetry.Level, stdin io.Reader, stdout, stde
 
 	if err := session.Send(commandContext(), session.SendConfig{
 		Token:          parsed.Args.Token,
-		Emitter:        telemetry.New(stderr, level),
+		Emitter:        telemetry.New(stderr, commandSessionTelemetryLevel(level)),
 		StdioIn:        stdin,
 		ForceRelay:     parsed.SubCommandFlags.ForceRelay,
 		UsePublicDERP:  usePublicDERPTransport(),

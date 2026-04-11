@@ -115,11 +115,11 @@ func TestListenPrintTokenOnlyTargetsStdout(t *testing.T) {
 	if strings.Contains(listenerStderr, issuedToken) {
 		t.Fatalf("listener stderr = %q, want token only on stdout", listenerStderr)
 	}
-	if got := listenerStderr; got != "waiting-for-claim\nconnected-relay\nstream-complete\n" {
-		t.Fatalf("listener stderr = %q, want status-only stderr", got)
+	if got := listenerStderr; got != "" {
+		t.Fatalf("listener stderr = %q, want quiet default stderr", got)
 	}
-	if got := senderStderr; got != "probing-direct\nconnected-relay\nstream-complete\n" {
-		t.Fatalf("sender stderr = %q, want relay status sequence", got)
+	if got := senderStderr; got != "" {
+		t.Fatalf("sender stderr = %q, want quiet default stderr", got)
 	}
 }
 
@@ -135,11 +135,11 @@ func TestListenWithoutFlagsUsesStderrForTokenAndStdoutForPayload(t *testing.T) {
 	if got := listenerStdout; got != "hello over derp" {
 		t.Fatalf("listener stdout = %q, want payload", got)
 	}
-	if !strings.Contains(listenerStderr, "waiting-for-claim\n"+issuedToken+"\nconnected-relay\nstream-complete\n") {
-		t.Fatalf("listener stderr = %q, want token and statuses on stderr", listenerStderr)
+	if got, want := listenerStderr, issuedToken+"\n"; got != want {
+		t.Fatalf("listener stderr = %q, want token-only stderr %q", got, want)
 	}
-	if got := senderStderr; got != "probing-direct\nconnected-relay\nstream-complete\n" {
-		t.Fatalf("sender stderr = %q, want relay status sequence", got)
+	if got := senderStderr; got != "" {
+		t.Fatalf("sender stderr = %q, want quiet default stderr", got)
 	}
 }
 
@@ -218,7 +218,7 @@ func TestListenHonorsVerbosityLevel(t *testing.T) {
 		level      telemetry.Level
 		wantStderr string
 	}{
-		{name: "default", level: telemetry.LevelDefault, wantStderr: "waiting-for-claim\n"},
+		{name: "default", level: telemetry.LevelDefault, wantStderr: ""},
 		{name: "quiet", level: telemetry.LevelQuiet, wantStderr: ""},
 		{name: "silent", level: telemetry.LevelSilent, wantStderr: ""},
 		{name: "verbose", level: telemetry.LevelVerbose, wantStderr: "waiting-for-claim\n"},

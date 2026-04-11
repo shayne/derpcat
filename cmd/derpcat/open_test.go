@@ -45,7 +45,7 @@ func TestOpenHelpMentionsParallelFlag(t *testing.T) {
 }
 
 func TestOpenReportsRelayThenDirectWhenTransportUpgrades(t *testing.T) {
-	_, openStderr := runUpgradingExternalShareAndOpen(t)
+	_, openStderr := runUpgradingExternalShareAndOpen(t, telemetry.LevelVerbose)
 
 	assertStatusLinesPrefix(t, openStderr, "open stderr", "probing-direct", "connected-relay", "connected-direct")
 }

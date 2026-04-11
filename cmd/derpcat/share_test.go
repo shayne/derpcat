@@ -36,12 +36,80 @@ func TestRunShareHelpShowsUsage(t *testing.T) {
 }
 
 func TestShareReportsRelayThenDirectWhenTransportUpgrades(t *testing.T) {
-	shareStderr, _ := runUpgradingExternalShareAndOpen(t)
+	shareStderr, _ := runUpgradingExternalShareAndOpen(t, telemetry.LevelVerbose)
 
 	assertStatusLinesPrefix(t, shareStderr, "share stderr", "waiting-for-claim", "claimed", "connected-relay", "connected-direct")
 }
 
-func runUpgradingExternalShareAndOpen(t *testing.T) (shareStderr string, openStderr string) {
+func TestShareAndOpenDefaultOutputStayQuiet(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	withCommandContext(t, ctx)
+
+	backendAddr := startCommandEchoServer(t, ctx)
+
+	var shareStdout bytes.Buffer
+	shareStderrBuf := &lockedBuffer{}
+	shareDone := make(chan int, 1)
+	go func() {
+		shareDone <- runShare([]string{backendAddr, "--force-relay"}, telemetry.LevelDefault, &shareStdout, shareStderrBuf)
+	}()
+
+	issuedToken := waitForIssuedToken(t, shareStderrBuf)
+
+	var openStdout bytes.Buffer
+	openStderrBuf := &lockedBuffer{}
+	openDone := make(chan int, 1)
+	go func() {
+		openDone <- runOpen([]string{issuedToken, "--force-relay"}, telemetry.LevelDefault, &openStdout, openStderrBuf)
+	}()
+
+	openAddr := waitForOpenBindAddr(t, openStderrBuf)
+	reply, err := roundTripCommandTCP(ctx, openAddr, "quiet-default")
+	if err != nil {
+		t.Fatalf("roundTripCommandTCP() error = %v", err)
+	}
+	if reply != "quiet-default" {
+		t.Fatalf("reply = %q, want %q", reply, "quiet-default")
+	}
+
+	if err := syscall.Kill(os.Getpid(), syscall.SIGINT); err != nil {
+		t.Fatalf("Kill(SIGINT) error = %v", err)
+	}
+
+	select {
+	case code := <-openDone:
+		if code != 0 {
+			t.Fatalf("runOpen() = %d, want 0, stderr=%q", code, openStderrBuf.String())
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("runOpen() did not exit after cancellation")
+	}
+
+	select {
+	case code := <-shareDone:
+		if code != 0 {
+			t.Fatalf("runShare() = %d, want 0, stderr=%q", code, shareStderrBuf.String())
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("runShare() did not exit after cancellation")
+	}
+
+	if got := shareStdout.String(); got != "" {
+		t.Fatalf("share stdout = %q, want empty", got)
+	}
+	if got := openStdout.String(); got != "" {
+		t.Fatalf("open stdout = %q, want empty", got)
+	}
+	if got, want := shareStderrBuf.String(), issuedToken+"\n"; got != want {
+		t.Fatalf("share stderr = %q, want token-only stderr %q", got, want)
+	}
+	if got, want := openStderrBuf.String(), "listening on "+openAddr+"\n"; got != want {
+		t.Fatalf("open stderr = %q, want bind-only stderr %q", got, want)
+	}
+}
+
+func runUpgradingExternalShareAndOpen(t *testing.T, level telemetry.Level) (shareStderr string, openStderr string) {
 	t.Helper()
 
 	srv := newCommandTestDERPServer(t)
@@ -61,7 +129,7 @@ func runUpgradingExternalShareAndOpen(t *testing.T) (shareStderr string, openStd
 	shareStderrBuf := &lockedBuffer{}
 	shareDone := make(chan int, 1)
 	go func() {
-		shareDone <- runShare([]string{backendAddr}, telemetry.LevelDefault, &shareStdout, shareStderrBuf)
+		shareDone <- runShare([]string{backendAddr}, level, &shareStdout, shareStderrBuf)
 	}()
 
 	issuedToken := waitForIssuedToken(t, shareStderrBuf)
@@ -70,7 +138,7 @@ func runUpgradingExternalShareAndOpen(t *testing.T) (shareStderr string, openStd
 	openStderrBuf := &lockedBuffer{}
 	openDone := make(chan int, 1)
 	go func() {
-		openDone <- runOpen([]string{issuedToken}, telemetry.LevelDefault, &openStdout, openStderrBuf)
+		openDone <- runOpen([]string{issuedToken}, level, &openStdout, openStderrBuf)
 	}()
 
 	openAddr := waitForOpenBindAddr(t, openStderrBuf)

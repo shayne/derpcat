@@ -89,7 +89,7 @@ func runOpen(args []string, level telemetry.Level, stdout, stderr io.Writer) int
 			Token:          parsed.Args.Token,
 			BindAddr:       parsed.Args.BindAddr,
 			BindAddrSink:   bindSink,
-			Emitter:        telemetry.New(stderr, level),
+			Emitter:        telemetry.New(stderr, commandSessionTelemetryLevel(level)),
 			ForceRelay:     parsed.SubCommandFlags.ForceRelay,
 			UsePublicDERP:  usePublicDERPTransport(),
 			ParallelPolicy: policy,
