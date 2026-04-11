@@ -145,6 +145,7 @@ func SendWireGuard(ctx context.Context, conn net.PacketConn, src io.Reader, cfg 
 					stats.FirstByteAt = time.Now()
 				}
 				stats.BytesSent += int64(written)
+				stats.observePeakGoodput(time.Now(), stats.BytesSent)
 			}
 			if writeErr != nil {
 				return TransferStats{}, writeErr
@@ -223,6 +224,7 @@ func ReceiveWireGuardToWriter(ctx context.Context, conn net.PacketConn, dst io.W
 			written, writeErr := dst.Write(buf[:n])
 			if written > 0 {
 				stats.BytesReceived += int64(written)
+				stats.observePeakGoodput(time.Now(), stats.BytesReceived)
 			}
 			if writeErr != nil {
 				return TransferStats{}, writeErr
@@ -329,7 +331,15 @@ func sendWireGuardParallel(ctx context.Context, stats *TransferStats, dial func(
 		errCh    = make(chan error, len(shares))
 		firstSet sync.Once
 		total    atomic.Int64
+		peakMu   sync.Mutex
+		peak     intervalStats
 	)
+	peak.Observe(stats.StartedAt, 0)
+	observePeak := func(now time.Time, totalBytes int64) {
+		peakMu.Lock()
+		peak.Observe(now, totalBytes)
+		peakMu.Unlock()
+	}
 	for i, share := range shares {
 		streamID := i + 1
 		share := share
@@ -361,7 +371,8 @@ func sendWireGuardParallel(ctx context.Context, stats *TransferStats, dial func(
 						firstSet.Do(func() {
 							stats.FirstByteAt = time.Now()
 						})
-						total.Add(int64(written))
+						totalBytes := total.Add(int64(written))
+						observePeak(time.Now(), totalBytes)
 						sent += int64(written)
 					}
 					if writeErr != nil {
@@ -407,6 +418,7 @@ func sendWireGuardParallel(ctx context.Context, stats *TransferStats, dial func(
 		}
 	}
 	stats.BytesSent = total.Load()
+	stats.PeakGoodputMbps = peak.PeakMbps()
 	stats.CompletedAt = time.Now()
 	return *stats, nil
 }
@@ -424,6 +436,8 @@ func receiveWireGuardParallel(ctx context.Context, stats *TransferStats, ln net.
 		wg             sync.WaitGroup
 		firstSet       sync.Once
 		total          atomic.Int64
+		peakMu         sync.Mutex
+		peak           intervalStats
 		targetReached  atomic.Bool
 		activeMu       sync.Mutex
 		activeConn     []net.Conn
@@ -432,6 +446,12 @@ func receiveWireGuardParallel(ctx context.Context, stats *TransferStats, ln net.
 		errCh          = make(chan error, 1)
 		stopAcceptOnce sync.Once
 	)
+	peak.Observe(stats.StartedAt, 0)
+	observePeak := func(now time.Time, totalBytes int64) {
+		peakMu.Lock()
+		peak.Observe(now, totalBytes)
+		peakMu.Unlock()
+	}
 
 	stopAccepting := func() {
 		stopAcceptOnce.Do(func() {
@@ -535,6 +555,7 @@ func receiveWireGuardParallel(ctx context.Context, stats *TransferStats, ln net.
 							stats.FirstByteAt = time.Now()
 						})
 						newTotal := total.Add(int64(n))
+						observePeak(time.Now(), newTotal)
 						received += int64(n)
 						if newTotal >= cfg.SizeBytes && targetReached.CompareAndSwap(false, true) {
 							probeWGTracef("recv stream=%d reached target received=%d total=%d", streamID, received, newTotal)
@@ -595,6 +616,7 @@ func receiveWireGuardParallel(ctx context.Context, stats *TransferStats, ln net.
 		return TransferStats{}, err
 	}
 	stats.BytesReceived = min(total.Load(), cfg.SizeBytes)
+	stats.PeakGoodputMbps = peak.PeakMbps()
 	stats.CompletedAt = time.Now()
 	return *stats, nil
 }

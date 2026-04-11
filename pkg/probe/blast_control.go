@@ -133,6 +133,11 @@ func handleBlastSendControlEvent(ctx context.Context, batcher packetBatcher, pee
 			sessionTracef("blast stats receive rx_payload_len=%d", len(event.payload))
 			control.ObserveReceiverStats(event.payload, event.receivedAt)
 		}
+		if stats != nil {
+			if receiverStats, ok := unmarshalBlastStatsPayload(event.payload); ok {
+				stats.observePeakGoodput(event.receivedAt, int64(receiverStats.ReceivedPayloadBytes))
+			}
+		}
 	}
 	return false, false, nil
 }

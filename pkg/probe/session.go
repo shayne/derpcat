@@ -147,10 +147,20 @@ type TransferStats struct {
 	StartedAt                    time.Time
 	CompletedAt                  time.Time
 	FirstByteAt                  time.Time
+	PeakGoodputMbps              float64
 	Transport                    TransportCaps
 	MaxReplayBytes               uint64
 	ReplayWindowFullWaits        int64
 	ReplayWindowFullWaitDuration time.Duration
+	peakGoodput                  intervalStats
+}
+
+func (s *TransferStats) observePeakGoodput(now time.Time, totalBytes int64) {
+	if s == nil {
+		return
+	}
+	s.peakGoodput.Observe(now, totalBytes)
+	s.PeakGoodputMbps = s.peakGoodput.PeakMbps()
 }
 
 func recordReplayWindowFullWait(stats *TransferStats, retainedBytes uint64, waited time.Duration) {
@@ -183,6 +193,7 @@ func Send(ctx context.Context, conn net.PacketConn, remoteAddr string, src io.Re
 	}
 
 	stats := TransferStats{StartedAt: time.Now()}
+	stats.observePeakGoodput(stats.StartedAt, 0)
 	batcher := newPacketBatcher(conn, cfg.Transport)
 	stats.Transport = batcher.Capabilities()
 	runID := cfg.RunID
@@ -336,6 +347,7 @@ func ReceiveToWriter(ctx context.Context, conn net.PacketConn, remoteAddr string
 	}
 
 	stats := TransferStats{StartedAt: time.Now()}
+	stats.observePeakGoodput(stats.StartedAt, 0)
 	buf := make([]byte, 64<<10)
 	batcher := newPacketBatcher(conn, cfg.Transport)
 	stats.Transport = batcher.Capabilities()
@@ -442,6 +454,7 @@ func ReceiveToWriter(ctx context.Context, conn net.PacketConn, remoteAddr string
 						return TransferStats{}, io.ErrShortWrite
 					}
 					stats.BytesReceived += int64(n)
+					stats.observePeakGoodput(time.Now(), stats.BytesReceived)
 					continue
 				}
 				if packet.Seq == expectedSeq {
@@ -456,6 +469,7 @@ func ReceiveToWriter(ctx context.Context, conn net.PacketConn, remoteAddr string
 						return TransferStats{}, io.ErrShortWrite
 					}
 					stats.BytesReceived += int64(n)
+					stats.observePeakGoodput(time.Now(), stats.BytesReceived)
 					expectedSeq++
 				} else if packet.Seq > expectedSeq && packet.Seq <= expectedSeq+maxBufferedPackets {
 					buffered[packet.Seq] = clonePacket(packet)
@@ -597,6 +611,9 @@ func sendBlast(ctx context.Context, batcher packetBatcher, conn net.PacketConn, 
 				if err := paceBlastSend(ctx, startedAt, offset, rateMbps); err != nil {
 					return err
 				}
+			}
+			if !control.Adaptive() {
+				stats.observePeakGoodput(time.Now(), stats.BytesSent)
 			}
 			if control.Adaptive() {
 				if complete, err := drainBlastSendControlEvents(ctx, batcher, peer, history, &stats, repairDeduper, control, controlEvents); err != nil {
@@ -1023,6 +1040,7 @@ func SendBlastParallel(ctx context.Context, conns []net.PacketConn, remoteAddrs 
 	}
 
 	stats := TransferStats{StartedAt: time.Now()}
+	stats.observePeakGoodput(stats.StartedAt, 0)
 	stripedBlast := cfg.StripedBlast
 	lanes := make([]*blastParallelSendLane, 0, len(conns))
 	handshakeTimeout := cfg.ParallelHandshakeTimeout
@@ -2606,6 +2624,7 @@ func receiveBlastData(ctx context.Context, conn net.PacketConn, peer net.Addr, r
 					return TransferStats{}, io.ErrShortWrite
 				}
 				stats.BytesReceived += int64(written)
+				stats.observePeakGoodput(time.Now(), stats.BytesReceived)
 			case PacketTypeDone:
 				if err := sendRepairComplete(ctx, batcher, addr, runID); err != nil {
 					return TransferStats{}, err
@@ -2672,6 +2691,7 @@ func receiveBlastDataUDP(ctx context.Context, conn *net.UDPConn, peer net.Addr, 
 				return TransferStats{}, io.ErrShortWrite
 			}
 			stats.BytesReceived += int64(written)
+			stats.observePeakGoodput(time.Now(), stats.BytesReceived)
 		case PacketTypeDone:
 			if err := sendRepairComplete(ctx, newLegacyBatcher(conn), net.UDPAddrFromAddrPort(addrPort), runID); err != nil {
 				return TransferStats{}, err
@@ -2710,6 +2730,9 @@ func ReceiveBlastParallelToWriter(ctx context.Context, conns []net.PacketConn, d
 	var repairGraceExpired atomic.Bool
 	var repairGraceDeadline atomic.Int64
 	var repairGraceExpectedBytes atomic.Int64
+	var peakMu sync.Mutex
+	var peak intervalStats
+	peak.Observe(startedAt, 0)
 	if expectedBytes > 0 {
 		repairGraceExpectedBytes.Store(expectedBytes)
 	}
@@ -2730,6 +2753,11 @@ func ReceiveBlastParallelToWriter(ctx context.Context, conns []net.PacketConn, d
 	}
 	repairGrace := func() time.Duration {
 		return parallelBlastRepairGraceForExpectedBytes(repairGraceExpectedBytes.Load())
+	}
+	peakMbps := func() float64 {
+		peakMu.Lock()
+		defer peakMu.Unlock()
+		return peak.PeakMbps()
 	}
 	closeDone := func() {
 		doneOnce.Do(func() {
@@ -2795,11 +2823,12 @@ func ReceiveBlastParallelToWriter(ctx context.Context, conns []net.PacketConn, d
 			transport.Connected = true
 		}
 		return TransferStats{
-			BytesReceived: received,
-			StartedAt:     startedAt,
-			FirstByteAt:   firstByte,
-			CompletedAt:   completedAt,
-			Transport:     transport,
+			BytesReceived:   received,
+			StartedAt:       startedAt,
+			FirstByteAt:     firstByte,
+			CompletedAt:     completedAt,
+			PeakGoodputMbps: peakMbps(),
+			Transport:       transport,
 		}
 	}
 	go func() {
@@ -2841,7 +2870,11 @@ func ReceiveBlastParallelToWriter(ctx context.Context, conns []net.PacketConn, d
 		wg.Add(1)
 		go func(conn net.PacketConn) {
 			defer wg.Done()
-			if err := receiveBlastParallelConn(ctx, conn, dst, cfg, expectedBytes, doneTarget, &bytesReceived, &donePackets, &incompleteDoneRuns, &lastPacketAt, &writeMu, &firstByteOnce, &firstByteAt, &connected, &repairActive, done, closeDone, startTerminalGrace, startRepairGrace, observeRepairGraceExpectedBytes); err != nil {
+			if err := receiveBlastParallelConn(ctx, conn, dst, cfg, expectedBytes, doneTarget, &bytesReceived, &donePackets, &incompleteDoneRuns, &lastPacketAt, &writeMu, &firstByteOnce, &firstByteAt, &connected, &repairActive, done, closeDone, startTerminalGrace, startRepairGrace, observeRepairGraceExpectedBytes, func(now time.Time, totalBytes int64) {
+				peakMu.Lock()
+				peak.Observe(now, totalBytes)
+				peakMu.Unlock()
+			}); err != nil {
 				select {
 				case errCh <- err:
 				default:
@@ -2894,6 +2927,26 @@ type blastStreamReceiveCoordinator struct {
 	writeMu        sync.Mutex
 	lastStatsAt    map[[16]byte]time.Time
 	recoveringFEC  bool
+	peakMu         sync.Mutex
+	peak           intervalStats
+}
+
+func (c *blastStreamReceiveCoordinator) observePeak(now time.Time, totalBytes int64) {
+	if c == nil {
+		return
+	}
+	c.peakMu.Lock()
+	c.peak.Observe(now, totalBytes)
+	c.peakMu.Unlock()
+}
+
+func (c *blastStreamReceiveCoordinator) peakMbps() float64 {
+	if c == nil {
+		return 0
+	}
+	c.peakMu.Lock()
+	defer c.peakMu.Unlock()
+	return c.peak.PeakMbps()
 }
 
 func (c *blastStreamReceiveCoordinator) repairGraceForState(state *blastReceiveRunState) time.Duration {
@@ -2913,7 +2966,7 @@ func newBlastStreamReceiveCoordinator(ctx context.Context, lanes []*blastStreamR
 		dst = io.Discard
 	}
 	cfg.RequireComplete = true
-	return &blastStreamReceiveCoordinator{
+	coordinator := &blastStreamReceiveCoordinator{
 		lanes:         lanes,
 		dst:           dst,
 		cfg:           cfg,
@@ -2922,6 +2975,8 @@ func newBlastStreamReceiveCoordinator(ctx context.Context, lanes []*blastStreamR
 		runs:          make(map[[16]byte]*blastReceiveRunState),
 		lastStatsAt:   make(map[[16]byte]time.Time),
 	}
+	coordinator.peak.Observe(startedAt, 0)
+	return coordinator
 }
 
 func (c *blastStreamReceiveCoordinator) Close() {
@@ -3069,6 +3124,7 @@ func (c *blastStreamReceiveCoordinator) handleGlobalPacketLocked(ctx context.Con
 			return false, err
 		}
 		c.bytesReceived += int64(written)
+		c.observePeak(time.Now(), c.bytesReceived)
 		c.sendStatsFeedbackLocked(ctx, runID, state, time.Now(), false)
 		if err := c.recoverFEC(ctx, runID, state); err != nil {
 			return false, err
@@ -3241,6 +3297,7 @@ func (c *blastStreamReceiveCoordinator) acceptStripedSequentialPacketLocked(stat
 			state.observeStripedPayload(packet.Payload)
 			if c.dst == io.Discard {
 				c.bytesReceived += int64(len(packet.Payload))
+				c.observePeak(time.Now(), c.bytesReceived)
 			} else if packet.Offset == state.nextOffset {
 				if err := c.writeStripedPayloadLocked(state, packet.Payload); err != nil {
 					return err
@@ -3425,6 +3482,7 @@ func (c *blastStreamReceiveCoordinator) writeStripedPayloadLocked(state *blastRe
 	}
 	state.nextOffset += uint64(len(payload))
 	c.bytesReceived += int64(len(payload))
+	c.observePeak(time.Now(), c.bytesReceived)
 	return nil
 }
 
@@ -3706,6 +3764,7 @@ func (c *blastStreamReceiveCoordinator) recoverFEC(ctx context.Context, runID [1
 				return err
 			}
 			c.bytesReceived += int64(written)
+			c.observePeak(time.Now(), c.bytesReceived)
 		}
 		if _, err := c.completeRun(ctx, runID, state); err != nil {
 			return err
@@ -3783,12 +3842,13 @@ func (c *blastStreamReceiveCoordinator) stats(conns []net.PacketConn, connected 
 		transport.Connected = true
 	}
 	return TransferStats{
-		BytesReceived: c.bytesReceived,
-		Lanes:         len(conns),
-		StartedAt:     c.startedAt,
-		FirstByteAt:   firstByteAt,
-		CompletedAt:   completedAt,
-		Transport:     transport,
+		BytesReceived:   c.bytesReceived,
+		Lanes:           len(conns),
+		StartedAt:       c.startedAt,
+		FirstByteAt:     firstByteAt,
+		CompletedAt:     completedAt,
+		PeakGoodputMbps: c.peakMbps(),
+		Transport:       transport,
 	}
 }
 
@@ -4004,6 +4064,9 @@ func ReceiveReliableParallelToWriter(ctx context.Context, conns []net.PacketConn
 		out.PacketsSent += result.stats.PacketsSent
 		out.PacketsAcked += result.stats.PacketsAcked
 		out.Retransmits += result.stats.Retransmits
+		if result.stats.PeakGoodputMbps > out.PeakGoodputMbps {
+			out.PeakGoodputMbps = result.stats.PeakGoodputMbps
+		}
 		if !result.stats.FirstByteAt.IsZero() && (out.FirstByteAt.IsZero() || result.stats.FirstByteAt.Before(out.FirstByteAt)) {
 			out.FirstByteAt = result.stats.FirstByteAt
 		}
@@ -4812,7 +4875,7 @@ func (s *blastReceiveRunState) recoverFEC(expectedBytes int64) []blastRecoveredP
 	return recovered
 }
 
-func receiveBlastParallelConn(ctx context.Context, conn net.PacketConn, dst io.Writer, cfg ReceiveConfig, expectedBytes int64, doneTarget int32, bytesReceived *atomic.Int64, donePackets *atomic.Int32, incompleteDoneRuns *atomic.Int32, lastPacketAt *atomic.Int64, writeMu *sync.Mutex, firstByteOnce *sync.Once, firstByteAt *time.Time, connected *atomic.Bool, repairActive *atomic.Bool, done <-chan struct{}, closeDone func(), startTerminalGrace func(), startRepairGrace func(), observeRepairGraceExpectedBytes func(uint64)) error {
+func receiveBlastParallelConn(ctx context.Context, conn net.PacketConn, dst io.Writer, cfg ReceiveConfig, expectedBytes int64, doneTarget int32, bytesReceived *atomic.Int64, donePackets *atomic.Int32, incompleteDoneRuns *atomic.Int32, lastPacketAt *atomic.Int64, writeMu *sync.Mutex, firstByteOnce *sync.Once, firstByteAt *time.Time, connected *atomic.Bool, repairActive *atomic.Bool, done <-chan struct{}, closeDone func(), startTerminalGrace func(), startRepairGrace func(), observeRepairGraceExpectedBytes func(uint64), observePeak func(time.Time, int64)) error {
 	traceEnabled := sessionTraceEnabled()
 	tracePacketsEnabled := sessionPacketTraceEnabled()
 	batcher := newPacketBatcher(conn, cfg.Transport)
@@ -5134,7 +5197,7 @@ func receiveBlastParallelConn(ctx context.Context, conn net.PacketConn, dst io.W
 				if written > 0 {
 					state.receivedBytes += uint64(written)
 				}
-				received := bytesReceived.Add(int64(written))
+				totalReceived := bytesReceived.Add(int64(written))
 				if cfg.RequireComplete {
 					if err := recoverFEC(runID, state); err != nil {
 						return err
@@ -5152,7 +5215,7 @@ func receiveBlastParallelConn(ctx context.Context, conn net.PacketConn, dst io.W
 						return nil
 					}
 				}
-				if expectedBytes > 0 && received >= expectedBytes {
+				if expectedBytes > 0 && totalReceived >= expectedBytes {
 					if cfg.RequireComplete {
 						if err := recoverFEC(runID, state); err != nil {
 							return err
@@ -5169,6 +5232,9 @@ func receiveBlastParallelConn(ctx context.Context, conn net.PacketConn, dst io.W
 					}
 					closeDone()
 					return nil
+				}
+				if observePeak != nil {
+					observePeak(now, totalReceived)
 				}
 				if err := maybeFinishRun(runID, state); err != nil {
 					return err
@@ -5872,6 +5938,7 @@ func fillSendWindow(ctx context.Context, batcher packetBatcher, peer net.Addr, s
 		packet.sentAt = now
 		stats.PacketsSent++
 		stats.BytesSent += int64(packet.payload)
+		stats.observePeakGoodput(now, stats.BytesSent)
 	}
 	if state.rateMbps > 0 && stats != nil && !stats.StartedAt.IsZero() {
 		return paceBlastSend(ctx, stats.StartedAt, uint64(stats.BytesSent), state.rateMbps)
@@ -6113,6 +6180,7 @@ func advanceReceiveWindow(dst io.Writer, buffered map[uint64]Packet, expectedSeq
 			}
 			if stats != nil {
 				stats.BytesReceived += int64(n)
+				stats.observePeakGoodput(time.Now(), stats.BytesReceived)
 			}
 			expectedSeq++
 		case PacketTypeDone:

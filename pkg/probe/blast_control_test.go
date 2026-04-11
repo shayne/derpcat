@@ -173,6 +173,33 @@ func TestHandleBlastSendControlEventUpdatesAdaptiveRate(t *testing.T) {
 	}
 }
 
+func TestHandleBlastSendControlEventTracksPeakGoodput(t *testing.T) {
+	now := time.Unix(12, 0)
+	control := newBlastSendControl(100, 400, now)
+	stats := TransferStats{}
+
+	first := blastSendControlEvent{
+		typ:        PacketTypeStats,
+		payload:    marshalBlastStatsPayload(blastReceiverStats{ReceivedPayloadBytes: 1 << 20}),
+		receivedAt: now.Add(100 * time.Millisecond),
+	}
+	second := blastSendControlEvent{
+		typ:        PacketTypeStats,
+		payload:    marshalBlastStatsPayload(blastReceiverStats{ReceivedPayloadBytes: 2 << 20}),
+		receivedAt: now.Add(200 * time.Millisecond),
+	}
+
+	if _, _, err := handleBlastSendControlEvent(context.Background(), nil, controlTestAddr("peer"), nil, &stats, newBlastRepairDeduper(), control, first); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := handleBlastSendControlEvent(context.Background(), nil, controlTestAddr("peer"), nil, &stats, newBlastRepairDeduper(), control, second); err != nil {
+		t.Fatal(err)
+	}
+	if stats.PeakGoodputMbps <= 0 {
+		t.Fatalf("PeakGoodputMbps = %f, want > 0", stats.PeakGoodputMbps)
+	}
+}
+
 func TestHandleBlastSendControlEventRepairRequestBacksOffAdaptiveRate(t *testing.T) {
 	now := time.Unix(15, 0)
 	control := newBlastSendControl(525, 700, now)

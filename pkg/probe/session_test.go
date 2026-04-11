@@ -55,6 +55,24 @@ func (w *notifyingWriter) Write(p []byte) (int, error) {
 	return n, err
 }
 
+type pacedReader struct {
+	chunks [][]byte
+	pause  time.Duration
+	index  int
+}
+
+func (r *pacedReader) Read(p []byte) (int, error) {
+	if r.index >= len(r.chunks) {
+		return 0, io.EOF
+	}
+	if r.index > 0 && r.pause > 0 {
+		time.Sleep(r.pause)
+	}
+	n := copy(p, r.chunks[r.index])
+	r.index++
+	return n, nil
+}
+
 func readProbePacket(t *testing.T, conn net.PacketConn, timeout time.Duration) Packet {
 	t.Helper()
 	buf := make([]byte, 64<<10)
@@ -240,6 +258,62 @@ func TestTransferStatsCaptureFirstByte(t *testing.T) {
 		}
 		if stats.CompletedAt.Before(stats.FirstByteAt) {
 			t.Fatalf("CompletedAt = %v, want after FirstByteAt = %v", stats.CompletedAt, stats.FirstByteAt)
+		}
+	case <-ctx.Done():
+		t.Fatalf("timed out waiting for receive stats: %v", ctx.Err())
+	}
+}
+
+func TestTransferStatsCapturePeakGoodputAcrossLoopback(t *testing.T) {
+	a, err := net.ListenPacket("udp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.Close()
+
+	b, err := net.ListenPacket("udp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer b.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	payload := [][]byte{
+		bytes.Repeat([]byte("a"), 1024),
+		bytes.Repeat([]byte("b"), 1024),
+	}
+	src := &pacedReader{chunks: payload, pause: 5 * time.Millisecond}
+
+	recvStatsCh := make(chan TransferStats, 1)
+	recvErrCh := make(chan error, 1)
+	go func() {
+		stats, err := ReceiveToWriter(ctx, b, a.LocalAddr().String(), io.Discard, ReceiveConfig{Raw: true})
+		if err != nil {
+			recvErrCh <- err
+			return
+		}
+		recvStatsCh <- stats
+	}()
+
+	sendStats, err := Send(ctx, a, b.LocalAddr().String(), src, SendConfig{
+		Raw:       true,
+		ChunkSize: 1024,
+	})
+	if err != nil {
+		t.Fatalf("Send() error = %v", err)
+	}
+	if sendStats.BytesSent != 2*1024 {
+		t.Fatalf("send BytesSent = %d, want %d", sendStats.BytesSent, 2*1024)
+	}
+
+	select {
+	case err := <-recvErrCh:
+		t.Fatalf("ReceiveToWriter() error = %v", err)
+	case recvStats := <-recvStatsCh:
+		if recvStats.PeakGoodputMbps <= 0 {
+			t.Fatalf("receive PeakGoodputMbps = %f, want > 0", recvStats.PeakGoodputMbps)
 		}
 	case <-ctx.Done():
 		t.Fatalf("timed out waiting for receive stats: %v", ctx.Err())
