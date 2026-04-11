@@ -5,6 +5,8 @@ target="${1:?usage: $0 <target> [size-mib]}"
 size_mib="${2:-1024}"
 expected_size="$((size_mib * 1048576))"
 tmp="$(mktemp -d)"
+start_ms=0
+duration_ms=0
 remote_base="/tmp/derpcat-promotion-$$"
 remote_upload="/tmp/derpcat-promotion-bin-$$"
 remote_user="${DERPCAT_REMOTE_USER:-root}"
@@ -181,7 +183,7 @@ assert_no_derpcat_leaks() {
   fi
 }
 
-trap 'status=$?; if [[ ${status} -ne 0 ]]; then dump_failure; emit_benchmark_footer 2 false "promotion-test-exit-${status}"; cleanup; fi; exit ${status}' EXIT
+trap 'status=$?; if [[ ${status} -ne 0 ]]; then if [[ ${start_ms} -gt 0 && ${duration_ms} -eq 0 ]]; then end_ms="$(now_ms)"; duration_ms="$((end_ms - start_ms))"; fi; dump_failure; emit_benchmark_footer 2 false "promotion-test-exit-${status}"; cleanup; fi; exit ${status}' EXIT
 
 mise run build
 mise run build-linux-amd64
@@ -212,7 +214,6 @@ if [[ -z "${token}" ]]; then
   exit 1
 fi
 
-duration_ms=0
 start_ms="$(now_ms)"
 ./dist/derpcat --verbose send "${parallel_args[@]+"${parallel_args[@]}"}" "${token}" <"${payload}" >/dev/null 2>"${send_log}"
 
