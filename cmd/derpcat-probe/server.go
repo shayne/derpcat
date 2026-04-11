@@ -26,12 +26,17 @@ type serverReady struct {
 }
 
 type serverDone struct {
-	BytesReceived int64 `json:"bytes_received"`
-	DurationMS    int64 `json:"duration_ms"`
-	FirstByteMS   int64 `json:"first_byte_ms"`
-	Retransmits   int64 `json:"retransmits"`
-	PacketsSent   int64 `json:"packets_sent"`
-	PacketsAcked  int64 `json:"packets_acked"`
+	BytesReceived     int64 `json:"bytes_received"`
+	DurationMS        int64 `json:"duration_ms"`
+	FirstByteMS       int64 `json:"first_byte_ms"`
+	FirstByteMeasured *bool `json:"first_byte_measured,omitempty"`
+	Retransmits       int64 `json:"retransmits"`
+	PacketsSent       int64 `json:"packets_sent"`
+	PacketsAcked      int64 `json:"packets_acked"`
+}
+
+func boolPtr(v bool) *bool {
+	return &v
 }
 
 func runServer(args []string, stdout, stderr io.Writer) int {
@@ -229,6 +234,9 @@ func runServer(args []string, stdout, stderr io.Writer) int {
 		Retransmits:   stats.Retransmits,
 		PacketsSent:   stats.PacketsSent,
 		PacketsAcked:  stats.PacketsAcked,
+	}
+	if !stats.FirstByteAt.IsZero() {
+		done.FirstByteMeasured = boolPtr(true)
 	}
 	if err := writeMachineLine(stdout, "DONE", done); err != nil {
 		fmt.Fprintln(stderr, err)

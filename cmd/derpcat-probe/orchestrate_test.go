@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net"
@@ -18,6 +19,74 @@ import (
 type readyNotifyWriter struct {
 	once sync.Once
 	ch   chan struct{}
+}
+
+func TestServerDoneJSONRoundTripsFirstByteMeasured(t *testing.T) {
+	tests := []struct {
+		name string
+		done serverDone
+		want *bool
+	}{
+		{name: "nil", done: serverDone{}, want: nil},
+		{name: "false", done: serverDone{FirstByteMeasured: boolPtr(false)}, want: boolPtr(false)},
+		{name: "true", done: serverDone{FirstByteMeasured: boolPtr(true)}, want: boolPtr(true)},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			gotJSON, err := json.Marshal(tc.done)
+			if err != nil {
+				t.Fatalf("json.Marshal() error = %v", err)
+			}
+			var decoded serverDone
+			if err := json.Unmarshal(gotJSON, &decoded); err != nil {
+				t.Fatalf("json.Unmarshal() error = %v", err)
+			}
+			if tc.want == nil {
+				if decoded.FirstByteMeasured != nil {
+					t.Fatalf("decoded.FirstByteMeasured = %#v, want nil", decoded.FirstByteMeasured)
+				}
+				return
+			}
+			if decoded.FirstByteMeasured == nil || *decoded.FirstByteMeasured != *tc.want {
+				t.Fatalf("decoded.FirstByteMeasured = %#v, want %v", decoded.FirstByteMeasured, *tc.want)
+			}
+		})
+	}
+}
+
+func TestClientDoneJSONRoundTripsFirstByteMeasured(t *testing.T) {
+	tests := []struct {
+		name string
+		done clientDone
+		want *bool
+	}{
+		{name: "nil", done: clientDone{}, want: nil},
+		{name: "false", done: clientDone{FirstByteMeasured: boolPtr(false)}, want: boolPtr(false)},
+		{name: "true", done: clientDone{FirstByteMeasured: boolPtr(true)}, want: boolPtr(true)},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			gotJSON, err := json.Marshal(tc.done)
+			if err != nil {
+				t.Fatalf("json.Marshal() error = %v", err)
+			}
+			var decoded clientDone
+			if err := json.Unmarshal(gotJSON, &decoded); err != nil {
+				t.Fatalf("json.Unmarshal() error = %v", err)
+			}
+			if tc.want == nil {
+				if decoded.FirstByteMeasured != nil {
+					t.Fatalf("decoded.FirstByteMeasured = %#v, want nil", decoded.FirstByteMeasured)
+				}
+				return
+			}
+			if decoded.FirstByteMeasured == nil || *decoded.FirstByteMeasured != *tc.want {
+				t.Fatalf("decoded.FirstByteMeasured = %#v, want %v", decoded.FirstByteMeasured, *tc.want)
+			}
+		})
+	}
 }
 
 func (w *readyNotifyWriter) Write(p []byte) (int, error) {

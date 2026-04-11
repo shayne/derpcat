@@ -203,7 +203,7 @@ func TestRunOrchestrateForwardTransfersAndReportsDirect(t *testing.T) {
 	launchRemoteServer = func(ctx context.Context, runner SSHRunner, cfg ServerConfig) (*remoteServerHandle, error) {
 		gotArgv = runner.ServerCommand(cfg)
 		return &remoteServerHandle{
-			stdout: io.NopCloser(strings.NewReader("READY {\"addr\":\":0\",\"candidates\":[\"203.0.113.20:50000\"],\"transport\":{\"kind\":\"batched\",\"requested_kind\":\"batched\",\"batch_size\":128,\"tx_offload\":true}}\nDONE {\"bytes_received\":1024,\"first_byte_ms\":9,\"duration_ms\":2000,\"retransmits\":0,\"packets_sent\":0,\"packets_acked\":0}\n")),
+			stdout: io.NopCloser(strings.NewReader("READY {\"addr\":\":0\",\"candidates\":[\"203.0.113.20:50000\"],\"transport\":{\"kind\":\"batched\",\"requested_kind\":\"batched\",\"batch_size\":128,\"tx_offload\":true}}\nDONE {\"bytes_received\":1024,\"first_byte_ms\":9,\"first_byte_measured\":true,\"duration_ms\":2000,\"retransmits\":0,\"packets_sent\":0,\"packets_acked\":0}\n")),
 			stderr: io.NopCloser(strings.NewReader("")),
 			wait: func() error {
 				return nil
@@ -250,6 +250,9 @@ func TestRunOrchestrateForwardTransfersAndReportsDirect(t *testing.T) {
 	if report.FirstByteMS != 9 {
 		t.Fatalf("report.FirstByteMS = %d, want 9", report.FirstByteMS)
 	}
+	if report.FirstByteMeasured == nil || !*report.FirstByteMeasured {
+		t.Fatalf("report.FirstByteMeasured = %#v, want true", report.FirstByteMeasured)
+	}
 	if report.GoodputMbps <= 0 {
 		t.Fatalf("report.GoodputMbps = %f, want > 0", report.GoodputMbps)
 	}
@@ -267,6 +270,63 @@ func TestRunOrchestrateForwardTransfersAndReportsDirect(t *testing.T) {
 	}
 	if len(gotArgv) < 7 || gotArgv[0] != "ssh" || !strings.Contains(strings.Join(gotArgv, " "), "BatchMode=yes") || !strings.Contains(strings.Join(gotArgv, " "), "ConnectTimeout=5") || !strings.Contains(strings.Join(gotArgv, " "), "/tmp/derpcat-probe server --listen :0 --mode raw --transport batched") || !strings.Contains(strings.Join(gotArgv, " "), "--peer-candidates 198.51.100.10:40000") {
 		t.Fatalf("RunOrchestrate() argv = %#v", gotArgv)
+	}
+}
+
+func TestRunOrchestrateForwardDoesNotInventMeasuredFirstByteFromZeroDone(t *testing.T) {
+	oldListenPacket := listenPacket
+	oldDiscoverCandidates := orchestrateDiscoverCandidates
+	oldLaunchRemoteServer := launchRemoteServer
+	oldSend := orchestrateSend
+	defer func() {
+		listenPacket = oldListenPacket
+		orchestrateDiscoverCandidates = oldDiscoverCandidates
+		launchRemoteServer = oldLaunchRemoteServer
+		orchestrateSend = oldSend
+	}()
+
+	listenPacket = func(network, address string) (net.PacketConn, error) {
+		return net.ListenPacket(network, address)
+	}
+	orchestrateDiscoverCandidates = func(ctx context.Context, conn net.PacketConn) ([]net.Addr, error) {
+		return []net.Addr{&net.UDPAddr{IP: net.ParseIP("198.51.100.10"), Port: 40000}}, nil
+	}
+	launchRemoteServer = func(ctx context.Context, runner SSHRunner, cfg ServerConfig) (*remoteServerHandle, error) {
+		return &remoteServerHandle{
+			stdout: io.NopCloser(strings.NewReader("READY {\"addr\":\":0\",\"candidates\":[\"203.0.113.20:50000\"],\"transport\":{\"kind\":\"batched\",\"requested_kind\":\"batched\"}}\nDONE {\"bytes_received\":1024,\"first_byte_ms\":0,\"duration_ms\":2000,\"retransmits\":0,\"packets_sent\":0,\"packets_acked\":0}\n")),
+			stderr: io.NopCloser(strings.NewReader("")),
+			wait:   func() error { return nil },
+		}, nil
+	}
+	orchestrateSend = func(ctx context.Context, conn net.PacketConn, remoteAddr string, src io.Reader, cfg SendConfig) (TransferStats, error) {
+		startedAt := time.Unix(0, 0)
+		return TransferStats{
+			BytesSent:    1024,
+			StartedAt:    startedAt,
+			CompletedAt:  startedAt.Add(2 * time.Second),
+			Retransmits:  3,
+			PacketsSent:  12,
+			PacketsAcked: 8,
+			Transport:    TransportCaps{Kind: "legacy", RequestedKind: "batched"},
+		}, nil
+	}
+
+	report, err := RunOrchestrate(context.Background(), OrchestrateConfig{
+		Host:      "ktzlxc",
+		User:      "root",
+		Mode:      "raw",
+		Transport: "batched",
+		Direction: "forward",
+		SizeBytes: 1024,
+	})
+	if err != nil {
+		t.Fatalf("RunOrchestrate() error = %v", err)
+	}
+	if report.FirstByteMeasured != nil {
+		t.Fatalf("report.FirstByteMeasured = %#v, want nil", report.FirstByteMeasured)
+	}
+	if report.FirstByteMS != 0 {
+		t.Fatalf("report.FirstByteMS = %d, want 0", report.FirstByteMS)
 	}
 }
 

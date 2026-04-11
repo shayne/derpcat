@@ -21,6 +21,16 @@ var probeSend = probe.Send
 var probeSendWireGuard = probe.SendWireGuard
 var probeSendWireGuardOS = probe.SendWireGuardOS
 
+type clientDone struct {
+	BytesSent         int64 `json:"bytes_sent,omitempty"`
+	DurationMS        int64 `json:"duration_ms"`
+	FirstByteMS       int64 `json:"first_byte_ms"`
+	FirstByteMeasured *bool `json:"first_byte_measured,omitempty"`
+	Retransmits       int64 `json:"retransmits"`
+	PacketsSent       int64 `json:"packets_sent"`
+	PacketsAcked      int64 `json:"packets_acked"`
+}
+
 func runClient(args []string, stdout, stderr io.Writer) int {
 	if len(args) == 0 || isRootHelpRequest(args) {
 		fmt.Fprint(stderr, subcommandUsageLine("client"))
@@ -177,20 +187,16 @@ func runClient(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 
-	done := struct {
-		BytesSent    int64 `json:"bytes_sent"`
-		DurationMS   int64 `json:"duration_ms"`
-		FirstByteMS  int64 `json:"first_byte_ms"`
-		Retransmits  int64 `json:"retransmits"`
-		PacketsSent  int64 `json:"packets_sent"`
-		PacketsAcked int64 `json:"packets_acked"`
-	}{
+	done := clientDone{
 		BytesSent:    stats.BytesSent,
 		DurationMS:   durationMS(stats.StartedAt, stats.CompletedAt),
 		FirstByteMS:  durationMS(stats.StartedAt, stats.FirstByteAt),
 		Retransmits:  stats.Retransmits,
 		PacketsSent:  stats.PacketsSent,
 		PacketsAcked: stats.PacketsAcked,
+	}
+	if !stats.FirstByteAt.IsZero() {
+		done.FirstByteMeasured = boolPtr(true)
 	}
 	if err := writeMachineLine(stdout, "DONE", done); err != nil {
 		fmt.Fprintln(stderr, err)

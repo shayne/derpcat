@@ -95,13 +95,14 @@ type remoteReady struct {
 }
 
 type remoteDone struct {
-	BytesSent     int64 `json:"bytes_sent,omitempty"`
-	BytesReceived int64 `json:"bytes_received"`
-	DurationMS    int64 `json:"duration_ms"`
-	FirstByteMS   int64 `json:"first_byte_ms"`
-	Retransmits   int64 `json:"retransmits"`
-	PacketsSent   int64 `json:"packets_sent"`
-	PacketsAcked  int64 `json:"packets_acked"`
+	BytesSent         int64 `json:"bytes_sent,omitempty"`
+	BytesReceived     int64 `json:"bytes_received"`
+	DurationMS        int64 `json:"duration_ms"`
+	FirstByteMS       int64 `json:"first_byte_ms"`
+	FirstByteMeasured *bool `json:"first_byte_measured,omitempty"`
+	Retransmits       int64 `json:"retransmits"`
+	PacketsSent       int64 `json:"packets_sent"`
+	PacketsAcked      int64 `json:"packets_acked"`
 }
 
 type outputEvent struct {
@@ -1210,26 +1211,27 @@ func runForwardOrchestrate(runCtx context.Context, cfg OrchestrateConfig, localC
 	}
 
 	report := RunReport{
-		Host:              cfg.Host,
-		Mode:              cfg.Mode,
-		Transport:         cfg.Transport,
-		Direction:         cfg.Direction,
-		SizeBytes:         cfg.SizeBytes,
-		BytesReceived:     bytesReceived,
-		DurationMS:        durationMS,
-		GoodputMbps:       goodputMbps(bytesReceived, durationMS),
-		PeakGoodputMbps:   goodputMbps(bytesReceived, durationMS),
-		Direct:            true,
-		FirstByteMS:       done.FirstByteMS,
-		FirstByteMeasured: boolPtr(true),
-		LossRate:          retransmitRatio(sendStats.Retransmits, sendStats.PacketsSent),
-		Retransmits:       sendStats.Retransmits,
-		Success:           boolPtr(true),
-		Local:             sendStats.Transport,
-		Remote:            ready.Transport,
+		Host:            cfg.Host,
+		Mode:            cfg.Mode,
+		Transport:       cfg.Transport,
+		Direction:       cfg.Direction,
+		SizeBytes:       cfg.SizeBytes,
+		BytesReceived:   bytesReceived,
+		DurationMS:      durationMS,
+		GoodputMbps:     goodputMbps(bytesReceived, durationMS),
+		PeakGoodputMbps: goodputMbps(bytesReceived, durationMS),
+		Direct:          true,
+		FirstByteMS:     done.FirstByteMS,
+		LossRate:        retransmitRatio(sendStats.Retransmits, sendStats.PacketsSent),
+		Retransmits:     sendStats.Retransmits,
+		Success:         boolPtr(true),
+		Local:           sendStats.Transport,
+		Remote:          ready.Transport,
 	}
-	if report.FirstByteMS <= 0 {
-		report.FirstByteMS = elapsedMS(sendStats.StartedAt, sendStats.CompletedAt)
+	if done.FirstByteMeasured != nil {
+		report.FirstByteMeasured = done.FirstByteMeasured
+	} else if done.FirstByteMS > 0 {
+		report.FirstByteMeasured = boolPtr(true)
 	}
 	return report, nil
 }
