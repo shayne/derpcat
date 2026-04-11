@@ -56,6 +56,7 @@ func TestRunReportJSONEncodesCoreMetrics(t *testing.T) {
 		FirstByteMS:   3,
 		LossRate:      0.02,
 		Retransmits:   1,
+		Success:       true,
 		Local:         TransportCaps{Kind: "legacy", RequestedKind: "batched"},
 		Remote:        TransportCaps{Kind: "batched", RequestedKind: "batched", BatchSize: 128, TXOffload: true},
 	}
@@ -74,7 +75,7 @@ func TestRunReportJSONEncodesCoreMetrics(t *testing.T) {
 			t.Fatalf("JSON unexpectedly included %q: %#v", forbidden, decoded)
 		}
 	}
-	if decoded["host"] != "ktzlxc" || decoded["mode"] != "raw" || decoded["transport"] != "batched" || decoded["direct"] != true || decoded["first_byte_ms"] != float64(3) || decoded["loss_rate"] != float64(0.02) || decoded["retransmits"] != float64(1) || decoded["bytes_received"] != float64(1000) {
+	if decoded["host"] != "ktzlxc" || decoded["mode"] != "raw" || decoded["transport"] != "batched" || decoded["direct"] != true || decoded["first_byte_ms"] != float64(3) || decoded["loss_rate"] != float64(0.02) || decoded["retransmits"] != float64(1) || decoded["bytes_received"] != float64(1000) || decoded["success"] != true {
 		t.Fatalf("decoded report = %#v", decoded)
 	}
 	local, ok := decoded["local"].(map[string]any)

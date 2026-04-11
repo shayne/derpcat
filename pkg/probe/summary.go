@@ -109,7 +109,9 @@ func isRunSuccessful(run RunReport) bool {
 	if run.Error != "" {
 		return false
 	}
-	// Preserve legacy zero-value RunReport behavior, while still allowing
-	// explicit failures to be marked with a non-empty error string.
+	if run.successSet {
+		return run.Success
+	}
+	// Preserve legacy zero-value RunReport behavior.
 	return true
 }

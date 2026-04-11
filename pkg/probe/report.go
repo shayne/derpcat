@@ -23,6 +23,7 @@ type RunReport struct {
 	Error           string        `json:"error,omitempty"`
 	Local           TransportCaps `json:"local,omitempty"`
 	Remote          TransportCaps `json:"remote,omitempty"`
+	successSet      bool          `json:"-"`
 }
 
 func (r RunReport) JSON() ([]byte, error) {

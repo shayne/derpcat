@@ -9,51 +9,60 @@ func TestSummarizeRunsComputesWallPeakAverageAndFailures(t *testing.T) {
 			PeakGoodputMbps: 150,
 			DurationMS:      10,
 			FirstByteMS:     5,
+			successSet:      true,
 			Success:         true,
+		},
+		{
+			GoodputMbps:     150,
+			PeakGoodputMbps: 175,
+			DurationMS:      15,
+			FirstByteMS:     7,
 		},
 		{
 			GoodputMbps:     200,
 			PeakGoodputMbps: 250,
 			DurationMS:      20,
 			FirstByteMS:     15,
+			successSet:      true,
 			Success:         true,
 		},
 		{
 			GoodputMbps:     50,
 			PeakGoodputMbps: 75,
 			DurationMS:      40,
+			FirstByteMS:     9,
+			successSet:      true,
 			Success:         false,
-			Error:           "boom",
 		},
 	}
 
 	summary := SummarizeRuns(runs)
 
-	if summary.RunCount != 3 {
-		t.Fatalf("RunCount = %d, want 3", summary.RunCount)
+	if summary.RunCount != 4 {
+		t.Fatalf("RunCount = %d, want 4", summary.RunCount)
 	}
-	if summary.SuccessCount != 2 {
-		t.Fatalf("SuccessCount = %d, want 2", summary.SuccessCount)
+	if summary.SuccessCount != 3 {
+		t.Fatalf("SuccessCount = %d, want 3", summary.SuccessCount)
 	}
 	if summary.FailureCount != 1 {
 		t.Fatalf("FailureCount = %d, want 1", summary.FailureCount)
 	}
-	if got, want := summary.FailureRate, 1.0/3.0; !almostEqual(got, want) {
+	if got, want := summary.FailureRate, 0.25; !almostEqual(got, want) {
 		t.Fatalf("FailureRate = %f, want %f", got, want)
 	}
-	if got, want := summary.AverageGoodputMbps, (100.0+200.0+50.0)/3.0; !almostEqual(got, want) {
+	if got, want := summary.AverageGoodputMbps, (100.0+150.0+200.0+50.0)/4.0; !almostEqual(got, want) {
 		t.Fatalf("AverageGoodputMbps = %f, want %f", got, want)
 	}
 	if got, want := summary.PeakGoodputMbps, 250.0; got != want {
 		t.Fatalf("PeakGoodputMbps = %f, want %f", got, want)
 	}
-	if got, want := summary.AverageWallTimeMS, (10.0+20.0+40.0)/3.0; !almostEqual(got, want) {
+	if got, want := summary.AverageWallTimeMS, (10.0+15.0+20.0+40.0)/4.0; !almostEqual(got, want) {
 		t.Fatalf("AverageWallTimeMS = %f, want %f", got, want)
 	}
-	if summary.FirstByteCount != 2 {
-		t.Fatalf("FirstByteCount = %d, want 2", summary.FirstByteCount)
+	if summary.FirstByteCount != 4 {
+		t.Fatalf("FirstByteCount = %d, want 4", summary.FirstByteCount)
 	}
-	if got, want := summary.AverageFirstByteMS, (5.0+15.0)/2.0; !almostEqual(got, want) {
+	if got, want := summary.AverageFirstByteMS, (5.0+7.0+15.0+9.0)/4.0; !almostEqual(got, want) {
 		t.Fatalf("AverageFirstByteMS = %f, want %f", got, want)
 	}
 	if summary.PeakFirstByteMS != 15 {
@@ -61,6 +70,26 @@ func TestSummarizeRunsComputesWallPeakAverageAndFailures(t *testing.T) {
 	}
 	if !summary.HasFirstByteMetrics {
 		t.Fatalf("HasFirstByteMetrics = false, want true")
+	}
+}
+
+func TestSummarizeRunsTreatsLegacyReportsAsSuccessful(t *testing.T) {
+	runs := []RunReport{
+		{
+			GoodputMbps: 10,
+			DurationMS:  10,
+			FirstByteMS: 5,
+			Success:     false,
+		},
+	}
+
+	summary := SummarizeRuns(runs)
+
+	if summary.SuccessCount != 1 {
+		t.Fatalf("SuccessCount = %d, want 1", summary.SuccessCount)
+	}
+	if summary.FailureCount != 0 {
+		t.Fatalf("FailureCount = %d, want 0", summary.FailureCount)
 	}
 }
 
