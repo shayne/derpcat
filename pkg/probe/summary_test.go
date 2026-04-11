@@ -298,7 +298,7 @@ func TestCompareSummariesRejectsWallTimeAndFailureRegression(t *testing.T) {
 		FailureCount:       2,
 		FailureRate:        0.2,
 		AverageWallTimeMS:  120,
-		AverageGoodputMbps: 240,
+		AverageGoodputMbps: 250,
 		PeakGoodputMbps:    290,
 	}
 
@@ -321,6 +321,42 @@ func TestCompareSummariesRejectsWallTimeAndFailureRegression(t *testing.T) {
 	}
 	if len(result.Reasons) != 2 {
 		t.Fatalf("Reasons = %#v, want 2 entries", result.Reasons)
+	}
+}
+
+func TestCompareSummariesRejectsThroughputRegression(t *testing.T) {
+	base := SeriesSummary{
+		RunCount:           10,
+		SuccessCount:       10,
+		FailureCount:       0,
+		FailureRate:        0,
+		AverageWallTimeMS:  100,
+		AverageGoodputMbps: 250,
+		PeakGoodputMbps:    300,
+	}
+	head := SeriesSummary{
+		RunCount:           10,
+		SuccessCount:       10,
+		FailureCount:       0,
+		FailureRate:        0,
+		AverageWallTimeMS:  100,
+		AverageGoodputMbps: 240,
+		PeakGoodputMbps:    300,
+	}
+
+	result := CompareSummaries(base, head)
+
+	if !result.IsRegression {
+		t.Fatalf("IsRegression = false, want true")
+	}
+	if !result.GoodputRegression {
+		t.Fatalf("GoodputRegression = false, want true")
+	}
+	if got, want := result.GoodputDeltaMbps, 10.0; !almostEqual(got, want) {
+		t.Fatalf("GoodputDeltaMbps = %f, want %f", got, want)
+	}
+	if result.WallTimeRegression || result.FailureRateRegression {
+		t.Fatalf("unexpected additional regressions: %#v", result)
 	}
 }
 

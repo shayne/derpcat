@@ -58,10 +58,12 @@ type RegressionResult struct {
 	Comparable            bool     `json:"comparable"`
 	WallTimeRegression    bool     `json:"wall_time_regression"`
 	FailureRateRegression bool     `json:"failure_rate_regression"`
+	GoodputRegression     bool     `json:"goodput_regression"`
 	IsRegression          bool     `json:"is_regression"`
 	Reason                string   `json:"reason,omitempty"`
 	WallTimeDeltaMS       float64  `json:"wall_time_delta_ms,omitempty"`
 	FailureRateDelta      float64  `json:"failure_rate_delta,omitempty"`
+	GoodputDeltaMbps      float64  `json:"goodput_delta_mbps,omitempty"`
 	Reasons               []string `json:"reasons,omitempty"`
 }
 
@@ -139,7 +141,12 @@ func CompareSummaries(base, head SeriesSummary) RegressionResult {
 		result.FailureRateDelta = head.FailureRate - base.FailureRate
 		result.Reasons = append(result.Reasons, "failure rate increased")
 	}
-	result.IsRegression = result.WallTimeRegression || result.FailureRateRegression
+	if head.AverageGoodputMbps < base.AverageGoodputMbps {
+		result.GoodputRegression = true
+		result.GoodputDeltaMbps = base.AverageGoodputMbps - head.AverageGoodputMbps
+		result.Reasons = append(result.Reasons, "average goodput decreased")
+	}
+	result.IsRegression = result.WallTimeRegression || result.FailureRateRegression || result.GoodputRegression
 	return result
 }
 
