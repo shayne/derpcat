@@ -1,5 +1,7 @@
 package probe
 
+import "encoding/json"
+
 type SeriesSummary struct {
 	RunCount            int     `json:"run_count"`
 	SuccessCount        int     `json:"success_count"`
@@ -12,6 +14,41 @@ type SeriesSummary struct {
 	AverageFirstByteMS  float64 `json:"average_first_byte_ms"`
 	PeakFirstByteMS     int64   `json:"peak_first_byte_ms"`
 	HasFirstByteMetrics bool    `json:"has_first_byte_metrics"`
+}
+
+func (s SeriesSummary) MarshalJSON() ([]byte, error) {
+	type summaryJSON struct {
+		RunCount            int      `json:"run_count"`
+		SuccessCount        int      `json:"success_count"`
+		FailureCount        int      `json:"failure_count"`
+		FailureRate         float64  `json:"failure_rate"`
+		AverageGoodputMbps  float64  `json:"average_goodput_mbps"`
+		PeakGoodputMbps     *float64 `json:"peak_goodput_mbps,omitempty"`
+		AverageWallTimeMS   float64  `json:"average_wall_time_ms"`
+		FirstByteCount      int      `json:"first_byte_count"`
+		AverageFirstByteMS  *float64 `json:"average_first_byte_ms,omitempty"`
+		PeakFirstByteMS     *int64   `json:"peak_first_byte_ms,omitempty"`
+		HasFirstByteMetrics bool     `json:"has_first_byte_metrics"`
+	}
+
+	out := summaryJSON{
+		RunCount:            s.RunCount,
+		SuccessCount:        s.SuccessCount,
+		FailureCount:        s.FailureCount,
+		FailureRate:         s.FailureRate,
+		AverageGoodputMbps:  s.AverageGoodputMbps,
+		AverageWallTimeMS:   s.AverageWallTimeMS,
+		FirstByteCount:      s.FirstByteCount,
+		HasFirstByteMetrics: s.HasFirstByteMetrics,
+	}
+	if s.PeakGoodputMbps > 0 {
+		out.PeakGoodputMbps = &s.PeakGoodputMbps
+	}
+	if s.HasFirstByteMetrics {
+		out.AverageFirstByteMS = &s.AverageFirstByteMS
+		out.PeakFirstByteMS = &s.PeakFirstByteMS
+	}
+	return json.Marshal(out)
 }
 
 type RegressionResult struct {

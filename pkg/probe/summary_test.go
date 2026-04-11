@@ -202,6 +202,62 @@ func TestSeriesSummaryJSONIncludesZeroFirstByteMetrics(t *testing.T) {
 	if decoded["average_first_byte_ms"] != float64(0) || decoded["peak_first_byte_ms"] != float64(0) {
 		t.Fatalf("decoded summary = %#v", decoded)
 	}
+	if decoded["peak_goodput_mbps"] != float64(1) {
+		t.Fatalf("decoded summary peak_goodput_mbps = %#v, want 1", decoded["peak_goodput_mbps"])
+	}
+}
+
+func TestSeriesSummaryJSONOmitsMissingFirstByteMetrics(t *testing.T) {
+	summary := SeriesSummary{
+		RunCount:           1,
+		SuccessCount:       1,
+		FailureCount:       0,
+		FailureRate:        0,
+		AverageGoodputMbps: 1,
+		AverageWallTimeMS:  10,
+		PeakGoodputMbps:    1,
+	}
+
+	got, err := json.Marshal(summary)
+	if err != nil {
+		t.Fatalf("json.Marshal() error = %v", err)
+	}
+	var decoded map[string]any
+	if err := json.Unmarshal(got, &decoded); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v", err)
+	}
+	if _, ok := decoded["average_first_byte_ms"]; ok {
+		t.Fatalf("decoded summary unexpectedly included average_first_byte_ms: %#v", decoded)
+	}
+	if _, ok := decoded["peak_first_byte_ms"]; ok {
+		t.Fatalf("decoded summary unexpectedly included peak_first_byte_ms: %#v", decoded)
+	}
+	if got := decoded["peak_goodput_mbps"]; got != float64(1) {
+		t.Fatalf("decoded summary peak_goodput_mbps = %#v, want 1", got)
+	}
+}
+
+func TestSeriesSummaryJSONOmitsMissingPeakGoodput(t *testing.T) {
+	summary := SeriesSummary{
+		RunCount:           1,
+		SuccessCount:       1,
+		FailureCount:       0,
+		FailureRate:        0,
+		AverageGoodputMbps: 1,
+		AverageWallTimeMS:  10,
+	}
+
+	got, err := json.Marshal(summary)
+	if err != nil {
+		t.Fatalf("json.Marshal() error = %v", err)
+	}
+	var decoded map[string]any
+	if err := json.Unmarshal(got, &decoded); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v", err)
+	}
+	if _, ok := decoded["peak_goodput_mbps"]; ok {
+		t.Fatalf("decoded summary unexpectedly included peak_goodput_mbps: %#v", decoded)
+	}
 }
 
 func TestSummarizeRunsTreatsLegacyReportsAsSuccessful(t *testing.T) {
