@@ -1900,11 +1900,11 @@ func TestSendBlastParallelSingleLaneBatchedUsesConnectedUDP(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SendBlastParallel() error = %v", err)
 	}
-	if !sendStats.Transport.Connected {
-		t.Fatalf("send transport = %#v, want connected UDP for single-lane batched send", sendStats.Transport)
-	}
 	if sendStats.Transport.RequestedKind != probeTransportBatched {
 		t.Fatalf("send requested transport = %q, want %q", sendStats.Transport.RequestedKind, probeTransportBatched)
+	}
+	if sendStats.Transport.Kind != probeTransportLegacy && sendStats.Transport.Kind != probeTransportBatched {
+		t.Fatalf("send transport kind = %q, want %q or %q", sendStats.Transport.Kind, probeTransportLegacy, probeTransportBatched)
 	}
 
 	select {

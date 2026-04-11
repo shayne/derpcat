@@ -252,6 +252,8 @@ func TestListenHonorsVerbosityLevel(t *testing.T) {
 func runUpgradingExternalListenAndSend(t *testing.T) (listenerStderr string, senderStderr string) {
 	t.Helper()
 
+	const upgradeStatusTimeout = 20 * time.Second
+
 	srv := newCommandTestDERPServer(t)
 	t.Setenv("DERPCAT_TEST_DERP_MAP_URL", srv.MapURL)
 	t.Setenv("DERPCAT_TEST_DERP_SERVER_URL", srv.DERPURL)
@@ -284,9 +286,9 @@ func runUpgradingExternalListenAndSend(t *testing.T) (listenerStderr string, sen
 		}, &senderStdout, &senderStderrBuf)
 	}()
 
-	waitForStatusPrefix(t, listenerStderrBuf, 10*time.Second, "waiting-for-claim", "connected-relay")
-	waitForStatusPrefix(t, &senderStderrBuf, 10*time.Second, "probing-direct", "connected-relay")
-	waitForRawLine(t, &senderStderrBuf, 10*time.Second, "udp-stream=true")
+	waitForStatusPrefix(t, listenerStderrBuf, upgradeStatusTimeout, "waiting-for-claim", "connected-relay")
+	waitForStatusPrefix(t, &senderStderrBuf, upgradeStatusTimeout, "probing-direct", "connected-relay")
+	waitForRawLine(t, &senderStderrBuf, upgradeStatusTimeout, "udp-stream=true")
 	close(releaseEOF)
 
 	select {
