@@ -529,6 +529,104 @@ func TestRunOrchestrateForwardBlastPassesRateToSingleSession(t *testing.T) {
 	}
 }
 
+func TestRunOrchestrateForwardBlastParallelPrefersRemoteDoneFirstByte(t *testing.T) {
+	t.Setenv("DERPCAT_PROBE_RATE_MBPS", "1200")
+
+	cases := []struct {
+		name         string
+		doneLine     string
+		wantMS       int64
+		wantMeasured bool
+	}{
+		{
+			name:         "measured",
+			doneLine:     "DONE {\"bytes_received\":1024,\"first_byte_ms\":9,\"first_byte_measured\":true,\"duration_ms\":2000,\"retransmits\":0,\"packets_sent\":0,\"packets_acked\":0}\n",
+			wantMS:       9,
+			wantMeasured: true,
+		},
+		{
+			name:         "unmeasured",
+			doneLine:     "DONE {\"bytes_received\":1024,\"first_byte_ms\":0,\"first_byte_measured\":false,\"duration_ms\":2000,\"retransmits\":0,\"packets_sent\":0,\"packets_acked\":0}\n",
+			wantMS:       0,
+			wantMeasured: false,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			oldListenPacket := listenPacket
+			oldDiscoverCandidates := orchestrateDiscoverCandidates
+			oldLaunchRemoteServer := launchRemoteServer
+			oldSend := orchestrateSend
+			defer func() {
+				listenPacket = oldListenPacket
+				orchestrateDiscoverCandidates = oldDiscoverCandidates
+				launchRemoteServer = oldLaunchRemoteServer
+				orchestrateSend = oldSend
+			}()
+
+			var opened []net.PacketConn
+			listenPacket = func(network, address string) (net.PacketConn, error) {
+				conn, err := net.ListenPacket("udp4", "127.0.0.1:0")
+				if err == nil {
+					opened = append(opened, conn)
+				}
+				return conn, err
+			}
+			defer func() {
+				for _, conn := range opened {
+					_ = conn.Close()
+				}
+			}()
+			orchestrateDiscoverCandidates = func(ctx context.Context, conn net.PacketConn) ([]net.Addr, error) {
+				return []net.Addr{conn.LocalAddr()}, nil
+			}
+			launchRemoteServer = func(ctx context.Context, runner SSHRunner, cfg ServerConfig) (*remoteServerHandle, error) {
+				return &remoteServerHandle{
+					stdout: io.NopCloser(strings.NewReader("READY {\"addr\":\":0\",\"candidates\":[\"203.0.113.20:50000\",\"203.0.113.20:50001\"],\"transport\":{\"kind\":\"batched\",\"requested_kind\":\"batched\"}}\n" + tc.doneLine)),
+					stderr: io.NopCloser(strings.NewReader("")),
+					wait:   func() error { return nil },
+				}, nil
+			}
+			orchestrateSend = func(ctx context.Context, conn net.PacketConn, remoteAddr string, src io.Reader, cfg SendConfig) (TransferStats, error) {
+				if _, err := io.Copy(io.Discard, src); err != nil {
+					return TransferStats{}, err
+				}
+				startedAt := time.Unix(0, 0)
+				return TransferStats{
+					BytesSent:   512,
+					StartedAt:   startedAt,
+					FirstByteAt: startedAt.Add(5 * time.Millisecond),
+					CompletedAt: startedAt.Add(100 * time.Millisecond),
+					Transport:   TransportCaps{Kind: "legacy", RequestedKind: "batched"},
+				}, nil
+			}
+
+			report, err := RunOrchestrate(context.Background(), OrchestrateConfig{
+				Host:      "ktzlxc",
+				Mode:      "blast",
+				Transport: "batched",
+				Direction: "forward",
+				SizeBytes: 1024,
+				Parallel:  2,
+			})
+			if err != nil {
+				t.Fatalf("RunOrchestrate() error = %v", err)
+			}
+			if report.FirstByteMS != tc.wantMS {
+				t.Fatalf("report.FirstByteMS = %d, want %d", report.FirstByteMS, tc.wantMS)
+			}
+			if tc.wantMeasured {
+				if report.FirstByteMeasured == nil || !*report.FirstByteMeasured {
+					t.Fatalf("report.FirstByteMeasured = %#v, want true", report.FirstByteMeasured)
+				}
+			} else if report.FirstByteMeasured == nil || *report.FirstByteMeasured {
+				t.Fatalf("report.FirstByteMeasured = %#v, want false", report.FirstByteMeasured)
+			}
+		})
+	}
+}
+
 func TestRunOrchestrateRejectsAeadMode(t *testing.T) {
 	_, err := RunOrchestrate(context.Background(), OrchestrateConfig{
 		Host:      "ktzlxc",

@@ -555,8 +555,8 @@ func runForwardParallelBlastOrchestrate(runCtx context.Context, cfg OrchestrateC
 		DurationMS:        durationMS,
 		GoodputMbps:       goodputMbps(bytesReceived, durationMS),
 		Direct:            true,
-		FirstByteMS:       firstByteMetrics(sendStats.StartedAt, sendStats.FirstByteAt, done.FirstByteMS, done.FirstByteMeasured).ms,
-		FirstByteMeasured: firstByteMetrics(sendStats.StartedAt, sendStats.FirstByteAt, done.FirstByteMS, done.FirstByteMeasured).measured,
+		FirstByteMS:       firstByteMetricsPreferDone(sendStats.StartedAt, sendStats.FirstByteAt, done.FirstByteMS, done.FirstByteMeasured).ms,
+		FirstByteMeasured: firstByteMetricsPreferDone(sendStats.StartedAt, sendStats.FirstByteAt, done.FirstByteMS, done.FirstByteMeasured).measured,
 		LossRate:          retransmitRatio(sendStats.Retransmits, sendStats.PacketsSent),
 		Retransmits:       sendStats.Retransmits,
 		Success:           boolPtr(true),
@@ -708,8 +708,8 @@ func runReverseParallelBlastOrchestrate(runCtx context.Context, cfg OrchestrateC
 		DurationMS:        durationMS,
 		GoodputMbps:       goodputMbps(bytesReceived, durationMS),
 		Direct:            true,
-		FirstByteMS:       firstByteMetrics(recvStats.StartedAt, recvStats.FirstByteAt, done.FirstByteMS, done.FirstByteMeasured).ms,
-		FirstByteMeasured: firstByteMetrics(recvStats.StartedAt, recvStats.FirstByteAt, done.FirstByteMS, done.FirstByteMeasured).measured,
+		FirstByteMS:       firstByteMetricsPreferDone(recvStats.StartedAt, recvStats.FirstByteAt, done.FirstByteMS, done.FirstByteMeasured).ms,
+		FirstByteMeasured: firstByteMetricsPreferDone(recvStats.StartedAt, recvStats.FirstByteAt, done.FirstByteMS, done.FirstByteMeasured).measured,
 		LossRate:          retransmitRatio(done.Retransmits, done.PacketsSent),
 		Retransmits:       done.Retransmits,
 		Success:           boolPtr(true),
@@ -1244,6 +1244,7 @@ func firstByteMetricsPreferDone(primaryStart, primaryFirstByteAt time.Time, done
 				measured: boolPtr(true),
 			}
 		}
+		return firstByteMetricsResult{measured: boolPtr(false)}
 	} else if doneFirstByteMS > 0 {
 		return firstByteMetricsResult{
 			ms:       doneFirstByteMS,
