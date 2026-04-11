@@ -268,7 +268,7 @@ func runUpgradingExternalListenAndSend(t *testing.T) (listenerStderr string, sen
 	listenerStderrBuf := &lockedBuffer{}
 	listenerDone := make(chan int, 1)
 	go func() {
-		listenerDone <- runListen(nil, telemetry.LevelDefault, listenerStdoutBuf, listenerStderrBuf)
+		listenerDone <- runListen(nil, telemetry.LevelVerbose, listenerStdoutBuf, listenerStderrBuf)
 	}()
 
 	issuedToken := waitForIssuedToken(t, listenerStderrBuf)
@@ -288,7 +288,7 @@ func runUpgradingExternalListenAndSend(t *testing.T) (listenerStderr string, sen
 
 	waitForStatusPrefix(t, listenerStderrBuf, upgradeStatusTimeout, "waiting-for-claim", "connected-relay")
 	waitForStatusPrefix(t, &senderStderrBuf, upgradeStatusTimeout, "probing-direct", "connected-relay")
-	waitForRawLine(t, &senderStderrBuf, upgradeStatusTimeout, "udp-stream=true")
+	waitForRawLine(t, listenerStderrBuf, upgradeStatusTimeout, "udp-stream=true")
 	close(releaseEOF)
 
 	select {
