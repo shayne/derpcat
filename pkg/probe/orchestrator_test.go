@@ -330,6 +330,72 @@ func TestRunOrchestrateForwardDoesNotInventMeasuredFirstByteFromZeroDone(t *test
 	}
 }
 
+func TestRunOrchestrateForwardWgPrefersRemoteDoneFirstByte(t *testing.T) {
+	oldListenPacket := listenPacket
+	oldDiscoverCandidates := orchestrateDiscoverCandidates
+	oldLaunchRemoteServer := launchRemoteServer
+	oldSendWg := orchestrateSendWireGuard
+	defer func() {
+		listenPacket = oldListenPacket
+		orchestrateDiscoverCandidates = oldDiscoverCandidates
+		launchRemoteServer = oldLaunchRemoteServer
+		orchestrateSendWireGuard = oldSendWg
+	}()
+
+	localConn, err := net.ListenPacket("udp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer localConn.Close()
+	listenPacket = func(network, address string) (net.PacketConn, error) {
+		return localConn, nil
+	}
+	orchestrateDiscoverCandidates = func(ctx context.Context, conn net.PacketConn) ([]net.Addr, error) {
+		addr, err := net.ResolveUDPAddr("udp", "198.51.100.10:40000")
+		if err != nil {
+			return nil, err
+		}
+		return []net.Addr{addr}, nil
+	}
+	launchRemoteServer = func(ctx context.Context, runner SSHRunner, cfg ServerConfig) (*remoteServerHandle, error) {
+		return &remoteServerHandle{
+			stdout: io.NopCloser(strings.NewReader("READY {\"addr\":\"203.0.113.10:50000\",\"candidates\":[\"203.0.113.10:50000\"],\"transport\":{\"kind\":\"batched\",\"requested_kind\":\"batched\"}}\nDONE {\"bytes_received\":1024,\"duration_ms\":2000,\"first_byte_ms\":9,\"first_byte_measured\":true,\"retransmits\":0,\"packets_sent\":0,\"packets_acked\":0}\n")),
+			stderr: io.NopCloser(strings.NewReader("")),
+			wait:   func() error { return nil },
+		}, nil
+	}
+	orchestrateSendWireGuard = func(ctx context.Context, conn net.PacketConn, src io.Reader, cfg WireGuardConfig) (TransferStats, error) {
+		startedAt := time.Unix(0, 0)
+		return TransferStats{
+			BytesSent:    1024,
+			StartedAt:    startedAt,
+			FirstByteAt:  startedAt.Add(5 * time.Millisecond),
+			CompletedAt:  startedAt.Add(2 * time.Second),
+			Transport:    TransportCaps{Kind: "legacy", RequestedKind: "batched"},
+			PacketsSent:  12,
+			PacketsAcked: 8,
+		}, nil
+	}
+
+	report, err := RunOrchestrate(context.Background(), OrchestrateConfig{
+		Host:      "ktzlxc",
+		User:      "root",
+		Mode:      "wg",
+		Transport: "batched",
+		Direction: "forward",
+		SizeBytes: 1024,
+	})
+	if err != nil {
+		t.Fatalf("RunOrchestrate() error = %v", err)
+	}
+	if report.FirstByteMS != 9 {
+		t.Fatalf("report.FirstByteMS = %d, want 9", report.FirstByteMS)
+	}
+	if report.FirstByteMeasured == nil || !*report.FirstByteMeasured {
+		t.Fatalf("report.FirstByteMeasured = %#v, want true", report.FirstByteMeasured)
+	}
+}
+
 func TestRunOrchestrateWgiperfReportsSuccessWithoutMeasuredFirstByte(t *testing.T) {
 	oldListenPacket := listenPacket
 	oldDiscoverCandidates := orchestrateDiscoverCandidates

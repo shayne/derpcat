@@ -27,6 +27,8 @@ const (
 var listenPacket = net.ListenPacket
 var orchestrateDiscoverCandidates = DiscoverCandidates
 var orchestrateSend = Send
+var orchestrateSendWireGuard = SendWireGuard
+var orchestrateSendWireGuardOS = SendWireGuardOS
 var orchestrateReceive = ReceiveToWriter
 var orchestrateReceiveBlastParallel = ReceiveBlastParallelToWriter
 var orchestrateSendWireGuardOSIperf = SendWireGuardOSIperf
@@ -1138,7 +1140,7 @@ func runForwardOrchestrate(runCtx context.Context, cfg OrchestrateConfig, localC
 	src := newSizedReader(cfg.SizeBytes)
 	var sendStats TransferStats
 	if cfg.Mode == "wg" {
-		sendStats, err = SendWireGuard(runCtx, localConn, src, WireGuardConfig{
+		sendStats, err = orchestrateSendWireGuard(runCtx, localConn, src, WireGuardConfig{
 			Transport:      cfg.Transport,
 			PrivateKeyHex:  wgPlan.senderPrivHex,
 			PeerPublicHex:  wgPlan.listenerPubHex,
@@ -1151,7 +1153,7 @@ func runForwardOrchestrate(runCtx context.Context, cfg OrchestrateConfig, localC
 			SizeBytes:      cfg.SizeBytes,
 		})
 	} else if cfg.Mode == "wgos" {
-		sendStats, err = SendWireGuardOS(runCtx, localConn, src, WireGuardConfig{
+		sendStats, err = orchestrateSendWireGuardOS(runCtx, localConn, src, WireGuardConfig{
 			Transport:      cfg.Transport,
 			PrivateKeyHex:  wgPlan.senderPrivHex,
 			PeerPublicHex:  wgPlan.listenerPubHex,
@@ -1218,20 +1220,43 @@ func runForwardOrchestrate(runCtx context.Context, cfg OrchestrateConfig, localC
 		DurationMS:    durationMS,
 		GoodputMbps:   goodputMbps(bytesReceived, durationMS),
 		Direct:        true,
-		FirstByteMS:   firstByteMetrics(sendStats.StartedAt, sendStats.FirstByteAt, done.FirstByteMS, done.FirstByteMeasured).ms,
+		FirstByteMS:   firstByteMetricsPreferDone(sendStats.StartedAt, sendStats.FirstByteAt, done.FirstByteMS, done.FirstByteMeasured).ms,
 		LossRate:      retransmitRatio(sendStats.Retransmits, sendStats.PacketsSent),
 		Retransmits:   sendStats.Retransmits,
 		Success:       boolPtr(true),
 		Local:         sendStats.Transport,
 		Remote:        ready.Transport,
 	}
-	report.FirstByteMeasured = firstByteMetrics(sendStats.StartedAt, sendStats.FirstByteAt, done.FirstByteMS, done.FirstByteMeasured).measured
+	report.FirstByteMeasured = firstByteMetricsPreferDone(sendStats.StartedAt, sendStats.FirstByteAt, done.FirstByteMS, done.FirstByteMeasured).measured
 	return report, nil
 }
 
 type firstByteMetricsResult struct {
 	ms       int64
 	measured *bool
+}
+
+func firstByteMetricsPreferDone(primaryStart, primaryFirstByteAt time.Time, doneFirstByteMS int64, doneMeasured *bool) firstByteMetricsResult {
+	if doneMeasured != nil {
+		if *doneMeasured {
+			return firstByteMetricsResult{
+				ms:       doneFirstByteMS,
+				measured: boolPtr(true),
+			}
+		}
+	} else if doneFirstByteMS > 0 {
+		return firstByteMetricsResult{
+			ms:       doneFirstByteMS,
+			measured: boolPtr(true),
+		}
+	}
+	if !primaryFirstByteAt.IsZero() {
+		return firstByteMetricsResult{
+			ms:       elapsedMS(primaryStart, primaryFirstByteAt),
+			measured: boolPtr(true),
+		}
+	}
+	return firstByteMetricsResult{}
 }
 
 func firstByteMetrics(primaryStart, primaryFirstByteAt time.Time, fallbackFirstByteMS int64, fallbackMeasured *bool) firstByteMetricsResult {
