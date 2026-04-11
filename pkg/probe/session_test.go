@@ -4386,6 +4386,82 @@ func TestReceiveReliableParallelToWriterAggregatesFlows(t *testing.T) {
 	}
 }
 
+func TestAggregatePeakGoodputMbpsSumsParallelLanes(t *testing.T) {
+	if got, want := aggregatePeakGoodputMbps(125.5, 250.25), 375.75; !almostEqual(got, want) {
+		t.Fatalf("aggregatePeakGoodputMbps() = %f, want %f", got, want)
+	}
+	if got, want := aggregatePeakGoodputMbps(125.5, 0), 125.5; !almostEqual(got, want) {
+		t.Fatalf("aggregatePeakGoodputMbps() = %f, want %f", got, want)
+	}
+}
+
+func TestReceiveBlastParallelToWriterCapturesPeakOnExactCompletion(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	server, err := net.ListenPacket("udp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer server.Close()
+
+	client, err := net.ListenPacket("udp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+
+	runID := testRunID(0x71)
+	statsCh := make(chan TransferStats, 1)
+	errCh := make(chan error, 1)
+	go func() {
+		stats, err := ReceiveBlastParallelToWriter(ctx, []net.PacketConn{server}, io.Discard, ReceiveConfig{
+			Blast:         true,
+			ExpectedRunID: runID,
+		}, 1025)
+		if err != nil {
+			errCh <- err
+			return
+		}
+		statsCh <- stats
+	}()
+
+	writeProbePacket(t, client, server.LocalAddr(), Packet{
+		Version: ProtocolVersion,
+		Type:    PacketTypeHello,
+		RunID:   runID,
+	})
+	writeProbePacket(t, client, server.LocalAddr(), Packet{
+		Version: ProtocolVersion,
+		Type:    PacketTypeData,
+		RunID:   runID,
+		Seq:     0,
+		Payload: []byte("a"),
+	})
+	time.Sleep(25 * time.Millisecond)
+	writeProbePacket(t, client, server.LocalAddr(), Packet{
+		Version: ProtocolVersion,
+		Type:    PacketTypeData,
+		RunID:   runID,
+		Seq:     1,
+		Payload: bytes.Repeat([]byte("b"), 1024),
+	})
+
+	select {
+	case err := <-errCh:
+		t.Fatalf("ReceiveBlastParallelToWriter() error = %v", err)
+	case stats := <-statsCh:
+		if stats.BytesReceived != 1025 {
+			t.Fatalf("BytesReceived = %d, want 1025", stats.BytesReceived)
+		}
+		if stats.PeakGoodputMbps <= 0 {
+			t.Fatalf("PeakGoodputMbps = %f, want > 0", stats.PeakGoodputMbps)
+		}
+	case <-ctx.Done():
+		t.Fatalf("timed out waiting for exact-completion receive stats: %v", ctx.Err())
+	}
+}
+
 type lossyPacketConn struct {
 	net.PacketConn
 	dropEvery int

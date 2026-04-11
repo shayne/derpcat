@@ -4064,9 +4064,7 @@ func ReceiveReliableParallelToWriter(ctx context.Context, conns []net.PacketConn
 		out.PacketsSent += result.stats.PacketsSent
 		out.PacketsAcked += result.stats.PacketsAcked
 		out.Retransmits += result.stats.Retransmits
-		if result.stats.PeakGoodputMbps > out.PeakGoodputMbps {
-			out.PeakGoodputMbps = result.stats.PeakGoodputMbps
-		}
+		out.PeakGoodputMbps = aggregatePeakGoodputMbps(out.PeakGoodputMbps, result.stats.PeakGoodputMbps)
 		if !result.stats.FirstByteAt.IsZero() && (out.FirstByteAt.IsZero() || result.stats.FirstByteAt.Before(out.FirstByteAt)) {
 			out.FirstByteAt = result.stats.FirstByteAt
 		}
@@ -4079,6 +4077,13 @@ func ReceiveReliableParallelToWriter(ctx context.Context, conns []net.PacketConn
 	}
 	out.CompletedAt = time.Now()
 	return out, nil
+}
+
+func aggregatePeakGoodputMbps(current, next float64) float64 {
+	if next <= 0 {
+		return current
+	}
+	return current + next
 }
 
 type lockedWriter struct {
@@ -5215,6 +5220,9 @@ func receiveBlastParallelConn(ctx context.Context, conn net.PacketConn, dst io.W
 						return nil
 					}
 				}
+				if observePeak != nil {
+					observePeak(now, totalReceived)
+				}
 				if expectedBytes > 0 && totalReceived >= expectedBytes {
 					if cfg.RequireComplete {
 						if err := recoverFEC(runID, state); err != nil {
@@ -5232,9 +5240,6 @@ func receiveBlastParallelConn(ctx context.Context, conn net.PacketConn, dst io.W
 					}
 					closeDone()
 					return nil
-				}
-				if observePeak != nil {
-					observePeak(now, totalReceived)
 				}
 				if err := maybeFinishRun(runID, state); err != nil {
 					return err
