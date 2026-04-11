@@ -41,6 +41,12 @@ remote() {
   ssh "${remote_user}@${target}" "${remote_env[@]}" 'bash -se' <<<"$1"
 }
 
+install_remote_bin() {
+  local desired_dir="$1"
+  local desired_bin="${desired_dir%/}/derpcat"
+  remote "mkdir -p '${desired_dir}' && install -m 0755 '${remote_upload}' '${desired_bin}' && rm -f '${remote_upload}' && '${desired_bin}' --help >/dev/null 2>&1"
+}
+
 now_ms() {
   if command -v python3 >/dev/null 2>&1; then
     python3 -c 'import time; print(int(time.time() * 1000))'
@@ -188,7 +194,15 @@ trap 'status=$?; if [[ ${status} -ne 0 ]]; then if [[ ${start_ms} -gt 0 && ${dur
 mise run build
 mise run build-linux-amd64
 scp dist/derpcat-linux-amd64 "${remote_user}@${target}:${remote_upload}" >/dev/null
-remote "mkdir -p '${remote_bin_dir}' && install -m 0755 '${remote_upload}' '${remote_bin}' && rm -f '${remote_upload}' && '${remote_bin}' --help >/dev/null 2>&1"
+if ! install_remote_bin "${remote_bin_dir}"; then
+  if [[ -n "${DERPCAT_REMOTE_BIN_DIR:-}" ]]; then
+    exit 1
+  fi
+  remote_bin_dir="/tmp/derpcat-bench-bin"
+  remote_bin="${remote_bin_dir}/derpcat"
+  scp dist/derpcat-linux-amd64 "${remote_user}@${target}:${remote_upload}" >/dev/null
+  install_remote_bin "${remote_bin_dir}"
+fi
 
 payload="${tmp}/payload.bin"
 send_log="${tmp}/send.err"
