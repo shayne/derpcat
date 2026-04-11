@@ -39,6 +39,43 @@ remote() {
   ssh "${remote_user}@${target}" "${remote_env[@]}" 'bash -se' <<<"$1"
 }
 
+now_ms() {
+  if command -v python3 >/dev/null 2>&1; then
+    python3 -c 'import time; print(int(time.time() * 1000))'
+    return 0
+  fi
+  perl -MTime::HiRes=time -e 'print int(time() * 1000), "\n"'
+}
+
+last_metric_value() {
+  local file="$1"
+  local key="$2"
+  sed -n "s/^${key}=//p" "${file}" | tail -n 1
+}
+
+emit_benchmark_footer() {
+  local stream="$1"
+  local success="$2"
+  local error_text="${3:-}"
+  local goodput_mbps="${4:-0}"
+  local peak_goodput_mbps="${5:-0}"
+  local first_byte_ms="${6:-0}"
+
+  {
+    echo "benchmark-host=${target}"
+    echo "benchmark-direction=forward"
+    echo "benchmark-size-bytes=${expected_size}"
+    echo "benchmark-total-duration-ms=${duration_ms:-0}"
+    echo "benchmark-goodput-mbps=${goodput_mbps}"
+    echo "benchmark-peak-goodput-mbps=${peak_goodput_mbps}"
+    echo "benchmark-first-byte-ms=${first_byte_ms}"
+    echo "benchmark-success=${success}"
+    if [[ -n "${error_text}" ]]; then
+      echo "benchmark-error=${error_text}"
+    fi
+  } >&"${stream}"
+}
+
 count_local_udp_sockets() {
   local pids
   pids="$(pgrep -x derpcat | paste -sd, - || true)"
@@ -144,7 +181,7 @@ assert_no_derpcat_leaks() {
   fi
 }
 
-trap 'status=$?; if [[ ${status} -ne 0 ]]; then dump_failure; fi; cleanup; if [[ ${status} -eq 0 ]]; then assert_no_derpcat_leaks; fi; exit ${status}' EXIT
+trap 'status=$?; if [[ ${status} -ne 0 ]]; then dump_failure; emit_benchmark_footer 2 false "promotion-test-exit-${status}"; fi; cleanup; if [[ ${status} -eq 0 ]]; then assert_no_derpcat_leaks; fi; exit ${status}' EXIT
 
 mise run build
 mise run build-linux-amd64
@@ -175,9 +212,12 @@ if [[ -z "${token}" ]]; then
   exit 1
 fi
 
-SECONDS=0
+duration_ms=0
+start_ms="$(now_ms)"
 ./dist/derpcat --verbose send "${parallel_args[@]+"${parallel_args[@]}"}" "${token}" <"${payload}" >/dev/null 2>"${send_log}"
-duration="${SECONDS}"
+end_ms="$(now_ms)"
+duration_ms="$((end_ms - start_ms))"
+duration="$((duration_ms / 1000))"
 
 for _ in $(seq 1 400); do
   if ! remote "if [[ -f '${remote_base}.pid' ]]; then kill -0 \$(cat '${remote_base}.pid') 2>/dev/null; else false; fi" >/dev/null 2>&1; then
@@ -209,6 +249,11 @@ require_direct_evidence "sender" "${sender_trace}"
 require_direct_evidence "listener" "${listener_trace}"
 require_direct_blast_log "sender" "${send_log}" "udp-send"
 require_direct_blast_log "listener" "${listener_log}" "udp-receive"
+
+sender_goodput_mbps="$(last_metric_value "${send_log}" "udp-send-goodput-mbps")"
+sender_peak_goodput_mbps="$(last_metric_value "${send_log}" "udp-send-peak-goodput-mbps")"
+sender_first_byte_ms="$(last_metric_value "${send_log}" "udp-send-session-first-byte-ms")"
+emit_benchmark_footer 1 true "" "${sender_goodput_mbps:-0}" "${sender_peak_goodput_mbps:-0}" "${sender_first_byte_ms:-0}"
 
 echo "target=${target}"
 echo "size_mib=${size_mib}"

@@ -31,6 +31,12 @@ var registry = yargs.Registry{
 				Description: "Run end-to-end proof benchmark.",
 			},
 		},
+		"matrix": {
+			Info: yargs.SubCommandInfo{
+				Name:        "matrix",
+				Description: "Run the production promotion benchmark matrix.",
+			},
+		},
 	},
 }
 
@@ -51,6 +57,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return runClient(args[1:], stdout, stderr)
 	case "orchestrate":
 		return runOrchestrate(args[1:], stdout, stderr)
+	case "matrix":
+		return runMatrixCmd(args[1:], stdout, stderr)
 	default:
 		fmt.Fprintf(stderr, "unknown command: %s\n", args[0])
 		return 2
@@ -68,7 +76,7 @@ func runHelp(args []string, stderr io.Writer) int {
 	}
 
 	switch args[0] {
-	case "server", "client", "orchestrate":
+	case "server", "client", "orchestrate", "matrix":
 		fmt.Fprint(stderr, subcommandUsageLine(args[0]))
 		if len(args) > 1 {
 			return 2
