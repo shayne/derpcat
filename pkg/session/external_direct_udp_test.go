@@ -199,6 +199,86 @@ func TestSendExternalHandoffDERPStopUsesReceiverHandoffAckBelowReadBoundary(t *t
 	}
 }
 
+func TestSendExternalHandoffDERPStopToleratesDelayedReceiverHandoffAck(t *testing.T) {
+	srv := newSessionTestDERPServer(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 6*time.Second)
+	defer cancel()
+
+	node := srv.Map.Regions[1].Nodes[0]
+	listenerDERP, err := derpbind.NewClient(ctx, node, srv.DERPURL)
+	if err != nil {
+		t.Fatalf("NewClient(listener) error = %v", err)
+	}
+	defer listenerDERP.Close()
+	senderDERP, err := derpbind.NewClient(ctx, node, srv.DERPURL)
+	if err != nil {
+		t.Fatalf("NewClient(sender) error = %v", err)
+	}
+	defer senderDERP.Close()
+
+	relayFrames, unsubscribe := listenerDERP.SubscribeLossless(func(pkt derpbind.Packet) bool {
+		return pkt.From == senderDERP.PublicKey() && externalRelayPrefixDERPFrameKindOf(pkt.Payload) != 0
+	})
+	defer unsubscribe()
+
+	spool, err := newExternalHandoffSpool(strings.NewReader(strings.Repeat("abcdefghijklmnopqrstuvwxyz", 2048)), 4, 8)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer spool.Close()
+
+	stopCh := make(chan struct{})
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- sendExternalHandoffDERP(ctx, senderDERP, listenerDERP.PublicKey(), spool, stopCh, nil)
+	}()
+
+	for dataFrames := 0; dataFrames < 2; {
+		select {
+		case pkt := <-relayFrames:
+			if externalRelayPrefixDERPFrameKindOf(pkt.Payload) == externalRelayPrefixDERPFrameData {
+				dataFrames++
+			}
+		case err := <-errCh:
+			t.Fatalf("sendExternalHandoffDERP() returned before stop: %v", err)
+		case <-time.After(500 * time.Millisecond):
+			t.Fatal("timed out waiting for DERP prefix data frames before stop")
+		}
+	}
+
+	close(stopCh)
+
+	var watermark int64
+	for {
+		select {
+		case pkt := <-relayFrames:
+			switch externalRelayPrefixDERPFrameKindOf(pkt.Payload) {
+			case externalRelayPrefixDERPFrameData:
+				chunk, err := externalRelayPrefixDERPDecodeChunk(pkt.Payload)
+				if err != nil {
+					t.Fatal(err)
+				}
+				watermark = max(watermark, chunk.Offset+int64(len(chunk.Payload)))
+				if err := externalRelayPrefixDERPSendAck(ctx, listenerDERP, senderDERP.PublicKey(), watermark); err != nil {
+					t.Fatal(err)
+				}
+			case externalRelayPrefixDERPFrameHandoff:
+				time.Sleep(2200 * time.Millisecond)
+				if err := externalRelayPrefixDERPSendHandoffAck(ctx, listenerDERP, senderDERP.PublicKey(), watermark); err != nil {
+					t.Fatal(err)
+				}
+			}
+		case err := <-errCh:
+			if err != nil {
+				t.Fatalf("sendExternalHandoffDERP() error = %v", err)
+			}
+			return
+		case <-time.After(5 * time.Second):
+			t.Fatal("timed out waiting for delayed handoff ack to complete")
+		}
+	}
+}
+
 func TestReceiveExternalViaDirectUDPOnlyLetsPrepareConsumeReady(t *testing.T) {
 	origWaitReady := externalDirectUDPWaitReadyFn
 	origPrepare := externalPrepareDirectUDPReceiveFn
@@ -1507,6 +1587,86 @@ func TestExternalDirectUDPStartBudgetPreservesHighCeilingShape(t *testing.T) {
 	}
 	if got.ReplayWindowBytes != externalDirectUDPStreamReplayBytes {
 		t.Fatalf("ReplayWindowBytes = %d, want %d", got.ReplayWindowBytes, externalDirectUDPStreamReplayBytes)
+	}
+}
+
+func TestExternalDirectUDPDataPathBudgetKeepsMidTierSelectedRateOutOfTopTierGeometry(t *testing.T) {
+	got := externalDirectUDPDataPathBudget(700, 700, 2250, externalDirectUDPParallelism, true)
+	if got.RateMbps != 700 {
+		t.Fatalf("RateMbps = %d, want 700", got.RateMbps)
+	}
+	if got.ActiveLanes != 4 {
+		t.Fatalf("ActiveLanes = %d, want 4", got.ActiveLanes)
+	}
+	if got.ReplayWindowBytes != 128<<20 {
+		t.Fatalf("ReplayWindowBytes = %d, want %d", got.ReplayWindowBytes, 128<<20)
+	}
+}
+
+func TestExternalDirectUDPDataPathBudgetPreservesTopTierGeometryForCleanTopTierProbe(t *testing.T) {
+	got := externalDirectUDPDataPathBudget(2250, 1200, 2250, externalDirectUDPParallelism, true)
+	if got.RateMbps != 1200 {
+		t.Fatalf("RateMbps = %d, want 1200", got.RateMbps)
+	}
+	if got.ActiveLanes != externalDirectUDPParallelism {
+		t.Fatalf("ActiveLanes = %d, want %d", got.ActiveLanes, externalDirectUDPParallelism)
+	}
+	if got.ReplayWindowBytes != externalDirectUDPStreamReplayBytes {
+		t.Fatalf("ReplayWindowBytes = %d, want %d", got.ReplayWindowBytes, externalDirectUDPStreamReplayBytes)
+	}
+}
+
+func TestExternalDirectUDPClampDataStartRateAllowsMeasuredHighTierWhenStartBudgetCoversGeometry(t *testing.T) {
+	if got, want := externalDirectUDPClampDataStartRate(1800, 1800, 1800, externalDirectUDPParallelism, true), 1800; got != want {
+		t.Fatalf("externalDirectUDPClampDataStartRate(clean 1800 tier) = %d, want %d", got, want)
+	}
+	if got, want := externalDirectUDPClampDataStartRate(2000, 2000, 2000, externalDirectUDPParallelism, true), 2000; got != want {
+		t.Fatalf("externalDirectUDPClampDataStartRate(clean 2000 tier) = %d, want %d", got, want)
+	}
+}
+
+func TestExternalDirectUDPClampDataStartRateKeepsConservativeBudgetWhenHigherRateNeedsMoreGeometry(t *testing.T) {
+	if got, want := externalDirectUDPClampDataStartRate(1200, 1200, 1200, externalDirectUDPParallelism, true), 900; got != want {
+		t.Fatalf("externalDirectUDPClampDataStartRate(clean 1200 tier) = %d, want %d", got, want)
+	}
+}
+
+func TestExternalDirectUDPDataStartRateKeepsNearCleanEfficientTwelveHundredTier(t *testing.T) {
+	sent := []directUDPRateProbeSample{
+		{RateMbps: 8, BytesSent: 200_680, DurationMillis: 200},
+		{RateMbps: 25, BytesSent: 625_568, DurationMillis: 200},
+		{RateMbps: 75, BytesSent: 1_875_320, DurationMillis: 200},
+		{RateMbps: 150, BytesSent: 3_750_640, DurationMillis: 200},
+		{RateMbps: 350, BytesSent: 8_751_032, DurationMillis: 200},
+		{RateMbps: 700, BytesSent: 17_500_680, DurationMillis: 200},
+		{RateMbps: 1200, BytesSent: 30_005_120, DurationMillis: 200},
+		{RateMbps: 1800, BytesSent: 112_500_000, DurationMillis: 500},
+		{RateMbps: 2000, BytesSent: 125_000_000, DurationMillis: 500},
+		{RateMbps: 2250, BytesSent: 140_625_000, DurationMillis: 500},
+	}
+	received := []directUDPRateProbeSample{
+		{RateMbps: 8, BytesReceived: 200_680, DurationMillis: 200},
+		{RateMbps: 25, BytesReceived: 622_800, DurationMillis: 200},
+		{RateMbps: 75, BytesReceived: 1_875_320, DurationMillis: 200},
+		{RateMbps: 150, BytesReceived: 3_742_336, DurationMillis: 200},
+		{RateMbps: 350, BytesReceived: 8_721_968, DurationMillis: 200},
+		{RateMbps: 700, BytesReceived: 17_482_688, DurationMillis: 200},
+		{RateMbps: 1200, BytesReceived: 27_754_736, DurationMillis: 200},
+		{RateMbps: 1800, BytesReceived: 58_922_416, DurationMillis: 500},
+		{RateMbps: 2000, BytesReceived: 51_634_272, DurationMillis: 500},
+		{RateMbps: 2250, BytesReceived: 44_501_136, DurationMillis: 500},
+	}
+
+	selected := externalDirectUDPSelectInitialRateMbps(10_000, sent, received)
+	if got, want := selected, 1200; got != want {
+		t.Fatalf("externalDirectUDPSelectInitialRateMbps(live ktzlxc near-clean 1200 tier) = %d, want %d", got, want)
+	}
+	ceiling := externalDirectUDPSelectRateCeilingMbps(10_000, selected, sent, received)
+	if got, want := ceiling, 1800; got != want {
+		t.Fatalf("externalDirectUDPSelectRateCeilingMbps(live ktzlxc near-clean 1200 tier) = %d, want %d", got, want)
+	}
+	if got, want := externalDirectUDPDataStartRateMbpsForProbeSamples(selected, ceiling, sent, received), selected; got != want {
+		t.Fatalf("externalDirectUDPDataStartRateMbpsForProbeSamples(live ktzlxc near-clean 1200 tier) = %d, want %d", got, want)
 	}
 }
 
@@ -2878,6 +3038,40 @@ func TestExternalDirectUDPSelectInitialRateAddsHeadroomAtLossyProbeKnee(t *testi
 
 	if got, want := externalDirectUDPSelectInitialRateMbps(10_000, sent, received), 263; got != want {
 		t.Fatalf("externalDirectUDPSelectInitialRateMbps(lossy knee) = %d, want %d", got, want)
+	}
+}
+
+func TestExternalDirectUDPSelectRateFromProbeSamplesKeepsStableLowBandwidthTierWhenHigherTiersOnlyPlateau(t *testing.T) {
+	sent := []directUDPRateProbeSample{
+		{RateMbps: 8, BytesSent: 200_000, DurationMillis: 200},
+		{RateMbps: 25, BytesSent: 625_000, DurationMillis: 200},
+		{RateMbps: 75, BytesSent: 1_875_000, DurationMillis: 200},
+		{RateMbps: 150, BytesSent: 3_750_000, DurationMillis: 200},
+		{RateMbps: 350, BytesSent: 8_750_000, DurationMillis: 200},
+		{RateMbps: 700, BytesSent: 17_500_000, DurationMillis: 200},
+		{RateMbps: 1200, BytesSent: 30_000_000, DurationMillis: 200},
+		{RateMbps: 1800, BytesSent: 112_500_000, DurationMillis: 500},
+		{RateMbps: 2000, BytesSent: 125_000_000, DurationMillis: 500},
+		{RateMbps: 2250, BytesSent: 140_625_000, DurationMillis: 500},
+	}
+	received := []directUDPRateProbeSample{
+		{RateMbps: 8, BytesReceived: 159_160, DurationMillis: 200},
+		{RateMbps: 25, BytesReceived: 538_376, DurationMillis: 200},
+		{RateMbps: 75, BytesReceived: 1_601_288, DurationMillis: 200},
+		{RateMbps: 150, BytesReceived: 1_644_192, DurationMillis: 200},
+		{RateMbps: 350, BytesReceived: 1_623_432, DurationMillis: 200},
+		{RateMbps: 700, BytesReceived: 1_768_752, DurationMillis: 200},
+		{RateMbps: 1200, BytesReceived: 1_727_232, DurationMillis: 200},
+		{RateMbps: 1800, BytesReceived: 4_027_440, DurationMillis: 500},
+		{RateMbps: 2000, BytesReceived: 4_017_752, DurationMillis: 500},
+		{RateMbps: 2250, BytesReceived: 3_987_304, DurationMillis: 500},
+	}
+
+	if got, want := externalDirectUDPSelectRateFromProbeSamples(10_000, sent, received), 75; got != want {
+		t.Fatalf("externalDirectUDPSelectRateFromProbeSamples(low-bandwidth plateau) = %d, want %d", got, want)
+	}
+	if got, want := externalDirectUDPSelectInitialRateMbps(10_000, sent, received), 56; got != want {
+		t.Fatalf("externalDirectUDPSelectInitialRateMbps(low-bandwidth plateau) = %d, want %d", got, want)
 	}
 }
 

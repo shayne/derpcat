@@ -91,7 +91,7 @@ const (
 	externalRelayPrefixDERPMaxUnacked              = 512 << 10
 	externalRelayPrefixDERPSustainedMax            = 64 << 10
 	externalRelayPrefixDERPStartupBytes            = 4 << 20
-	externalRelayPrefixDERPHandoffAckWait          = 2 * time.Second
+	externalRelayPrefixDERPHandoffAckWait          = 5 * time.Second
 )
 
 var externalDirectUDPRateProbeMagic = [16]byte{0, 'd', 'e', 'r', 'p', 'c', 'a', 't', '-', 'r', 'a', 't', 'e', '-', 'v', '1'}
@@ -398,23 +398,16 @@ func externalPrepareDirectUDPSend(ctx context.Context, tok token.Token, derpClie
 		selectedRateMbps = externalDirectUDPSelectInitialRateMbps(maxRateMbps, sentProbeSamples, probeResult.Samples)
 		rateCeilingMbps = externalDirectUDPSelectRateCeilingMbps(maxRateMbps, selectedRateMbps, sentProbeSamples, probeResult.Samples)
 		activeRateMbps = externalDirectUDPDataStartRateMbpsForProbeSamples(selectedRateMbps, rateCeilingMbps, sentProbeSamples, probeResult.Samples)
-		startBudget := externalDirectUDPStartBudget(rateCeilingMbps)
-		if activeRateMbps <= 0 || activeRateMbps > startBudget.RateMbps {
-			activeRateMbps = startBudget.RateMbps
-		}
+		activeRateMbps = externalDirectUDPClampDataStartRate(selectedRateMbps, activeRateMbps, rateCeilingMbps, len(probeConns), sendCfg.StripedBlast)
 		sendCfg.RateMbps = activeRateMbps
 		sendCfg.RateCeilingMbps = rateCeilingMbps
 		sendCfg.RateExplorationCeilingMbps = externalDirectUDPDataExplorationCeilingMbps(maxRateMbps, selectedRateMbps, rateCeilingMbps)
-		sendCfg.StreamReplayWindowBytes = startBudget.ReplayWindowBytes
+		sendCfg.StreamReplayWindowBytes = externalDirectUDPDataPathBudget(selectedRateMbps, activeRateMbps, rateCeilingMbps, len(probeConns), sendCfg.StripedBlast).ReplayWindowBytes
 	}
 
 	var retainedLanes int
 	if len(sentProbeSamples) > 0 || len(probeResult.Samples) > 0 {
-		startBudget := externalDirectUDPStartBudget(rateCeilingMbps)
-		retainedLanes = startBudget.ActiveLanes
-		if retainedLanes > len(probeConns) {
-			retainedLanes = len(probeConns)
-		}
+		retainedLanes = externalDirectUDPDataPathBudget(selectedRateMbps, activeRateMbps, rateCeilingMbps, len(probeConns), sendCfg.StripedBlast).ActiveLanes
 	} else {
 		laneRateBasisMbps := externalDirectUDPDataLaneRateBasisMbps(activeRateMbps, rateCeilingMbps, probeRates)
 		retainedLanes = externalDirectUDPRetainedLanesForRate(laneRateBasisMbps, len(probeConns), sendCfg.StripedBlast)
@@ -2538,6 +2531,17 @@ func externalDirectUDPSelectRateFromProbeSamples(maxRateMbps int, sent []directU
 			backoffIndex = i - 1
 		}
 		selected := candidates[backoffIndex].rate
+		if backoffIndex >= 0 {
+			backoffCandidate := candidates[backoffIndex]
+			if backoffCandidate.rate < externalDirectUDPRateProbeCollapseMinMbps &&
+				bestRate > 0 &&
+				bestRate < backoffCandidate.rate &&
+				bestDelivery >= externalDirectUDPRateProbeCeilingDelivery &&
+				backoffCandidate.delivery < externalDirectUDPRateProbeCeilingDelivery &&
+				backoffCandidate.goodput < bestGoodput*externalDirectUDPRateProbeLossyGain {
+				selected = bestRate
+			}
+		}
 		if selected < externalDirectUDPRateProbeMinMbps {
 			selected = externalDirectUDPRateProbeMinMbps
 		}
@@ -3043,6 +3047,11 @@ func externalDirectUDPAddProbeKneeHeadroom(maxRateMbps int, selected int, sent [
 			return selected
 		}
 		if selected >= externalDirectUDPRateProbeCollapseMinMbps && delivery < externalDirectUDPRateProbeBufferedCollapse && prevBelowSelectedRate > 0 {
+			if selectedProbeViable &&
+				selected >= externalDirectUDPRateProbeConfirmMinMbps &&
+				delivery >= externalDirectUDPRateProbeLossyDelivery {
+				return selected
+			}
 			if selectedProbeViable && sentEfficiency >= externalDirectUDPRateProbeCeilingEfficient {
 				return selected
 			}
@@ -4087,6 +4096,68 @@ func externalDirectUDPStartBudget(rateCeilingMbps int) externalDirectUDPBudget {
 	return budget
 }
 
+func externalDirectUDPReplayWindowBytesForRate(rateMbps int) uint64 {
+	switch {
+	case rateMbps <= 0:
+		return 16 << 20
+	case rateMbps <= 100:
+		return 16 << 20
+	case rateMbps <= externalDirectUDPActiveLaneOneMaxMbps:
+		return 32 << 20
+	case rateMbps < externalDirectUDPActiveLaneTwoMaxMbps:
+		return 64 << 20
+	case rateMbps <= externalDirectUDPDataStartHighMbps:
+		return 128 << 20
+	default:
+		return externalDirectUDPStreamReplayBytes
+	}
+}
+
+func externalDirectUDPDataPathBudget(selectedRateMbps int, activeRateMbps int, rateCeilingMbps int, availableLanes int, striped bool) externalDirectUDPBudget {
+	budget := externalDirectUDPStartBudget(rateCeilingMbps)
+	if activeRateMbps > 0 {
+		budget.RateMbps = activeRateMbps
+	}
+	if availableLanes <= 0 {
+		budget.ActiveLanes = 0
+		return budget
+	}
+
+	laneRateBasisMbps := selectedRateMbps
+	if laneRateBasisMbps <= 0 {
+		laneRateBasisMbps = activeRateMbps
+	}
+	if laneRateBasisMbps <= 0 {
+		laneRateBasisMbps = rateCeilingMbps
+	}
+	switch {
+	case laneRateBasisMbps > externalDirectUDPDataStartHighMbps && rateCeilingMbps >= externalDirectUDPActiveLaneFourMaxMbps:
+		laneRateBasisMbps = externalDirectUDPActiveLaneFourMaxMbps
+	case laneRateBasisMbps >= externalDirectUDPActiveLaneTwoMaxMbps && rateCeilingMbps > externalDirectUDPDataStartHighMbps:
+		laneRateBasisMbps = externalDirectUDPDataStartHighMbps
+	}
+
+	budget.ActiveLanes = externalDirectUDPRetainedLanesForRate(laneRateBasisMbps, availableLanes, striped)
+	budget.ReplayWindowBytes = externalDirectUDPReplayWindowBytesForRate(laneRateBasisMbps)
+	return budget
+}
+
+func externalDirectUDPClampDataStartRate(selectedRateMbps int, activeRateMbps int, rateCeilingMbps int, availableLanes int, striped bool) int {
+	startBudget := externalDirectUDPStartBudget(rateCeilingMbps)
+	if activeRateMbps <= 0 {
+		return startBudget.RateMbps
+	}
+	if activeRateMbps <= startBudget.RateMbps {
+		return activeRateMbps
+	}
+	dataBudget := externalDirectUDPDataPathBudget(selectedRateMbps, activeRateMbps, rateCeilingMbps, availableLanes, striped)
+	if startBudget.ActiveLanes >= dataBudget.ActiveLanes &&
+		startBudget.ReplayWindowBytes >= dataBudget.ReplayWindowBytes {
+		return activeRateMbps
+	}
+	return startBudget.RateMbps
+}
+
 func externalDirectUDPDataStartRateMbps(selectedRateMbps int) int {
 	if selectedRateMbps <= 0 || selectedRateMbps <= externalDirectUDPDataStartMaxMbps {
 		return selectedRateMbps
@@ -4144,20 +4215,40 @@ func externalDirectUDPSelectedTierHasBufferedCollapse(selectedRateMbps int, rate
 	}
 	selectedGoodput := 0.0
 	selectedDelivery := 0.0
+	selectedEfficiency := 0.0
 	for _, sample := range received {
 		if sample.RateMbps != selectedRateMbps {
 			continue
 		}
-		goodput, delivery, _, ok := externalDirectUDPProbeMetrics(sample, sentByRate)
+		goodput, delivery, efficiency, ok := externalDirectUDPProbeMetrics(sample, sentByRate)
 		if !ok || delivery < externalDirectUDPRateProbeNearClean {
 			return false
 		}
 		selectedGoodput = goodput
 		selectedDelivery = delivery
+		selectedEfficiency = efficiency
 		break
 	}
 	if selectedGoodput <= 0 {
 		return false
+	}
+	startBudgetRate := externalDirectUDPStartBudget(rateCeilingMbps).RateMbps
+	startGoodput := 0.0
+	startDelivery := 0.0
+	startEfficiency := 0.0
+	if startBudgetRate > externalDirectUDPDataStartMaxMbps && startBudgetRate < selectedRateMbps {
+		for _, sample := range received {
+			if sample.RateMbps <= 0 || sample.RateMbps > startBudgetRate {
+				continue
+			}
+			goodput, delivery, efficiency, ok := externalDirectUDPProbeMetrics(sample, sentByRate)
+			if !ok {
+				continue
+			}
+			startGoodput = goodput
+			startDelivery = delivery
+			startEfficiency = efficiency
+		}
 	}
 	higherGoodputBeatSelected := false
 	for _, sample := range received {
@@ -4172,13 +4263,22 @@ func externalDirectUDPSelectedTierHasBufferedCollapse(selectedRateMbps int, rate
 			higherGoodputBeatSelected = true
 			continue
 		}
-		if selectedRateMbps == externalDirectUDPDataStartHighMbps && selectedDelivery >= externalDirectUDPRateProbeClean {
-			// A clean selected 1200 Mbps tier is already a viable data start.
-			// Loss above that point should cap further exploration, not force the
-			// sender all the way back to the conservative 350 Mbps start.
+		if selectedRateMbps <= startBudgetRate &&
+			selectedDelivery >= externalDirectUDPRateProbeNearClean &&
+			selectedEfficiency >= externalDirectUDPRateProbeEfficient {
+			// A near-clean, efficient selected tier is already a viable data
+			// start. Collapse above that point should cap further exploration, not
+			// force the sender all the way back to the conservative 350 Mbps
+			// start.
 			if rateCeilingMbps > selectedRateMbps && higherGoodputBeatSelected {
 				continue
 			}
+			continue
+		}
+		if startGoodput > 0 &&
+			startDelivery >= externalDirectUDPRateProbeNearClean &&
+			startEfficiency >= externalDirectUDPRateProbeEfficient &&
+			delivery >= externalDirectUDPRateProbeLossyDelivery {
 			continue
 		}
 		if selectedDelivery < externalDirectUDPRateProbeClean && delivery < externalDirectUDPRateProbeCeilingDelivery {
