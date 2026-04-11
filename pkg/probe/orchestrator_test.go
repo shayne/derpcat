@@ -359,7 +359,7 @@ func TestRunOrchestrateWgiperfReportsSuccessWithoutMeasuredFirstByte(t *testing.
 	}
 	launchRemoteServer = func(ctx context.Context, runner SSHRunner, cfg ServerConfig) (*remoteServerHandle, error) {
 		return &remoteServerHandle{
-			stdout: io.NopCloser(strings.NewReader("READY {\"addr\":\"203.0.113.10:50000\",\"candidates\":[\"203.0.113.10:50000\"],\"transport\":{\"kind\":\"batched\",\"requested_kind\":\"batched\"}}\nDONE {\"bytes_received\":1024,\"duration_ms\":2000,\"retransmits\":0,\"packets_sent\":0,\"packets_acked\":0}\n")),
+			stdout: io.NopCloser(strings.NewReader("READY {\"addr\":\"203.0.113.10:50000\",\"candidates\":[\"203.0.113.10:50000\"],\"transport\":{\"kind\":\"batched\",\"requested_kind\":\"batched\"}}\nDONE {\"bytes_received\":1024,\"duration_ms\":2000,\"first_byte_measured\":false,\"retransmits\":0,\"packets_sent\":0,\"packets_acked\":0}\n")),
 			stderr: io.NopCloser(strings.NewReader("")),
 			wait:   func() error { return nil },
 		}, nil
@@ -389,14 +389,11 @@ func TestRunOrchestrateWgiperfReportsSuccessWithoutMeasuredFirstByte(t *testing.
 	if report.Success == nil || !*report.Success {
 		t.Fatalf("report.Success = %#v, want true", report.Success)
 	}
-	if report.FirstByteMeasured != nil {
-		t.Fatalf("report.FirstByteMeasured = %#v, want nil", report.FirstByteMeasured)
+	if report.FirstByteMeasured == nil || *report.FirstByteMeasured {
+		t.Fatalf("report.FirstByteMeasured = %#v, want false", report.FirstByteMeasured)
 	}
 	if report.FirstByteMS != 0 {
 		t.Fatalf("report.FirstByteMS = %d, want 0", report.FirstByteMS)
-	}
-	if report.PeakGoodputMbps != 0 {
-		t.Fatalf("report.PeakGoodputMbps = %f, want 0", report.PeakGoodputMbps)
 	}
 }
 

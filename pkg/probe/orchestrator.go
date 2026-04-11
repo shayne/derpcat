@@ -1552,19 +1552,20 @@ func runWireGuardOSIperfOrchestrate(runCtx context.Context, cfg OrchestrateConfi
 		return RunReport{}, err
 	}
 	return RunReport{
-		Host:          cfg.Host,
-		Mode:          cfg.Mode,
-		Transport:     cfg.Transport,
-		Direction:     cfg.Direction,
-		SizeBytes:     cfg.SizeBytes,
-		BytesReceived: bytesReceived,
-		DurationMS:    durationMS,
-		GoodputMbps:   goodputMbps(bytesReceived, durationMS),
-		Direct:        true,
-		FirstByteMS:   elapsedMS(sendStats.StartedAt, sendStats.FirstByteAt),
-		Success:       boolPtr(true),
-		Local:         sendStats.Transport,
-		Remote:        ready.Transport,
+		Host:              cfg.Host,
+		Mode:              cfg.Mode,
+		Transport:         cfg.Transport,
+		Direction:         cfg.Direction,
+		SizeBytes:         cfg.SizeBytes,
+		BytesReceived:     bytesReceived,
+		DurationMS:        durationMS,
+		GoodputMbps:       goodputMbps(bytesReceived, durationMS),
+		Direct:            true,
+		FirstByteMS:       firstByteMetrics(sendStats.StartedAt, sendStats.FirstByteAt, done.FirstByteMS, done.FirstByteMeasured).ms,
+		FirstByteMeasured: firstByteMetrics(sendStats.StartedAt, sendStats.FirstByteAt, done.FirstByteMS, done.FirstByteMeasured).measured,
+		Success:           boolPtr(true),
+		Local:             sendStats.Transport,
+		Remote:            ready.Transport,
 	}, nil
 }
 
