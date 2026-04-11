@@ -535,6 +535,145 @@ func TestBlastRateControllerHighCeilingStartsProbingAfterShortInitialHold(t *tes
 	}
 }
 
+func TestBlastRateControllerOpensInitialExplorationCeilingAfterCleanFeedback(t *testing.T) {
+	start := time.Unix(0, 0)
+	controller := newBlastRateControllerWithInitialLossCeiling(1200, 2250, 1200, start)
+
+	sentBytes := uint64(0)
+	receivedBytes := uint64(0)
+	for i := 1; i <= 12; i++ {
+		sentBytes += 15_000_000
+		receivedBytes += 15_000_000
+		packets := uint64(i) * 11_000
+		controller.Observe(start.Add(time.Duration(i)*blastRateFeedbackInterval), blastRateFeedback{
+			SentPayloadBytes:     sentBytes,
+			ReceivedPayloadBytes: receivedBytes,
+			ReceivedPackets:      packets,
+			MaxSeqPlusOne:        packets,
+		})
+	}
+
+	if got, wantAbove := controller.RateMbps(), 1200; got <= wantAbove {
+		t.Fatalf("RateMbps() after clean exploration feedback = %d, want above %d", got, wantAbove)
+	}
+	if got, wantMax := controller.RateMbps(), 2250; got > wantMax {
+		t.Fatalf("RateMbps() after clean exploration feedback = %d, want <= %d", got, wantMax)
+	}
+}
+
+func TestBlastRateControllerInitialHighExplorationCeilingReopensMateriallyAfterCleanFeedback(t *testing.T) {
+	start := time.Unix(0, 0)
+	controller := newBlastRateControllerWithInitialLossCeiling(1200, 2250, 1200, start)
+
+	sentBytes := uint64(0)
+	receivedBytes := uint64(0)
+	for i := 1; i <= blastRateMediumLossCeilingProbeClean; i++ {
+		sentBytes += 25_000_000
+		receivedBytes += 25_000_000
+		packets := uint64(i) * 18_000
+		controller.Observe(start.Add(blastRateHighCeilingInitialHold+time.Duration(i)*blastRateFeedbackInterval), blastRateFeedback{
+			SentPayloadBytes:     sentBytes,
+			ReceivedPayloadBytes: receivedBytes,
+			ReceivedPackets:      packets,
+			MaxSeqPlusOne:        packets,
+		})
+	}
+
+	got := controller.RateMbps()
+	if wantMin := 1500; got < wantMin {
+		t.Fatalf("RateMbps() after initial high-ceiling clean reopen = %d, want >= %d", got, wantMin)
+	}
+	if wantMax := 1800; got > wantMax {
+		t.Fatalf("RateMbps() after initial high-ceiling clean reopen = %d, want <= %d", got, wantMax)
+	}
+}
+
+func TestBlastRateControllerRepairPressureDisablesFastInitialExplorationReopen(t *testing.T) {
+	start := time.Unix(0, 0)
+	control := newBlastSendControlWithInitialLossCeiling(1200, 2250, 1200, start)
+
+	repairAt := start.Add(blastRateHoldAfterDecrease + blastRateFeedbackInterval)
+	control.ObserveRepairPressure(repairAt, control.repairPressurePackets())
+	backedOff := control.RateMbps()
+
+	sentBytes := uint64(180_000_000)
+	receivedBytes := uint64(180_000_000)
+	for i := 1; i <= blastRateMediumLossCeilingProbeClean; i++ {
+		sentBytes += 15_000_000
+		receivedBytes += 15_000_000
+		packets := uint64(132_000 + i*11_000)
+		control.controller.Observe(repairAt.Add(blastRateHoldAfterPressureDecrease+time.Duration(i)*blastRateFeedbackInterval), blastRateFeedback{
+			SentPayloadBytes:     sentBytes,
+			ReceivedPayloadBytes: receivedBytes,
+			ReceivedPackets:      packets,
+			MaxSeqPlusOne:        packets,
+		})
+	}
+
+	if got := control.RateMbps(); got > backedOff {
+		t.Fatalf("RateMbps() after only fast-reopen clean samples following repair pressure = %d, want <= backed-off rate %d", got, backedOff)
+	}
+}
+
+func TestBlastRateControllerKeepsInitialExplorationCeilingAcrossSingleLossBurst(t *testing.T) {
+	start := time.Unix(0, 0)
+	controller := newBlastRateControllerWithInitialLossCeiling(700, 2100, 1200, start)
+
+	samples := []blastRateFeedback{
+		{SentPayloadBytes: 51_806_208, ReceivedPayloadBytes: 47_562_976, ReceivedPackets: 35_005, MaxSeqPlusOne: 35_005},
+		{SentPayloadBytes: 61_112_320, ReceivedPayloadBytes: 56_784_624, ReceivedPackets: 41_749, MaxSeqPlusOne: 41_749},
+		{SentPayloadBytes: 73_891_840, ReceivedPayloadBytes: 67_659_448, ReceivedPackets: 50_441, MaxSeqPlusOne: 50_441},
+		{SentPayloadBytes: 85_917_696, ReceivedPayloadBytes: 76_124_216, ReceivedPackets: 57_508, MaxSeqPlusOne: 57_508},
+		{SentPayloadBytes: 102_203_392, ReceivedPayloadBytes: 86_068_144, ReceivedPackets: 65_547, MaxSeqPlusOne: 65_547},
+	}
+	for i, sample := range samples {
+		controller.Observe(start.Add(blastRateHighCeilingInitialHold+time.Duration(i+1)*blastRateFeedbackInterval), sample)
+	}
+	if got := controller.RateMbps(); got != 1179 {
+		t.Fatalf("RateMbps() before loss burst = %d, want 1179", got)
+	}
+
+	controller.Observe(start.Add(blastRateHighCeilingInitialHold+time.Duration(len(samples)+1)*blastRateFeedbackInterval), blastRateFeedback{
+		SentPayloadBytes:     117_735_424,
+		ReceivedPayloadBytes: 94_530_592,
+		ReceivedPackets:      72_420,
+		MaxSeqPlusOne:        73_288,
+	})
+
+	if got := controller.RateMbps(); got != 790 {
+		t.Fatalf("RateMbps() after loss burst = %d, want 790", got)
+	}
+	if got := controller.effectiveCeilingMbps(); got != 1200 {
+		t.Fatalf("effectiveCeilingMbps() after loss burst = %d, want 1200", got)
+	}
+	if !controller.initialLossCeiling {
+		t.Fatal("initialLossCeiling = false, want true while still bounded by the probe-validated ceiling")
+	}
+}
+
+func TestBlastRateControllerHighCeilingRampsCleanFeedbackWithinTwoSeconds(t *testing.T) {
+	start := time.Unix(0, 0)
+	controller := newBlastRateController(700, 2250, start)
+
+	sentBytes := uint64(0)
+	receivedBytes := uint64(0)
+	for i := 1; i <= 15; i++ {
+		sentBytes += 25_000_000
+		receivedBytes += 25_000_000
+		packets := uint64(i) * 18_000
+		controller.Observe(start.Add(time.Duration(i)*blastRateFeedbackInterval), blastRateFeedback{
+			SentPayloadBytes:     sentBytes,
+			ReceivedPayloadBytes: receivedBytes,
+			ReceivedPackets:      packets,
+			MaxSeqPlusOne:        packets,
+		})
+	}
+
+	if got, wantMin := controller.RateMbps(), 2000; got < wantMin {
+		t.Fatalf("RateMbps() after high-ceiling clean ramp = %d, want >= %d", got, wantMin)
+	}
+}
+
 func TestBlastSendControlHighCeilingResumesProbingSoonAfterRepairPressure(t *testing.T) {
 	start := time.Unix(0, 0)
 	control := newBlastSendControl(1109, 2487, start)

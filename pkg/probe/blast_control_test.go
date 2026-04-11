@@ -56,6 +56,40 @@ func TestReadBlastSendControlEventsEmitsReceiverStats(t *testing.T) {
 	}
 }
 
+func TestReadBlastSendControlEventsPreservesStatsStripeID(t *testing.T) {
+	runID := [16]byte{1, 2, 3, 5}
+	statsPacket, err := MarshalPacket(Packet{
+		Version:  ProtocolVersion,
+		Type:     PacketTypeStats,
+		StripeID: 3,
+		RunID:    runID,
+		Payload: marshalBlastStatsPayload(blastReceiverStats{
+			ReceivedPayloadBytes: 1234,
+			ReceivedPackets:      5,
+			MaxSeqPlusOne:        6,
+			AckFloor:             4,
+		}),
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	batcher := &queuedControlBatcher{packets: [][]byte{statsPacket}}
+	events := make(chan blastSendControlEvent, 1)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	go readBlastSendControlEvents(ctx, batcher, runID, events)
+
+	event := receiveBlastSendControlEventForTest(t, events)
+	if event.typ != PacketTypeStats {
+		t.Fatalf("event type = %d, want stats", event.typ)
+	}
+	if event.stripe != 3 {
+		t.Fatalf("event stripe = %d, want 3", event.stripe)
+	}
+}
+
 func receiveBlastSendControlEventForTest(t *testing.T, events <-chan blastSendControlEvent) blastSendControlEvent {
 	t.Helper()
 	select {

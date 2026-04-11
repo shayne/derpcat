@@ -27,6 +27,9 @@ fi
 if [[ "${DERPCAT_TRACE_HANDOFF:-}" == "1" ]]; then
   remote_env+=(DERPCAT_TRACE_HANDOFF=1)
 fi
+if [[ "${DERPCAT_PROBE_TRACE:-}" == "1" ]]; then
+  remote_env+=(DERPCAT_PROBE_TRACE=1)
+fi
 
 parallel_args=()
 if [[ -n "${DERPCAT_PARALLEL_ARGS:-}" ]]; then
@@ -182,7 +185,7 @@ duration="${SECONDS}"
 
 wait "${listener_pid}"
 listener_pid=""
-remote "sed -n '1,200p' '${remote_base}.err'" >"${sender_log}"
+remote "cat '${remote_base}.err'" >"${sender_log}"
 
 local_sha="$(shasum -a 256 "${listener_out}" | awk '{print $1}')"
 local_size="$(wc -c <"${listener_out}" | tr -d '[:space:]')"

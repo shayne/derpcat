@@ -27,6 +27,9 @@ fi
 if [[ "${DERPCAT_TRACE_HANDOFF:-}" == "1" ]]; then
   remote_env+=(DERPCAT_TRACE_HANDOFF=1)
 fi
+if [[ "${DERPCAT_PROBE_TRACE:-}" == "1" ]]; then
+  remote_env+=(DERPCAT_PROBE_TRACE=1)
+fi
 
 parallel_args=()
 if [[ -n "${DERPCAT_PARALLEL_ARGS:-}" ]]; then
@@ -183,7 +186,7 @@ for _ in $(seq 1 400); do
   sleep 0.25
 done
 
-remote "sed -n '1,200p' '${remote_base}.err'" >"${listener_log}"
+remote "cat '${remote_base}.err'" >"${listener_log}"
 remote_sha="$(remote "sha256sum '${remote_base}.out' | awk '{print \$1}'")"
 remote_size="$(remote "wc -c < '${remote_base}.out'")"
 sender_trace="$(path_trace "${send_log}")"

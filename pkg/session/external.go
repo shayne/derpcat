@@ -113,6 +113,7 @@ type directUDPStart struct {
 	SectionAddrs  []string `json:"section_addrs,omitempty"`
 	ProbeRates    []int    `json:"probe_rates,omitempty"`
 	Stream        bool     `json:"stream,omitempty"`
+	StripedBlast  bool     `json:"striped_blast,omitempty"`
 }
 
 type directUDPRateProbeResult struct {

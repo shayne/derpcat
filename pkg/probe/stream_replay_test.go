@@ -2,6 +2,8 @@ package probe
 
 import (
 	"bytes"
+	"crypto/aes"
+	"crypto/cipher"
 	"errors"
 	"testing"
 )
@@ -48,6 +50,36 @@ func TestStreamReplayWindowEnforcesByteBudgetAndFreesAckedPackets(t *testing.T) 
 	}
 	if got := window.RetainedBytes(); got == 0 || got > uint64(headerLen+4) {
 		t.Fatalf("RetainedBytes() = %d, want within one-packet budget", got)
+	}
+}
+
+func TestStreamReplayWindowAEADAddDataPacketKeepsAllocationsBounded(t *testing.T) {
+	block, err := aes.NewCipher(make([]byte, 16))
+	if err != nil {
+		t.Fatalf("aes.NewCipher() error = %v", err)
+	}
+	aead, err := cipher.NewGCM(block)
+	if err != nil {
+		t.Fatalf("cipher.NewGCM() error = %v", err)
+	}
+	payload := bytes.Repeat([]byte("x"), 1384)
+	window := newStreamReplayWindow(testRunID(0x74), len(payload), 64<<20, aead)
+
+	if _, err := window.AddDataPacket(0, 0, 0, payload); err != nil {
+		t.Fatalf("warm AddDataPacket() error = %v", err)
+	}
+	window.AckFloor(1)
+
+	seq := uint64(1)
+	allocs := testing.AllocsPerRun(1000, func() {
+		if _, err := window.AddDataPacket(0, seq, seq*uint64(len(payload)), payload); err != nil {
+			t.Fatalf("AddDataPacket() error = %v", err)
+		}
+		window.AckFloor(seq + 1)
+		seq++
+	})
+	if allocs > 0 {
+		t.Fatalf("AddDataPacket() allocations = %.2f, want 0 steady-state allocations", allocs)
 	}
 }
 

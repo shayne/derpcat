@@ -2,6 +2,7 @@ package probe
 
 import (
 	"context"
+	"encoding/binary"
 	"errors"
 	"net"
 	"sync"
@@ -10,6 +11,7 @@ import (
 
 type blastSendControlEvent struct {
 	typ        PacketType
+	stripe     uint16
 	payload    []byte
 	err        error
 	receivedAt time.Time
@@ -74,11 +76,12 @@ func readBlastSendControlEvents(ctx context.Context, batcher packetBatcher, runI
 			if !ok || packetRunID != runID {
 				continue
 			}
+			stripeID := binary.BigEndian.Uint16(readBufs[i].Bytes[2:4])
 			switch packetType {
 			case PacketTypeRepairComplete, PacketTypeRepairRequest, PacketTypeStats:
 				eventPayload := append([]byte(nil), payload...)
 				select {
-				case events <- blastSendControlEvent{typ: packetType, payload: eventPayload, receivedAt: now}:
+				case events <- blastSendControlEvent{typ: packetType, stripe: stripeID, payload: eventPayload, receivedAt: now}:
 				case <-ctx.Done():
 					return
 				}

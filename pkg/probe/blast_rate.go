@@ -15,6 +15,7 @@ const (
 	blastRateRepairPressureEvery         = blastRateHoldAfterDecrease
 	blastPacerMaxScheduleDebt            = 250 * time.Millisecond
 	blastRateIncreaseMultiplier          = 1.08
+	blastRateHighIncreaseMultiplier      = 1.11
 	blastRateMediumIncreaseMultiplier    = 1.02
 	blastRateDecreaseMultiplier          = 0.67
 	blastRatePressureDecreaseMultiplier  = 0.80
@@ -46,6 +47,7 @@ type blastRateController struct {
 	rateMbps           int
 	ceilingMbps        int
 	lossCeilingMbps    int
+	initialLossCeiling bool
 	cleanAtLossCeiling int
 	last               blastRateFeedback
 	lastFeedbackAt     time.Time
@@ -69,31 +71,49 @@ type blastPacer struct {
 }
 
 func newBlastRateController(rateMbps int, ceilingMbps int, now time.Time) *blastRateController {
+	return newBlastRateControllerWithInitialLossCeiling(rateMbps, ceilingMbps, 0, now)
+}
+
+func newBlastRateControllerWithInitialLossCeiling(rateMbps int, ceilingMbps int, initialLossCeilingMbps int, now time.Time) *blastRateController {
 	if rateMbps < 0 {
 		rateMbps = 0
 	}
 	if ceilingMbps < rateMbps {
 		ceilingMbps = rateMbps
 	}
+	lossCeilingMbps := ceilingMbps
+	initialLossCeiling := false
+	if initialLossCeilingMbps > 0 && initialLossCeilingMbps < ceilingMbps {
+		if initialLossCeilingMbps < rateMbps {
+			initialLossCeilingMbps = rateMbps
+		}
+		lossCeilingMbps = initialLossCeilingMbps
+		initialLossCeiling = true
+	}
 	initialHold := blastRateHoldAfterDecrease
 	if ceilingMbps > 1500 && rateMbps >= 700 {
 		initialHold = blastRateHighCeilingInitialHold
 	}
 	return &blastRateController{
-		rateMbps:        rateMbps,
-		ceilingMbps:     ceilingMbps,
-		lossCeilingMbps: ceilingMbps,
-		lastFeedbackAt:  now,
-		holdIncrease:    now.Add(initialHold),
-		startupLossHold: now.Add(blastRateHoldAfterDecrease),
+		rateMbps:           rateMbps,
+		ceilingMbps:        ceilingMbps,
+		lossCeilingMbps:    lossCeilingMbps,
+		initialLossCeiling: initialLossCeiling,
+		lastFeedbackAt:     now,
+		holdIncrease:       now.Add(initialHold),
+		startupLossHold:    now.Add(blastRateHoldAfterDecrease),
 	}
 }
 
 func newBlastSendControl(rateMbps int, ceilingMbps int, now time.Time) *blastSendControl {
+	return newBlastSendControlWithInitialLossCeiling(rateMbps, ceilingMbps, 0, now)
+}
+
+func newBlastSendControlWithInitialLossCeiling(rateMbps int, ceilingMbps int, initialLossCeilingMbps int, now time.Time) *blastSendControl {
 	adaptive := ceilingMbps > 0
 	return &blastSendControl{
 		adaptive:   adaptive,
-		controller: newBlastRateController(rateMbps, ceilingMbps, now),
+		controller: newBlastRateControllerWithInitialLossCeiling(rateMbps, ceilingMbps, initialLossCeilingMbps, now),
 	}
 }
 
@@ -213,7 +233,14 @@ func (c *blastSendControl) ObserveReceiverStats(payload []byte, now time.Time) {
 	if !ok {
 		return
 	}
-	if stats.AckFloor > c.ackFloor {
+	c.ObserveReceiverStatsPayload(stats, now, true)
+}
+
+func (c *blastSendControl) ObserveReceiverStatsPayload(stats blastReceiverStats, now time.Time, updateAckFloor bool) {
+	if c == nil || c.controller == nil {
+		return
+	}
+	if updateAckFloor && stats.AckFloor > c.ackFloor {
 		c.ackFloor = stats.AckFloor
 	}
 	before := c.controller.RateMbps()
@@ -417,7 +444,7 @@ func (c *blastRateController) decreaseFromReplayPressure(now time.Time) {
 }
 
 func (c *blastRateController) decreaseFromRepairPressure(now time.Time) {
-	capLossCeiling := c == nil || c.ceilingMbps <= 1500
+	capLossCeiling := c == nil || c.ceilingMbps <= 1500 || c.initialLossCeiling
 	c.decreaseWithCeiling(now, true, capLossCeiling)
 }
 
@@ -478,7 +505,11 @@ func (c *blastRateController) increase() {
 		return
 	}
 	if c.rateMbps >= ceiling {
-		if !c.maybeReopenLossCeiling() {
+		reopened, rateSet := c.maybeReopenLossCeiling()
+		if !reopened {
+			return
+		}
+		if rateSet {
 			return
 		}
 		ceiling = c.effectiveCeilingMbps()
@@ -497,6 +528,9 @@ func (c *blastRateController) increase() {
 }
 
 func (c *blastRateController) increaseMultiplier() float64 {
+	if c != nil && c.ceilingMbps > 1500 {
+		return blastRateHighIncreaseMultiplier
+	}
 	if c != nil && c.ceilingMbps > 0 && c.ceilingMbps <= 700 {
 		return blastRateMediumIncreaseMultiplier
 	}
@@ -517,6 +551,11 @@ func (c *blastRateController) rememberLossCeiling(previous int, next int, force 
 	if c == nil || c.ceilingMbps <= 0 || previous <= 0 {
 		return
 	}
+	if !force && c.initialLossCeiling && c.lossCeilingMbps > 0 && previous <= c.lossCeilingMbps {
+		c.cleanAtLossCeiling = 0
+		return
+	}
+	c.initialLossCeiling = false
 	if c.lossCeilingMbps <= 0 || c.lossCeilingMbps > c.ceilingMbps {
 		c.lossCeilingMbps = c.ceilingMbps
 	}
@@ -540,13 +579,27 @@ func (c *blastRateController) rememberLossCeiling(previous int, next int, force 
 	c.cleanAtLossCeiling = 0
 }
 
-func (c *blastRateController) maybeReopenLossCeiling() bool {
+func (c *blastRateController) maybeReopenLossCeiling() (bool, bool) {
 	if c == nil || c.ceilingMbps <= 0 || c.lossCeilingMbps <= 0 || c.lossCeilingMbps >= c.ceilingMbps {
-		return false
+		return false, false
 	}
 	c.cleanAtLossCeiling++
 	if c.cleanAtLossCeiling < c.lossCeilingProbeCleanSamples() {
-		return false
+		return false, false
+	}
+	if c.initialLossCeiling && c.ceilingMbps > 1500 {
+		nextRate := int(float64(c.lossCeilingMbps)*1.25 + 0.5)
+		if nextRate <= c.rateMbps {
+			nextRate = c.rateMbps + 1
+		}
+		if nextRate > c.ceilingMbps {
+			nextRate = c.ceilingMbps
+		}
+		c.lossCeilingMbps = c.ceilingMbps
+		c.initialLossCeiling = false
+		c.cleanAtLossCeiling = 0
+		c.rateMbps = nextRate
+		return true, true
 	}
 	next := int(float64(c.lossCeilingMbps)*blastRateIncreaseMultiplier + 0.5)
 	if next <= c.lossCeilingMbps {
@@ -557,10 +610,13 @@ func (c *blastRateController) maybeReopenLossCeiling() bool {
 	}
 	c.lossCeilingMbps = next
 	c.cleanAtLossCeiling = 0
-	return true
+	return true, false
 }
 
 func (c *blastRateController) lossCeilingProbeCleanSamples() int {
+	if c != nil && c.initialLossCeiling {
+		return blastRateMediumLossCeilingProbeClean
+	}
 	if c != nil && c.ceilingMbps > 0 && c.ceilingMbps <= 700 {
 		return blastRateMediumLossCeilingProbeClean
 	}

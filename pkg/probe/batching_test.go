@@ -46,18 +46,36 @@ func TestSocketPacingRateBytesPerSecond(t *testing.T) {
 	}
 }
 
-func TestPacedBatchLimitTargetsQuarterMillisecondBursts(t *testing.T) {
-	if got := pacedBatchLimit(128, 1400, 800); got != 17 {
-		t.Fatalf("pacedBatchLimit(128, 1400, 800) = %d, want 17", got)
+func TestPacedBatchLimitTargetsMillisecondScaleBursts(t *testing.T) {
+	if got := pacedBatchLimit(128, 1400, 350); got != 62 {
+		t.Fatalf("pacedBatchLimit(128, 1400, 350) = %d, want 62", got)
 	}
-	if got := pacedBatchLimit(128, 1400, 2000); got != 44 {
-		t.Fatalf("pacedBatchLimit(128, 1400, 2000) = %d, want 44", got)
+	if got := pacedBatchLimit(128, 1400, 800); got != 128 {
+		t.Fatalf("pacedBatchLimit(128, 1400, 800) = %d, want capped max batch 128", got)
+	}
+	if got := pacedBatchLimit(128, 1400, 2000); got != 128 {
+		t.Fatalf("pacedBatchLimit(128, 1400, 2000) = %d, want capped max batch 128", got)
 	}
 	if got := pacedBatchLimit(128, 1400, 0); got != 128 {
 		t.Fatalf("pacedBatchLimit(128, 1400, 0) = %d, want max batch 128", got)
 	}
 	if got := pacedBatchLimit(128, 1400, 1); got != 1 {
 		t.Fatalf("pacedBatchLimit(128, 1400, 1) = %d, want at least one packet", got)
+	}
+}
+
+func TestPacedBatchLimitAllowsSmallBurstsForLargeChunkHighRatePaths(t *testing.T) {
+	if got := pacedBatchLimit(128, 64<<10, 150); got != 1 {
+		t.Fatalf("pacedBatchLimit(128, 64KiB, 150) = %d, want thresholded large-chunk path to stay at 1", got)
+	}
+	if got := pacedBatchLimit(128, 64<<10, 225); got != 3 {
+		t.Fatalf("pacedBatchLimit(128, 64KiB, 225) = %d, want 3", got)
+	}
+	if got := pacedBatchLimit(128, 64<<10, 300); got != 4 {
+		t.Fatalf("pacedBatchLimit(128, 64KiB, 300) = %d, want 4", got)
+	}
+	if got := pacedBatchLimit(128, 16<<10, 300); got != 4 {
+		t.Fatalf("pacedBatchLimit(128, 16KiB, 300) = %d, want small-chunk path to keep 2ms target and return 4", got)
 	}
 }
 

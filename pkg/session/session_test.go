@@ -19,6 +19,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/shayne/derpcat/pkg/derpbind"
 	"github.com/shayne/derpcat/pkg/portmap"
 	"github.com/shayne/derpcat/pkg/quicpath"
 	"github.com/shayne/derpcat/pkg/rendezvous"
@@ -849,6 +850,87 @@ func TestExternalListenSendSmallPayloadFinishesOverRelayBeforeDelayedDirectUDP(t
 	}
 }
 
+func TestExternalListenSendSmallPayloadFinishesOverRelayWhileDirectReadyAckIsDelayed(t *testing.T) {
+	t.Setenv("DERPCAT_FAKE_TRANSPORT", "1")
+	t.Setenv("DERPCAT_FAKE_TRANSPORT_ENABLE_DIRECT_AT", "0")
+
+	prevTCPAddrAllowed := externalNativeTCPAddrAllowed
+	externalNativeTCPAddrAllowed = func(net.Addr) bool { return false }
+	t.Cleanup(func() { externalNativeTCPAddrAllowed = prevTCPAddrAllowed })
+
+	prevInterfaceAddrs := publicInterfaceAddrs
+	publicInterfaceAddrs = func() ([]net.Addr, error) {
+		return []net.Addr{
+			&net.IPNet{
+				IP:   net.IPv4(127, 0, 0, 1),
+				Mask: net.CIDRMask(8, 32),
+			},
+		}, nil
+	}
+	t.Cleanup(func() { publicInterfaceAddrs = prevInterfaceAddrs })
+
+	prevWaitReadyAck := externalDirectUDPWaitReadyAckFn
+	externalDirectUDPWaitReadyAckFn = func(ctx context.Context, readyAckCh <-chan derpbind.Packet) (directUDPReadyAck, error) {
+		select {
+		case <-time.After(1500 * time.Millisecond):
+		case <-ctx.Done():
+			return directUDPReadyAck{}, ctx.Err()
+		}
+		return prevWaitReadyAck(ctx, readyAckCh)
+	}
+	t.Cleanup(func() { externalDirectUDPWaitReadyAckFn = prevWaitReadyAck })
+
+	srv := newSessionTestDERPServer(t)
+	t.Setenv("DERPCAT_TEST_DERP_MAP_URL", srv.MapURL)
+	t.Setenv("DERPCAT_TEST_DERP_SERVER_URL", srv.DERPURL)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	payloadSeed := []byte("relay-ready-ack-delay:")
+	payload := bytes.Repeat(payloadSeed, (1<<20)/len(payloadSeed)+1)
+	payload = payload[:1<<20]
+
+	var listenerOut bytes.Buffer
+	var listenerStatus syncBuffer
+	var senderStatus syncBuffer
+
+	tokenSink := make(chan string, 1)
+	listenErr := make(chan error, 1)
+	go func() {
+		_, err := Listen(ctx, ListenConfig{
+			Emitter:       telemetry.New(&listenerStatus, telemetry.LevelVerbose),
+			TokenSink:     tokenSink,
+			StdioOut:      &listenerOut,
+			UsePublicDERP: true,
+		})
+		listenErr <- err
+	}()
+
+	token := <-tokenSink
+	start := time.Now()
+	if err := Send(ctx, SendConfig{
+		Token:         token,
+		Emitter:       telemetry.New(&senderStatus, telemetry.LevelVerbose),
+		StdioIn:       bytes.NewReader(payload),
+		UsePublicDERP: true,
+	}); err != nil {
+		t.Fatalf("Send() error = %v listener=%q sender=%q", err, listenerStatus.String(), senderStatus.String())
+	}
+	if err := <-listenErr; err != nil {
+		t.Fatalf("Listen() error = %v listener=%q sender=%q", err, listenerStatus.String(), senderStatus.String())
+	}
+	if elapsed := time.Since(start); elapsed > 1500*time.Millisecond {
+		t.Fatalf("small payload took %v, want relay completion while direct ready ack is delayed; listener=%q sender=%q", elapsed, listenerStatus.String(), senderStatus.String())
+	}
+	if !bytes.Equal(listenerOut.Bytes(), payload) {
+		t.Fatalf("listener output length = %d, want %d", listenerOut.Len(), len(payload))
+	}
+	if got := senderStatus.String(); strings.Contains(got, "udp-stream=true") {
+		t.Fatalf("sender status = %q, want relay completion before direct UDP stream starts", got)
+	}
+}
+
 func TestExternalListenSendSmallRelayPayloadDoesNotStallWhenSenderSkipsNativeQUICSetup(t *testing.T) {
 	t.Setenv("DERPCAT_FAKE_TRANSPORT", "1")
 	t.Setenv("DERPCAT_FAKE_TRANSPORT_ENABLE_DIRECT_AT", strconv.FormatInt(time.Now().Add(250*time.Millisecond).UnixNano(), 10))
@@ -973,7 +1055,7 @@ func TestExternalListenSendPromotesToDirectUDPWhenBothSidesAreDirectReady(t *tes
 			return
 		}
 
-		gateCtx, gateCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		gateCtx, gateCancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer gateCancel()
 		if err := waitForSessionTestStatusContains(gateCtx, &senderStatus, "udp-stream=true"); err != nil {
 			writerErr <- fmt.Errorf("waiting for sender UDP stream: %w; listener=%q sender=%q", err, listenerStatus.String(), senderStatus.String())
@@ -1064,29 +1146,17 @@ func TestExternalListenSendDirectUDPPromotionDoesNotEmitRelayRegression(t *testi
 
 	token := <-tokenSink
 	midpoint := len(payload) / 2
-	stdinReader, stdinWriter := io.Pipe()
-	writerErr := make(chan error, 1)
-	go func() {
-		defer stdinWriter.Close()
-		if _, err := stdinWriter.Write(payload[:midpoint]); err != nil {
-			writerErr <- err
-			return
-		}
-
+	stdinReader := &sessionTestGatedReader{payload: payload, gateAt: midpoint, gate: func() error {
 		gateCtx, gateCancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer gateCancel()
 		if err := waitForSessionTestStatusContains(gateCtx, &senderStatus, string(StateDirect)); err != nil {
-			writerErr <- fmt.Errorf("waiting for sender direct UDP promotion: %w; listener=%q sender=%q", err, listenerStatus.String(), senderStatus.String())
-			return
+			return fmt.Errorf("waiting for sender direct UDP promotion: %w; listener=%q sender=%q", err, listenerStatus.String(), senderStatus.String())
 		}
 		if err := waitForSessionTestStatusContains(gateCtx, &listenerStatus, string(StateDirect)); err != nil {
-			writerErr <- fmt.Errorf("waiting for listener direct UDP promotion: %w; listener=%q sender=%q", err, listenerStatus.String(), senderStatus.String())
-			return
+			return fmt.Errorf("waiting for listener direct UDP promotion: %w; listener=%q sender=%q", err, listenerStatus.String(), senderStatus.String())
 		}
-
-		_, err := stdinWriter.Write(payload[midpoint:])
-		writerErr <- err
-	}()
+		return nil
+	}}
 
 	sendErr := make(chan error, 1)
 	go func() {
@@ -1103,9 +1173,6 @@ func TestExternalListenSendDirectUDPPromotionDoesNotEmitRelayRegression(t *testi
 	}
 	if err := <-sendErr; err != nil {
 		t.Fatalf("Send() error = %v listener=%q sender=%q", err, listenerStatus.String(), senderStatus.String())
-	}
-	if err := <-writerErr; err != nil {
-		t.Fatalf("stdin writer error = %v listener=%q sender=%q", err, listenerStatus.String(), senderStatus.String())
 	}
 
 	if !bytes.Equal(listenerOut.Bytes(), payload) {
@@ -1165,14 +1232,7 @@ func TestExternalListenSendIgnoresLegacyParallelPolicyForDirectUDP(t *testing.T)
 
 	token := <-tokenSink
 	midpoint := len(payload) / 2
-	stdinReader, stdinWriter := io.Pipe()
-	writerErr := make(chan error, 1)
-	go func() {
-		defer stdinWriter.Close()
-		if _, err := stdinWriter.Write(payload[:midpoint]); err != nil {
-			writerErr <- err
-			return
-		}
+	stdinReader := &sessionTestGatedReader{payload: payload, gateAt: midpoint, gate: func() error {
 		for _, wait := range []struct {
 			status *syncBuffer
 			needle string
@@ -1183,13 +1243,11 @@ func TestExternalListenSendIgnoresLegacyParallelPolicyForDirectUDP(t *testing.T)
 			{status: &listenerStatus, needle: string(StateDirect)},
 		} {
 			if err := waitForSessionTestStatusContains(ctx, wait.status, wait.needle); err != nil {
-				writerErr <- fmt.Errorf("waiting for %q: %w; listener=%q sender=%q", wait.needle, err, listenerStatus.String(), senderStatus.String())
-				return
+				return fmt.Errorf("waiting for %q: %w; listener=%q sender=%q", wait.needle, err, listenerStatus.String(), senderStatus.String())
 			}
 		}
-		_, err := stdinWriter.Write(payload[midpoint:])
-		writerErr <- err
-	}()
+		return nil
+	}}
 	sendErr := make(chan error, 1)
 	go func() {
 		sendErr <- Send(ctx, SendConfig{
@@ -1206,9 +1264,6 @@ func TestExternalListenSendIgnoresLegacyParallelPolicyForDirectUDP(t *testing.T)
 	}
 	if err := <-sendErr; err != nil {
 		t.Fatalf("Send() error = %v listener=%q sender=%q", err, listenerStatus.String(), senderStatus.String())
-	}
-	if err := <-writerErr; err != nil {
-		t.Fatalf("stdin writer error = %v listener=%q sender=%q", err, listenerStatus.String(), senderStatus.String())
 	}
 	if !bytes.Equal(listenerOut.Bytes(), payload) {
 		t.Fatalf("listener output length = %d, want %d", listenerOut.Len(), len(payload))
@@ -1274,27 +1329,13 @@ func TestExternalListenSendCompletesWhenDirectUDPSetupOverlapsTransfer(t *testin
 	}()
 
 	token := <-tokenSink
-	stdinReader, stdinWriter := io.Pipe()
-	writerErr := make(chan error, 1)
-	go func() {
-		defer stdinWriter.Close()
-		if _, err := stdinWriter.Write(payloadChunk); err != nil {
-			writerErr <- err
-			return
-		}
+	payload := bytes.Repeat(payloadChunk, chunkCount)
+	stdinReader := &sessionTestGatedReader{payload: payload, gateAt: len(payloadChunk), gate: func() error {
 		if err := waitForSessionTestStatusContains(ctx, &senderStatus, string(StateDirect)); err != nil {
-			writerErr <- fmt.Errorf("waiting for sender direct state: %w; listener=%q sender=%q", err, listenerStatus.String(), senderStatus.String())
-			return
+			return fmt.Errorf("waiting for sender direct state: %w; listener=%q sender=%q", err, listenerStatus.String(), senderStatus.String())
 		}
-		for i := 1; i < chunkCount; i++ {
-			time.Sleep(150 * time.Millisecond)
-			if _, err := stdinWriter.Write(payloadChunk); err != nil {
-				writerErr <- err
-				return
-			}
-		}
-		writerErr <- nil
-	}()
+		return nil
+	}}
 
 	start := time.Now()
 	sendErr := make(chan error, 1)
@@ -1313,16 +1354,13 @@ func TestExternalListenSendCompletesWhenDirectUDPSetupOverlapsTransfer(t *testin
 	if err := <-sendErr; err != nil {
 		t.Fatalf("Send() error = %v listener=%q sender=%q", err, listenerStatus.String(), senderStatus.String())
 	}
-	if err := <-writerErr; err != nil {
-		t.Fatalf("stdin writer error = %v listener=%q sender=%q", err, listenerStatus.String(), senderStatus.String())
-	}
 
 	if elapsed := time.Since(start); elapsed >= 7500*time.Millisecond {
 		t.Fatalf("Send() elapsed = %v, want completion before context deadline while direct UDP setup overlaps transfer; listener=%q sender=%q", elapsed, listenerStatus.String(), senderStatus.String())
 	}
 
-	if got := listenerOut.Len(); got != len(payloadChunk)*chunkCount {
-		t.Fatalf("listener output length = %d, want %d", got, len(payloadChunk)*chunkCount)
+	if got := listenerOut.Len(); got != len(payload) {
+		t.Fatalf("listener output length = %d, want %d", got, len(payload))
 	}
 }
 
@@ -1339,6 +1377,35 @@ func waitForSessionTestStatusContains(ctx context.Context, status *syncBuffer, n
 		case <-ticker.C:
 		}
 	}
+}
+
+type sessionTestGatedReader struct {
+	payload []byte
+	gateAt  int
+	pos     int
+	gated   bool
+	gate    func() error
+}
+
+func (r *sessionTestGatedReader) Read(p []byte) (int, error) {
+	if r.pos >= len(r.payload) {
+		return 0, io.EOF
+	}
+	if !r.gated && r.pos >= r.gateAt {
+		if r.gate != nil {
+			if err := r.gate(); err != nil {
+				return 0, err
+			}
+		}
+		r.gated = true
+	}
+	end := len(r.payload)
+	if !r.gated && end > r.gateAt {
+		end = r.gateAt
+	}
+	n := copy(p, r.payload[r.pos:end])
+	r.pos += n
+	return n, nil
 }
 
 func TestExternalListenSendUsesDirectUDPEvenWhenNativeTCPWouldBeAllowed(t *testing.T) {

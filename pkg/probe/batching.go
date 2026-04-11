@@ -12,9 +12,13 @@ import (
 )
 
 const (
-	probeTransportLegacy  = "legacy"
-	probeTransportBatched = "batched"
-	probeIdealBatchSize   = 128
+	probeTransportLegacy             = "legacy"
+	probeTransportBatched            = "batched"
+	probeIdealBatchSize              = 128
+	probePacedBatchTarget            = 2 * time.Millisecond
+	probeLargeChunkPacedBatchTarget  = 8 * time.Millisecond
+	probeLargeChunkPacedBatchBytes   = 32 << 10
+	probeLargeChunkPacedBatchMinMbps = 225
 )
 
 type TransportCaps struct {
@@ -251,15 +255,15 @@ func newConnectedUDPBatcher(conn net.PacketConn, peer net.Addr, requested string
 	if !ok || udpPeer == nil {
 		return nil, false
 	}
-	requested, err := normalizeTransport(requested)
-	if err != nil {
-		requested = probeTransportLegacy
-	}
 	if err := platformConnectUDP(udpConn, udpPeer); err != nil {
 		probeTracef("connected udp disabled local=%s peer=%s err=%v", udpConn.LocalAddr(), udpPeer, err)
 		return nil, false
 	}
 	probeTracef("connected udp enabled local=%s peer=%s", udpConn.LocalAddr(), udpPeer)
+	requested, err := normalizeTransport(requested)
+	if err != nil {
+		requested = probeTransportLegacy
+	}
 	return &connectedUDPBatcher{
 		conn: udpConn,
 		peer: cloneAddr(udpPeer),
@@ -395,8 +399,12 @@ func pacedBatchLimit(maxBatch int, chunkSize int, rateMbps int) int {
 	if maxBatch <= 1 || chunkSize <= 0 || rateMbps <= 0 {
 		return maxBatch
 	}
-	bytesPerQuarterMillisecond := rateMbps * 1000 * 1000 / 8 / 4000
-	limit := bytesPerQuarterMillisecond / chunkSize
+	target := probePacedBatchTarget
+	if chunkSize >= probeLargeChunkPacedBatchBytes && rateMbps >= probeLargeChunkPacedBatchMinMbps {
+		target = probeLargeChunkPacedBatchTarget
+	}
+	bytesPerTarget := int((float64(rateMbps*1000*1000) / 8.0) * target.Seconds())
+	limit := bytesPerTarget / chunkSize
 	if limit < 1 {
 		return 1
 	}
