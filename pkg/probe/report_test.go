@@ -55,7 +55,7 @@ func TestRunReportJSONEncodesCoreMetrics(t *testing.T) {
 		PeakGoodputMbps:   8.5,
 		Direct:            true,
 		FirstByteMS:       3,
-		FirstByteMeasured: true,
+		FirstByteMeasured: boolPtr(true),
 		LossRate:          0.02,
 		Retransmits:       1,
 		Success:           boolPtr(true),

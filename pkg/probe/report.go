@@ -17,7 +17,7 @@ type RunReport struct {
 	PeakGoodputMbps   float64       `json:"peak_goodput_mbps,omitempty"`
 	Direct            bool          `json:"direct"`
 	FirstByteMS       int64         `json:"first_byte_ms"`
-	FirstByteMeasured bool          `json:"first_byte_measured,omitempty"`
+	FirstByteMeasured *bool         `json:"first_byte_measured,omitempty"`
 	LossRate          float64       `json:"loss_rate"`
 	Retransmits       int64         `json:"retransmits"`
 	Success           *bool         `json:"success,omitempty"`
@@ -43,7 +43,7 @@ func (r RunReport) MarshalJSON() ([]byte, error) {
 		PeakGoodputMbps   float64        `json:"peak_goodput_mbps,omitempty"`
 		Direct            bool           `json:"direct"`
 		FirstByteMS       int64          `json:"first_byte_ms"`
-		FirstByteMeasured bool           `json:"first_byte_measured,omitempty"`
+		FirstByteMeasured *bool          `json:"first_byte_measured,omitempty"`
 		LossRate          float64        `json:"loss_rate"`
 		Retransmits       int64          `json:"retransmits"`
 		Success           *bool          `json:"success,omitempty"`

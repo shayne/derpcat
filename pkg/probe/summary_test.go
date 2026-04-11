@@ -12,7 +12,7 @@ func TestSummarizeRunsComputesWallPeakAverageAndFailures(t *testing.T) {
 			PeakGoodputMbps:   150,
 			DurationMS:        10,
 			FirstByteMS:       5,
-			FirstByteMeasured: true,
+			FirstByteMeasured: boolPtr(true),
 			Success:           boolPtr(true),
 		},
 		{
@@ -20,7 +20,7 @@ func TestSummarizeRunsComputesWallPeakAverageAndFailures(t *testing.T) {
 			PeakGoodputMbps:   175,
 			DurationMS:        15,
 			FirstByteMS:       0,
-			FirstByteMeasured: true,
+			FirstByteMeasured: boolPtr(true),
 			Success:           boolPtr(true),
 		},
 		{
@@ -34,7 +34,7 @@ func TestSummarizeRunsComputesWallPeakAverageAndFailures(t *testing.T) {
 			PeakGoodputMbps:   250,
 			DurationMS:        20,
 			FirstByteMS:       15,
-			FirstByteMeasured: true,
+			FirstByteMeasured: boolPtr(true),
 			Success:           boolPtr(true),
 		},
 		{
@@ -89,7 +89,7 @@ func TestSummarizeRunsCountsZeroFirstByteForSuccessfulRun(t *testing.T) {
 			GoodputMbps:       1,
 			DurationMS:        10,
 			FirstByteMS:       0,
-			FirstByteMeasured: true,
+			FirstByteMeasured: boolPtr(true),
 			Success:           boolPtr(true),
 		},
 	}
@@ -104,6 +104,26 @@ func TestSummarizeRunsCountsZeroFirstByteForSuccessfulRun(t *testing.T) {
 	}
 	if got, want := summary.AverageFirstByteMS, 0.0; !almostEqual(got, want) {
 		t.Fatalf("AverageFirstByteMS = %f, want %f", got, want)
+	}
+}
+
+func TestSummarizeRunsDoesNotCountExplicitFalseFirstByteMeasuredAsMeasured(t *testing.T) {
+	summary := SummarizeRuns([]RunReport{{
+		GoodputMbps:       1,
+		DurationMS:        10,
+		FirstByteMS:       42,
+		FirstByteMeasured: boolPtr(false),
+		Success:           boolPtr(true),
+	}})
+
+	if summary.SuccessCount != 1 {
+		t.Fatalf("SuccessCount = %d, want 1", summary.SuccessCount)
+	}
+	if summary.FirstByteCount != 0 {
+		t.Fatalf("FirstByteCount = %d, want 0", summary.FirstByteCount)
+	}
+	if summary.HasFirstByteMetrics {
+		t.Fatalf("HasFirstByteMetrics = true, want false")
 	}
 }
 
@@ -236,6 +256,24 @@ func TestCompareSummariesRejectsWallTimeAndFailureRegression(t *testing.T) {
 	}
 	if len(result.Reasons) != 2 {
 		t.Fatalf("Reasons = %#v, want 2 entries", result.Reasons)
+	}
+}
+
+func TestCompareSummariesRejectsZeroRunComparisons(t *testing.T) {
+	result := CompareSummaries(SeriesSummary{}, SeriesSummary{
+		RunCount:          1,
+		FailureRate:       0,
+		AverageWallTimeMS: 10,
+	})
+
+	if result.Comparable {
+		t.Fatalf("Comparable = true, want false")
+	}
+	if result.Reason == "" {
+		t.Fatalf("Reason = empty, want explanation")
+	}
+	if result.IsRegression {
+		t.Fatalf("IsRegression = true, want false")
 	}
 }
 

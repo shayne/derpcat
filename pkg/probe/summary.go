@@ -20,9 +20,11 @@ type RegressionResult struct {
 	Base SeriesSummary `json:"base"`
 	Head SeriesSummary `json:"head"`
 
+	Comparable            bool     `json:"comparable"`
 	WallTimeRegression    bool     `json:"wall_time_regression"`
 	FailureRateRegression bool     `json:"failure_rate_regression"`
 	IsRegression          bool     `json:"is_regression"`
+	Reason                string   `json:"reason,omitempty"`
 	WallTimeDeltaMS       float64  `json:"wall_time_delta_ms,omitempty"`
 	FailureRateDelta      float64  `json:"failure_rate_delta,omitempty"`
 	Reasons               []string `json:"reasons,omitempty"`
@@ -81,8 +83,10 @@ func CompareSummaries(base, head SeriesSummary) RegressionResult {
 		Head: head,
 	}
 	if base.RunCount == 0 || head.RunCount == 0 {
+		result.Reason = "summaries are not comparable when either side has zero runs"
 		return result
 	}
+	result.Comparable = true
 
 	if head.AverageWallTimeMS > base.AverageWallTimeMS {
 		result.WallTimeRegression = true
@@ -120,8 +124,8 @@ func hasMeasuredFirstByte(run RunReport) bool {
 	if !isRunSuccessful(run) {
 		return false
 	}
-	if run.FirstByteMeasured {
-		return true
+	if run.FirstByteMeasured != nil {
+		return *run.FirstByteMeasured
 	}
 	return run.FirstByteMS > 0
 }

@@ -329,8 +329,8 @@ func TestRunOrchestrateWgiperfReportsSuccessWithoutMeasuredFirstByte(t *testing.
 	if report.Success == nil || !*report.Success {
 		t.Fatalf("report.Success = %#v, want true", report.Success)
 	}
-	if report.FirstByteMeasured {
-		t.Fatalf("report.FirstByteMeasured = true, want false")
+	if report.FirstByteMeasured != nil {
+		t.Fatalf("report.FirstByteMeasured = %#v, want nil", report.FirstByteMeasured)
 	}
 	if report.FirstByteMS != 0 {
 		t.Fatalf("report.FirstByteMS = %d, want 0", report.FirstByteMS)
