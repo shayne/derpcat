@@ -15,6 +15,8 @@ var (
 	attachSessions = map[string]*attachSession{}
 )
 
+var attachDialHook func()
+
 type attachSession struct {
 	mailbox chan net.Conn
 	closed  chan struct{}
@@ -84,6 +86,14 @@ func ListenAttach(ctx context.Context, cfg AttachListenConfig) (*AttachListener,
 		return nil, err
 	}
 
+	go func() {
+		select {
+		case <-ctx.Done():
+			finishAttachSession(tok, session)
+		case <-session.closed:
+		}
+	}()
+
 	listener := &AttachListener{Token: tok}
 	listener.accept = func(ctx context.Context) (net.Conn, error) {
 		select {
@@ -112,6 +122,9 @@ func DialAttach(ctx context.Context, cfg AttachDialConfig) (net.Conn, error) {
 	}
 
 	left, right := net.Pipe()
+	if hook := attachDialHook; hook != nil {
+		hook()
+	}
 	select {
 	case session.mailbox <- right:
 		finishAttachSession(cfg.Token, session)

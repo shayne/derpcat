@@ -111,8 +111,8 @@ func TestListenAttachIsOneShot(t *testing.T) {
 
 	secondCtx, cancelSecond := context.WithTimeout(context.Background(), time.Second)
 	defer cancelSecond()
-	if _, err := DialAttach(secondCtx, AttachDialConfig{Token: listener.Token}); err == nil {
-		t.Fatal("second DialAttach() error = nil, want session to be one-shot")
+	if _, err := DialAttach(secondCtx, AttachDialConfig{Token: listener.Token}); !errors.Is(err, ErrUnknownSession) {
+		t.Fatalf("second DialAttach() error = %v, want ErrUnknownSession", err)
 	}
 }
 
@@ -155,13 +155,30 @@ func TestListenAttachCloseStopsBlockedAcceptAndDial(t *testing.T) {
 			t.Fatalf("ListenAttach() error = %v", err)
 		}
 
+		started := make(chan struct{}, 1)
+		previousHook := attachDialHook
+		attachDialHook = func() {
+			select {
+			case started <- struct{}{}:
+			default:
+			}
+		}
+		defer func() {
+			attachDialHook = previousHook
+		}()
+
 		errCh := make(chan error, 1)
 		go func() {
 			_, err := DialAttach(ctx, AttachDialConfig{Token: listener.Token})
 			errCh <- err
 		}()
 
-		time.Sleep(25 * time.Millisecond)
+		select {
+		case <-started:
+		case <-time.After(time.Second):
+			t.Fatal("DialAttach() did not reach the blocked handoff point")
+		}
+
 		if err := listener.Close(); err != nil {
 			t.Fatalf("Close() error = %v", err)
 		}
@@ -175,4 +192,25 @@ func TestListenAttachCloseStopsBlockedAcceptAndDial(t *testing.T) {
 			t.Fatal("DialAttach() did not return promptly")
 		}
 	})
+}
+
+func TestListenAttachContextCancelCleansUpSession(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+
+	listener, err := ListenAttach(ctx, AttachListenConfig{})
+	if err != nil {
+		t.Fatalf("ListenAttach() error = %v", err)
+	}
+
+	cancel()
+
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		if _, err := DialAttach(context.Background(), AttachDialConfig{Token: listener.Token}); errors.Is(err, ErrUnknownSession) {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	t.Fatal("DialAttach() still found session after context cancellation")
 }
