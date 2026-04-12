@@ -440,6 +440,8 @@ jobs:
       name: npm
       url: https://www.npmjs.com/package/derpcat
     steps:
+      - name: Checkout
+        uses: actions/checkout@v5
       - name: Download package artifact
         env:
           GITHUB_TOKEN: ${{ github.token }}
@@ -475,6 +477,8 @@ jobs:
       name: npm
       url: https://www.npmjs.com/package/derpcat
     steps:
+      - name: Checkout
+        uses: actions/checkout@v5
       - name: Download package artifact
         env:
           GITHUB_TOKEN: ${{ github.token }}
