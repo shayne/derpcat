@@ -355,10 +355,7 @@ func offerTransfer(ctx context.Context, cfg SendConfig, tx sendTransfer) error {
 	writeErr := writeTransfer(pipeWriter, tx, cfg.ProgressOutput, cfg.Stderr)
 	_ = pipeWriter.CloseWithError(writeErr)
 	offerErr := <-offerErrCh
-	if writeErr != nil {
-		return writeErr
-	}
-	return offerErr
+	return preferSessionPipeError(writeErr, offerErr)
 }
 
 func sendViaSession(ctx context.Context, cfg SendConfig, tx sendTransfer) error {
@@ -379,10 +376,7 @@ func sendViaSession(ctx context.Context, cfg SendConfig, tx sendTransfer) error 
 	writeErr := writeTransfer(pipeWriter, tx, cfg.ProgressOutput, cfg.Stderr)
 	_ = pipeWriter.CloseWithError(writeErr)
 	sendErr := <-sendErrCh
-	if writeErr != nil {
-		return writeErr
-	}
-	return sendErr
+	return preferSessionPipeError(writeErr, sendErr)
 }
 
 func readTransfer(r io.Reader, token string, stdout io.Writer, outputPath string, stderr, progressOut io.Writer) error {
@@ -479,4 +473,17 @@ func decodeDirectorySummary(raw []byte) (directorySummary, bool) {
 		return directorySummary{}, false
 	}
 	return meta, true
+}
+
+func preferSessionPipeError(pipeErr, sessionErr error) error {
+	if sessionErr == nil {
+		return pipeErr
+	}
+	if pipeErr == nil {
+		return sessionErr
+	}
+	if errors.Is(pipeErr, io.ErrClosedPipe) {
+		return sessionErr
+	}
+	return pipeErr
 }

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"io"
 	"net"
 	"os"
 	"path/filepath"
@@ -306,6 +307,63 @@ func TestReceiveDefaultsParallelPolicyForAttachDial(t *testing.T) {
 	}
 	if gotPolicy, want := got.ParallelPolicy, session.DefaultParallelPolicy(); gotPolicy != want {
 		t.Fatalf("got.ParallelPolicy = %#v, want %#v", gotPolicy, want)
+	}
+}
+
+func TestSendPrefersSessionErrorOverClosedPipe(t *testing.T) {
+	prev := derpholeSessionSend
+	t.Cleanup(func() {
+		derpholeSessionSend = prev
+	})
+
+	sentinel := errors.New("session send failed")
+	derpholeSessionSend = func(_ context.Context, cfg session.SendConfig) error {
+		if rc, ok := cfg.StdioIn.(io.ReadCloser); ok {
+			_ = rc.Close()
+		}
+		return sentinel
+	}
+
+	tok, err := token.Encode(token.Token{
+		Version:      token.SupportedVersion,
+		ExpiresUnix:  time.Now().Add(time.Hour).Unix(),
+		Capabilities: token.CapabilityStdio,
+	})
+	if err != nil {
+		t.Fatalf("token.Encode() error = %v", err)
+	}
+
+	err = Send(context.Background(), SendConfig{
+		Token: tok,
+		Stdin: bytes.NewReader(bytes.Repeat([]byte("x"), 1<<20)),
+	})
+	if !errors.Is(err, sentinel) {
+		t.Fatalf("Send() error = %v, want %v", err, sentinel)
+	}
+}
+
+func TestOfferPrefersSessionErrorOverClosedPipe(t *testing.T) {
+	prev := derpholeSessionOffer
+	t.Cleanup(func() {
+		derpholeSessionOffer = prev
+	})
+
+	sentinel := errors.New("session offer failed")
+	derpholeSessionOffer = func(_ context.Context, cfg session.OfferConfig) (string, error) {
+		if cfg.TokenSink != nil {
+			cfg.TokenSink <- "fake-token"
+		}
+		if rc, ok := cfg.StdioIn.(io.ReadCloser); ok {
+			_ = rc.Close()
+		}
+		return "", sentinel
+	}
+
+	err := Send(context.Background(), SendConfig{
+		Stdin: bytes.NewReader(bytes.Repeat([]byte("y"), 1<<20)),
+	})
+	if !errors.Is(err, sentinel) {
+		t.Fatalf("Send() error = %v, want %v", err, sentinel)
 	}
 }
 
