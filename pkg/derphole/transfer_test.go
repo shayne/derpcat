@@ -3,6 +3,8 @@ package derphole
 import (
 	"bytes"
 	"context"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -63,6 +65,46 @@ func TestReceiveAllocateIssuesTokenAndAcceptsText(t *testing.T) {
 	}
 	if got := recvOut.String(); got != "allocated flow" {
 		t.Fatalf("stdout = %q, want %q", got, "allocated flow")
+	}
+}
+
+func TestSendFileTransfersSuggestedFilename(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	srcDir := t.TempDir()
+	srcPath := filepath.Join(srcDir, "hello.txt")
+	if err := os.WriteFile(srcPath, []byte("hello file"), 0o600); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+
+	recvDir := t.TempDir()
+	var sendErr bytes.Buffer
+	sendDone := make(chan error, 1)
+	go func() {
+		sendDone <- Send(ctx, SendConfig{
+			What:   srcPath,
+			Stderr: &sendErr,
+		})
+	}()
+
+	token := waitForTokenLine(t, &sendErr)
+	if err := Receive(ctx, ReceiveConfig{
+		Token:      token,
+		OutputPath: recvDir,
+	}); err != nil {
+		t.Fatalf("Receive() error = %v", err)
+	}
+
+	got, err := os.ReadFile(filepath.Join(recvDir, "hello.txt"))
+	if err != nil {
+		t.Fatalf("ReadFile() error = %v", err)
+	}
+	if string(got) != "hello file" {
+		t.Fatalf("received = %q, want %q", got, "hello file")
+	}
+	if err := <-sendDone; err != nil {
+		t.Fatalf("Send() error = %v", err)
 	}
 }
 

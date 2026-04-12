@@ -11,7 +11,8 @@ import (
 )
 
 type receiveFlags struct {
-	ForceRelay bool `flag:"force-relay" help:"Disable direct probing"`
+	ForceRelay bool   `flag:"force-relay" help:"Disable direct probing"`
+	Output     string `flag:"output" short:"o" help:"Write a received file to this path or directory"`
 }
 
 type receiveArgs struct {
@@ -70,6 +71,7 @@ func runReceive(args []string, level telemetry.Level, stdin io.Reader, stdout, s
 	if err := runReceiveTransfer(commandContext(), pkgderphole.ReceiveConfig{
 		Token:         token,
 		Allocate:      token == "",
+		OutputPath:    parsed.SubCommandFlags.Output,
 		Stdin:         stdin,
 		Stdout:        stdout,
 		Stderr:        stderr,

@@ -8,6 +8,7 @@ import (
 	"io"
 	"net"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/shayne/derpcat/pkg/derphole/protocol"
@@ -30,6 +31,7 @@ type SendConfig struct {
 type ReceiveConfig struct {
 	Token         string
 	Allocate      bool
+	OutputPath    string
 	Stdin         io.Reader
 	Stdout        io.Writer
 	Stderr        io.Writer
@@ -40,9 +42,12 @@ type ReceiveConfig struct {
 }
 
 func Send(ctx context.Context, cfg SendConfig) error {
-	header, body, err := prepareSendTransfer(cfg)
+	header, body, cleanup, err := prepareSendTransfer(cfg)
 	if err != nil {
 		return err
+	}
+	if cleanup != nil {
+		defer cleanup()
 	}
 
 	if cfg.Token == "" {
@@ -108,7 +113,7 @@ func Receive(ctx context.Context, cfg ReceiveConfig) error {
 		}
 		defer conn.Close()
 
-		return readTransfer(conn, listener.Token, cfg.Stdout)
+		return readTransfer(conn, listener.Token, cfg.Stdout, cfg.OutputPath)
 	}
 
 	token := cfg.Token
@@ -134,28 +139,37 @@ func Receive(ctx context.Context, cfg ReceiveConfig) error {
 	}
 	defer conn.Close()
 
-	return readTransfer(conn, token, cfg.Stdout)
+	return readTransfer(conn, token, cfg.Stdout, cfg.OutputPath)
 }
 
-func prepareSendTransfer(cfg SendConfig) (protocol.Header, io.Reader, error) {
+func prepareSendTransfer(cfg SendConfig) (protocol.Header, io.Reader, func() error, error) {
 	if cfg.Text != "" {
-		return protocol.Header{Version: 1, Kind: protocol.KindText}, strings.NewReader(cfg.Text), nil
+		return protocol.Header{Version: 1, Kind: protocol.KindText}, strings.NewReader(cfg.Text), nil, nil
 	}
 	if cfg.What != "" {
 		if info, err := os.Stat(cfg.What); err == nil {
 			if info.IsDir() {
-				return protocol.Header{}, nil, errors.New("directory transfer is not implemented yet")
+				return protocol.Header{}, nil, nil, errors.New("directory transfer is not implemented yet")
 			}
-			return protocol.Header{}, nil, errors.New("file transfer is not implemented yet")
+			file, err := os.Open(cfg.What)
+			if err != nil {
+				return protocol.Header{}, nil, nil, err
+			}
+			return protocol.Header{
+				Version: 1,
+				Kind:    protocol.KindFile,
+				Name:    filepath.Base(cfg.What),
+				Size:    info.Size(),
+			}, file, file.Close, nil
 		} else if !errors.Is(err, os.ErrNotExist) {
-			return protocol.Header{}, nil, err
+			return protocol.Header{}, nil, nil, err
 		}
-		return protocol.Header{Version: 1, Kind: protocol.KindText}, strings.NewReader(cfg.What), nil
+		return protocol.Header{Version: 1, Kind: protocol.KindText}, strings.NewReader(cfg.What), nil, nil
 	}
 	if cfg.Stdin != nil {
-		return protocol.Header{Version: 1, Kind: protocol.KindText}, cfg.Stdin, nil
+		return protocol.Header{Version: 1, Kind: protocol.KindText}, cfg.Stdin, nil, nil
 	}
-	return protocol.Header{Version: 1, Kind: protocol.KindText}, strings.NewReader(""), nil
+	return protocol.Header{Version: 1, Kind: protocol.KindText}, strings.NewReader(""), nil, nil
 }
 
 func writeTransfer(w io.Writer, header protocol.Header, body io.Reader) error {
@@ -166,7 +180,7 @@ func writeTransfer(w io.Writer, header protocol.Header, body io.Reader) error {
 	return err
 }
 
-func readTransfer(conn net.Conn, token string, stdout io.Writer) error {
+func readTransfer(conn net.Conn, token string, stdout io.Writer, outputPath string) error {
 	if stdout == nil {
 		stdout = io.Discard
 	}
@@ -185,10 +199,35 @@ func readTransfer(conn net.Conn, token string, stdout io.Writer) error {
 		_, err = io.Copy(stdout, reader)
 		return err
 	case protocol.KindFile:
-		return errors.New("file transfer is not implemented yet")
+		return receiveFile(reader, header, outputPath)
 	case protocol.KindDirectoryTar:
 		return errors.New("directory transfer is not implemented yet")
 	default:
 		return fmt.Errorf("unsupported derphole transfer kind %q", header.Kind)
 	}
+}
+
+func receiveFile(r io.Reader, header protocol.Header, outputPath string) error {
+	target, err := ResolveOutputPath(outputPath, header.Name)
+	if err != nil {
+		return err
+	}
+	if dir := filepath.Dir(target); dir != "." {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return err
+		}
+	}
+
+	f, err := os.Create(target)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+
+	if header.Size > 0 {
+		_, err = io.CopyN(f, r, header.Size)
+		return err
+	}
+	_, err = io.Copy(f, r)
+	return err
 }
