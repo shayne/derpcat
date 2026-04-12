@@ -13,6 +13,7 @@ import (
 const (
 	CapabilityStdio uint32 = 1 << iota
 	CapabilityShare
+	CapabilityAttach
 )
 
 type Token struct {

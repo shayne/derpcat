@@ -175,6 +175,30 @@ func TestEncodeDecodeRoundTripPublicShareToken(t *testing.T) {
 	}
 }
 
+func TestEncodeDecodeRoundTripAttachToken(t *testing.T) {
+	now := time.Now()
+	tok := Token{
+		Version:      SupportedVersion,
+		SessionID:    [16]byte{9, 8, 7, 6},
+		ExpiresUnix:  now.Add(time.Hour).Unix(),
+		BearerSecret: [32]byte{6, 7, 8, 9},
+		Capabilities: CapabilityAttach,
+	}
+
+	encoded, err := Encode(tok)
+	if err != nil {
+		t.Fatalf("Encode() error = %v", err)
+	}
+	decoded, err := Decode(encoded, now)
+	if err != nil {
+		t.Fatalf("Decode() error = %v", err)
+	}
+
+	if decoded.Capabilities != CapabilityAttach {
+		t.Fatalf("Capabilities = %08b, want %08b", decoded.Capabilities, CapabilityAttach)
+	}
+}
+
 func TestEncodeDecodeRoundTripWithNativeTCPBootstrap(t *testing.T) {
 	tok := Token{
 		Version:         SupportedVersion,

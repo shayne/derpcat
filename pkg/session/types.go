@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"net"
 	"sync"
 
 	"github.com/shayne/derpcat/pkg/telemetry"
@@ -18,10 +19,24 @@ type ListenConfig struct {
 	UsePublicDERP bool
 }
 
+type AttachListenConfig struct {
+	Emitter       *telemetry.Emitter
+	ForceRelay    bool
+	UsePublicDERP bool
+}
+
 type SendConfig struct {
 	Token          string
 	Emitter        *telemetry.Emitter
 	StdioIn        io.Reader
+	ForceRelay     bool
+	UsePublicDERP  bool
+	ParallelPolicy ParallelPolicy
+}
+
+type AttachDialConfig struct {
+	Token          string
+	Emitter        *telemetry.Emitter
 	ForceRelay     bool
 	UsePublicDERP  bool
 	ParallelPolicy ParallelPolicy
@@ -45,6 +60,12 @@ type OpenConfig struct {
 	ParallelPolicy ParallelPolicy
 }
 
+type AttachListener struct {
+	Token  string
+	accept func(context.Context) (net.Conn, error)
+	close  func() error
+}
+
 type State string
 
 const (
@@ -60,6 +81,20 @@ func emitStatus(emitter *telemetry.Emitter, state State) {
 	if emitter != nil {
 		emitter.Status(string(state))
 	}
+}
+
+func (l *AttachListener) Accept(ctx context.Context) (net.Conn, error) {
+	if l == nil || l.accept == nil {
+		return nil, net.ErrClosed
+	}
+	return l.accept(ctx)
+}
+
+func (l *AttachListener) Close() error {
+	if l == nil || l.close == nil {
+		return net.ErrClosed
+	}
+	return l.close()
 }
 
 type transportPathEmitter struct {
