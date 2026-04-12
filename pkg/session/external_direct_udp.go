@@ -1938,6 +1938,12 @@ func externalDirectUDPSelectRemoteAddrs(ctx context.Context, conns []net.PacketC
 	if emitter != nil {
 		emitter.Debug("udp-selected-addrs=" + strings.Join(selected, ","))
 	}
+	if externalDirectUDPSelectedAddrCount(selected) == 0 && peer == nil {
+		if emitter != nil {
+			emitter.Debug("udp-final-addrs=" + strings.Join(selected, ","))
+		}
+		return selected
+	}
 	final := externalDirectUDPFillMissingSelectedAddrs(selected, fallback)
 	if emitter != nil {
 		emitter.Debug("udp-final-addrs=" + strings.Join(final, ","))

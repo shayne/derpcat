@@ -730,6 +730,88 @@ func TestSendExternalViaRelayPrefixThenDirectUDPCompletesSmallPayloadBeforeSlowD
 	}
 }
 
+func TestSendExternalViaRelayPrefixThenDirectUDPFallsBackToRelayWhenDirectPrepareHasNoVerifiedAddrs(t *testing.T) {
+	srv := newSessionTestDERPServer(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	node := srv.Map.Regions[1].Nodes[0]
+	listenerDERP, err := derpbind.NewClient(ctx, node, srv.DERPURL)
+	if err != nil {
+		t.Fatalf("NewClient(listener) error = %v", err)
+	}
+	defer listenerDERP.Close()
+	senderDERP, err := derpbind.NewClient(ctx, node, srv.DERPURL)
+	if err != nil {
+		t.Fatalf("NewClient(sender) error = %v", err)
+	}
+	defer senderDERP.Close()
+
+	relayFrames, unsubscribe := listenerDERP.SubscribeLossless(func(pkt derpbind.Packet) bool {
+		return pkt.From == senderDERP.PublicKey() && externalRelayPrefixDERPFrameKindOf(pkt.Payload) != 0
+	})
+	defer unsubscribe()
+
+	payload := bytes.Repeat([]byte("relay-fallback-after-direct-prepare-error"), 1<<14)
+
+	var out bytes.Buffer
+	receiveErrCh := make(chan error, 1)
+	go func() {
+		rx := newExternalHandoffReceiver(&out, externalHandoffMaxUnackedBytes)
+		receiveErrCh <- receiveExternalHandoffDERP(ctx, listenerDERP, senderDERP.PublicKey(), rx, relayFrames, nil)
+	}()
+
+	prevWaitDirectUDPAddr := waitExternalDirectUDPAddr
+	waitExternalUDPAddr := func(context.Context, net.PacketConn, *transport.Manager) (net.Addr, error) {
+		return &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 12345}, nil
+	}
+	waitExternalDirectUDPAddr = waitExternalUDPAddr
+	t.Cleanup(func() { waitExternalDirectUDPAddr = prevWaitDirectUDPAddr })
+
+	prevPrepareDirectUDPSend := externalPrepareDirectUDPSendFn
+	externalPrepareDirectUDPSendFn = func(ctx context.Context, tok token.Token, derpClient *derpbind.Client, listenerDERP key.NodePublic, peerAddr net.Addr, probeConns []net.PacketConn, remoteCandidates []net.Addr, readyAckCh <-chan derpbind.Packet, startAckCh <-chan derpbind.Packet, rateProbeCh <-chan derpbind.Packet, cfg SendConfig) (externalDirectUDPSendPlan, error) {
+		return externalDirectUDPSendPlan{}, errors.New("direct UDP established without usable remote addresses")
+	}
+	t.Cleanup(func() { externalPrepareDirectUDPSendFn = prevPrepareDirectUDPSend })
+
+	prevExecutePreparedDirectUDPSend := externalExecutePreparedDirectUDPSendFn
+	directInvoked := false
+	externalExecutePreparedDirectUDPSendFn = func(ctx context.Context, src io.Reader, plan externalDirectUDPSendPlan, cfg SendConfig, metrics *externalTransferMetrics) error {
+		directInvoked = true
+		return nil
+	}
+	t.Cleanup(func() { externalExecutePreparedDirectUDPSendFn = prevExecutePreparedDirectUDPSend })
+
+	var status bytes.Buffer
+	err = sendExternalViaRelayPrefixThenDirectUDP(ctx, externalRelayPrefixSendConfig{
+		src:          bytes.NewReader(payload),
+		decision:     rendezvous.Decision{Accept: &rendezvous.AcceptInfo{}},
+		derpClient:   senderDERP,
+		listenerDERP: listenerDERP.PublicKey(),
+		cfg:          SendConfig{Emitter: telemetry.New(&status, telemetry.LevelVerbose)},
+	})
+	if err != nil {
+		t.Fatalf("sendExternalViaRelayPrefixThenDirectUDP() error = %v", err)
+	}
+	if directInvoked {
+		t.Fatal("sendExternalViaRelayPrefixThenDirectUDP() invoked direct send after prepare error")
+	}
+	if err := <-receiveErrCh; err != nil {
+		t.Fatalf("receiveExternalHandoffDERP() error = %v", err)
+	}
+	if !bytes.Equal(out.Bytes(), payload) {
+		t.Fatalf("receiver output length = %d, want %d", out.Len(), len(payload))
+	}
+	for _, needle := range []string{
+		"udp-handoff-send-prepare-error=direct UDP established without usable remote addresses",
+		"udp-handoff-finished-on-relay=true",
+	} {
+		if !strings.Contains(status.String(), needle) {
+			t.Fatalf("status output missing %q in %q", needle, status.String())
+		}
+	}
+}
+
 func TestSendExternalViaRelayPrefixThenDirectUDPPausesRelayBeforeDirectPrep(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
 	defer cancel()
@@ -2011,6 +2093,27 @@ func TestExternalDirectUDPSelectRemoteAddrsFallsBackWhenObservationIsEmpty(t *te
 	want := []string{"198.51.100.10:40000", "198.51.100.10:40001"}
 	if fmt.Sprint(got) != fmt.Sprint(want) {
 		t.Fatalf("externalDirectUDPSelectRemoteAddrs(empty observation) = %v, want %v", got, want)
+	}
+}
+
+func TestExternalDirectUDPSelectRemoteAddrsLeavesAllLanesBlankWithoutObservationOrPeer(t *testing.T) {
+	origObserve := externalDirectUDPObservePunchAddrsByConn
+	t.Cleanup(func() { externalDirectUDPObservePunchAddrsByConn = origObserve })
+
+	externalDirectUDPObservePunchAddrsByConn = func(context.Context, []net.PacketConn, time.Duration) [][]net.Addr {
+		return [][]net.Addr{{}, {}}
+	}
+
+	got := externalDirectUDPSelectRemoteAddrs(
+		context.Background(),
+		make([]net.PacketConn, 2),
+		parseCandidateStrings([]string{"98.238.217.49:60709", "98.238.217.49:60710"}),
+		nil,
+		nil,
+	)
+	want := []string{"", ""}
+	if fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Fatalf("externalDirectUDPSelectRemoteAddrs(unverified fallback) = %v, want %v", got, want)
 	}
 }
 
