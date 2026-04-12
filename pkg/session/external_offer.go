@@ -2,8 +2,10 @@ package session
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net"
+	"strconv"
 	"time"
 
 	"github.com/shayne/derpcat/pkg/derpbind"
@@ -37,6 +39,9 @@ func offerExternal(ctx context.Context, cfg OfferConfig) (string, error) {
 			return tok, ctx.Err()
 		}
 	}
+	if cfg.Emitter != nil {
+		cfg.Emitter.Debug("offer-derp-public=" + session.derp.PublicKey().String())
+	}
 
 	for {
 		pkt, err := receiveSubscribedPacket(ctx, claimCh)
@@ -50,10 +55,16 @@ func offerExternal(ctx context.Context, cfg OfferConfig) (string, error) {
 		if err != nil || env.Type != envelopeClaim || env.Claim == nil {
 			continue
 		}
+		if cfg.Emitter != nil {
+			cfg.Emitter.Debug("offer-claim-received candidate_count=" + strconv.Itoa(len(env.Claim.Candidates)))
+		}
 
 		peerDERP := key.NodePublicFromRaw32(mem.B(env.Claim.DERPPublic[:]))
 		decision, _ := session.gate.Accept(time.Now(), *env.Claim)
 		if !decision.Accepted {
+			if cfg.Emitter != nil {
+				cfg.Emitter.Debug("offer-decision-send accepted=false")
+			}
 			if err := sendEnvelope(ctx, session.derp, peerDERP, envelope{Type: envelopeDecision, Decision: &decision}); err != nil {
 				return tok, err
 			}
@@ -68,7 +79,7 @@ func offerExternal(ctx context.Context, cfg OfferConfig) (string, error) {
 		portmaps := []publicPortmap{publicSessionPortmap(session)}
 		cleanupProbeConns := func() {}
 		if !cfg.ForceRelay {
-			probeConn, probeConns, portmaps, cleanupProbeConns, err = externalAcceptedDirectUDPSet(cfg.Emitter)
+			probeConn, probeConns, portmaps, cleanupProbeConns, err = externalAcceptedDirectUDPSet(session.probeConn, publicSessionPortmap(session), cfg.Emitter)
 			if err != nil {
 				return tok, err
 			}
@@ -128,6 +139,9 @@ func offerExternal(ctx context.Context, cfg OfferConfig) (string, error) {
 		if err := sendEnvelope(ctx, session.derp, peerDERP, envelope{Type: envelopeDecision, Decision: &decision}); err != nil {
 			return tok, err
 		}
+		if cfg.Emitter != nil {
+			cfg.Emitter.Debug("offer-decision-send accepted=true candidate_count=" + strconv.Itoa(len(decision.Accept.Candidates)))
+		}
 
 		sendCfg := SendConfig{
 			Emitter:        cfg.Emitter,
@@ -183,6 +197,9 @@ func receiveExternal(ctx context.Context, cfg ReceiveConfig) error {
 	if listenerDERP.IsZero() {
 		return ErrUnknownSession
 	}
+	if cfg.Emitter != nil {
+		cfg.Emitter.Debug("receive-listener-derp-public=" + listenerDERP.String())
+	}
 
 	dm, err := derpbind.FetchMap(ctx, publicDERPMapURL())
 	if err != nil {
@@ -234,7 +251,14 @@ func receiveExternal(ctx context.Context, cfg ReceiveConfig) error {
 
 	var localCandidates []string
 	if !cfg.ForceRelay {
+		if cfg.Emitter != nil {
+			cfg.Emitter.Debug("receive-direct-candidate-gather-start")
+		}
+		candidateStart := time.Now()
 		localCandidates = externalDirectUDPFlattenCandidateSets(externalDirectUDPCandidateSets(ctx, probeConns, dm, portmaps))
+		if cfg.Emitter != nil {
+			cfg.Emitter.Debug("receive-direct-candidate-gather-finish count=" + strconv.Itoa(len(localCandidates)) + " elapsed_ms=" + strconv.FormatInt(time.Since(candidateStart).Milliseconds(), 10))
+		}
 	}
 	claim := rendezvous.Claim{
 		Version:      tok.Version,
@@ -246,9 +270,20 @@ func receiveExternal(ctx context.Context, cfg ReceiveConfig) error {
 		Capabilities: tok.Capabilities,
 	}
 	claim.BearerMAC = rendezvous.ComputeBearerMAC(tok.BearerSecret, claim)
-	decision, err := sendClaimAndReceiveDecision(ctx, derpClient, listenerDERP, claim)
+	if cfg.Emitter != nil {
+		if payload, err := json.Marshal(envelope{Type: envelopeClaim, Claim: &claim}); err == nil {
+			cfg.Emitter.Debug("receive-claim-bytes=" + strconv.Itoa(len(payload)))
+		}
+	}
+	if cfg.Emitter != nil {
+		cfg.Emitter.Debug("receive-claim-start")
+	}
+	decision, err := sendClaimAndReceiveDecisionWithTelemetry(ctx, derpClient, listenerDERP, claim, cfg.Emitter, "receive-")
 	if err != nil {
 		return err
+	}
+	if cfg.Emitter != nil {
+		cfg.Emitter.Debug("receive-claim-finish")
 	}
 	if !decision.Accepted {
 		if decision.Reject != nil {

@@ -106,6 +106,26 @@ func (c *transientNoBufferPacketConn) WriteTo(p []byte, addr net.Addr) (int, err
 	return c.PacketConn.WriteTo(p, addr)
 }
 
+type stubExternalDirectUDPPacketConn struct{}
+
+func (stubExternalDirectUDPPacketConn) ReadFrom([]byte) (int, net.Addr, error) {
+	return 0, nil, errors.New("unexpected ReadFrom")
+}
+
+func (stubExternalDirectUDPPacketConn) WriteTo([]byte, net.Addr) (int, error) {
+	return 0, errors.New("unexpected WriteTo")
+}
+
+func (stubExternalDirectUDPPacketConn) Close() error { return nil }
+
+func (stubExternalDirectUDPPacketConn) LocalAddr() net.Addr {
+	return &net.UDPAddr{IP: net.IPv4zero, Port: 0}
+}
+
+func (stubExternalDirectUDPPacketConn) SetDeadline(time.Time) error      { return nil }
+func (stubExternalDirectUDPPacketConn) SetReadDeadline(time.Time) error  { return nil }
+func (stubExternalDirectUDPPacketConn) SetWriteDeadline(time.Time) error { return nil }
+
 func TestWaitForPeerAckWithTimeoutReturnsWhenPeerNeverAcks(t *testing.T) {
 	ackCh := make(chan derpbind.Packet)
 	start := time.Now()
@@ -1561,56 +1581,64 @@ func TestExternalDirectUDPConnsPrimeBlastSockets(t *testing.T) {
 	}
 }
 
-func TestExternalAcceptedDirectUDPSetUsesDedicatedAllocatorOutput(t *testing.T) {
+func TestExternalAcceptedDirectUDPSetReusesBaseProbeSocketForLaneZero(t *testing.T) {
 	oldConnsFn := externalDirectUDPConnsFn
 	defer func() { externalDirectUDPConnsFn = oldConnsFn }()
 
-	connA, err := net.ListenPacket("udp4", "127.0.0.1:0")
+	baseConn, err := net.ListenPacket("udp4", "127.0.0.1:0")
 	if err != nil {
-		t.Fatalf("ListenPacket(connA) error = %v", err)
+		t.Fatalf("ListenPacket(baseConn) error = %v", err)
 	}
-	defer connA.Close()
-	connB, err := net.ListenPacket("udp4", "127.0.0.1:0")
+	defer baseConn.Close()
+	extraConn, err := net.ListenPacket("udp4", "127.0.0.1:0")
 	if err != nil {
-		t.Fatalf("ListenPacket(connB) error = %v", err)
+		t.Fatalf("ListenPacket(extraConn) error = %v", err)
 	}
-	defer connB.Close()
+	defer extraConn.Close()
 
-	pmA := newBoundPublicPortmap(connA, nil)
-	if pmA != nil {
-		defer pmA.Close()
-	}
-	pmB := newBoundPublicPortmap(connB, nil)
-	if pmB != nil {
-		defer pmB.Close()
-	}
+	basePM := &sessionLifecyclePortmap{}
+	extraPM := &sessionLifecyclePortmap{}
 
 	var calls int
+	cleanupCalls := 0
 	externalDirectUDPConnsFn = func(_ net.PacketConn, _ publicPortmap, parallel int, emitter *telemetry.Emitter) ([]net.PacketConn, []publicPortmap, func(), error) {
 		calls++
-		if parallel != externalDirectUDPParallelism {
-			t.Fatalf("parallel = %d, want %d", parallel, externalDirectUDPParallelism)
+		if parallel != externalDirectUDPParallelism-1 {
+			t.Fatalf("parallel = %d, want %d", parallel, externalDirectUDPParallelism-1)
 		}
-		return []net.PacketConn{connA, connB}, []publicPortmap{pmA, pmB}, func() {}, nil
+		return []net.PacketConn{extraConn}, []publicPortmap{extraPM}, func() {
+			cleanupCalls++
+			_ = extraPM.Close()
+		}, nil
 	}
 
-	probeConn, probeConns, portmaps, cleanup, err := externalAcceptedDirectUDPSet(nil)
+	probeConn, probeConns, portmaps, cleanup, err := externalAcceptedDirectUDPSet(baseConn, basePM, nil)
 	if err != nil {
 		t.Fatalf("externalAcceptedDirectUDPSet() error = %v", err)
 	}
-	defer cleanup()
 
 	if calls != 1 {
 		t.Fatalf("allocator calls = %d, want 1", calls)
 	}
-	if probeConn != connA {
-		t.Fatalf("probeConn = %v, want first dedicated conn %v", probeConn, connA)
+	if probeConn != baseConn {
+		t.Fatalf("probeConn = %v, want base conn %v", probeConn, baseConn)
 	}
-	if len(probeConns) != 2 || probeConns[0] != connA || probeConns[1] != connB {
-		t.Fatalf("probeConns = %v, want dedicated allocator output", probeConns)
+	if len(probeConns) != 2 || probeConns[0] != baseConn || probeConns[1] != extraConn {
+		t.Fatalf("probeConns = %v, want base+extra allocator output", probeConns)
 	}
-	if len(portmaps) != 2 || portmaps[0] != pmA || portmaps[1] != pmB {
-		t.Fatalf("portmaps = %v, want dedicated allocator output", portmaps)
+	if len(portmaps) != 2 || portmaps[0] != basePM || portmaps[1] != extraPM {
+		t.Fatalf("portmaps = %v, want base+extra allocator output", portmaps)
+	}
+
+	cleanup()
+	if cleanupCalls != 1 {
+		t.Fatalf("cleanup calls = %d, want 1", cleanupCalls)
+	}
+	if basePM.closeCalls != 0 {
+		t.Fatalf("base portmap close calls = %d, want 0", basePM.closeCalls)
+	}
+	if extraPM.closeCalls != 1 {
+		t.Fatalf("extra portmap close calls = %d, want 1", extraPM.closeCalls)
 	}
 }
 
@@ -2093,6 +2121,47 @@ func TestExternalDirectUDPSelectRemoteAddrsFallsBackWhenObservationIsEmpty(t *te
 	want := []string{"198.51.100.10:40000", "198.51.100.10:40001"}
 	if fmt.Sprint(got) != fmt.Sprint(want) {
 		t.Fatalf("externalDirectUDPSelectRemoteAddrs(empty observation) = %v, want %v", got, want)
+	}
+}
+
+func TestExternalDirectUDPSelectRemoteAddrsFallsBackToAllPublicCandidatesWhenObservationIsEmpty(t *testing.T) {
+	origObserve := externalDirectUDPObservePunchAddrsByConn
+	t.Cleanup(func() { externalDirectUDPObservePunchAddrsByConn = origObserve })
+
+	externalDirectUDPObservePunchAddrsByConn = func(context.Context, []net.PacketConn, time.Duration) [][]net.Addr {
+		return make([][]net.Addr, 8)
+	}
+
+	fallback := parseCandidateStrings([]string{
+		"98.238.217.49:43029",
+		"98.238.217.49:50762",
+		"98.238.217.49:36945",
+		"98.238.217.49:52089",
+		"98.238.217.49:47879",
+		"98.238.217.49:35515",
+		"98.238.217.49:58497",
+		"98.238.217.49:53995",
+	})
+
+	got := externalDirectUDPSelectRemoteAddrs(
+		context.Background(),
+		make([]net.PacketConn, 8),
+		fallback,
+		&net.UDPAddr{IP: net.IPv4(98, 238, 217, 49), Port: 43029},
+		nil,
+	)
+	want := []string{
+		"98.238.217.49:43029",
+		"98.238.217.49:50762",
+		"98.238.217.49:36945",
+		"98.238.217.49:52089",
+		"98.238.217.49:47879",
+		"98.238.217.49:35515",
+		"98.238.217.49:58497",
+		"98.238.217.49:53995",
+	}
+	if fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Fatalf("externalDirectUDPSelectRemoteAddrs(public empty observation) = %v, want %v", got, want)
 	}
 }
 
@@ -5184,6 +5253,63 @@ func TestExternalDirectUDPDiscardParallelSendsIndependentLanes(t *testing.T) {
 	}
 }
 
+func TestExternalDirectUDPDiscardParallelPrefersLaneSendErrorOverPipeFallout(t *testing.T) {
+	prevSend := externalDirectUDPProbeSendFn
+	t.Cleanup(func() { externalDirectUDPProbeSendFn = prevSend })
+
+	sentinel := errors.New("sentinel-lane-send")
+	externalDirectUDPProbeSendFn = func(ctx context.Context, conn net.PacketConn, remoteAddr string, src io.Reader, cfg probe.SendConfig) (probe.TransferStats, error) {
+		switch remoteAddr {
+		case "lane0":
+			return probe.TransferStats{}, sentinel
+		case "lane1":
+			return probe.TransferStats{}, nil
+		default:
+			return probe.TransferStats{}, fmt.Errorf("unexpected remote addr %q", remoteAddr)
+		}
+	}
+
+	_, err := externalDirectUDPSendDiscardParallel(context.Background(),
+		[]net.PacketConn{stubExternalDirectUDPPacketConn{}, stubExternalDirectUDPPacketConn{}},
+		[]string{"lane0", "lane1"},
+		bytes.NewReader(bytes.Repeat([]byte("x"), 1<<20)),
+		probe.SendConfig{ChunkSize: 1024},
+	)
+	if !errors.Is(err, sentinel) {
+		t.Fatalf("externalDirectUDPSendDiscardParallel() error = %v, want %v", err, sentinel)
+	}
+}
+
+func TestExternalDirectUDPDiscardParallelPrefersLaterLaneErrorOverEarlyContextCanceled(t *testing.T) {
+	prevSend := externalDirectUDPProbeSendFn
+	t.Cleanup(func() { externalDirectUDPProbeSendFn = prevSend })
+
+	sentinel := errors.New("sentinel-lane-send")
+	lane0Returned := make(chan struct{})
+	externalDirectUDPProbeSendFn = func(ctx context.Context, conn net.PacketConn, remoteAddr string, src io.Reader, cfg probe.SendConfig) (probe.TransferStats, error) {
+		switch remoteAddr {
+		case "lane0":
+			close(lane0Returned)
+			return probe.TransferStats{}, context.Canceled
+		case "lane1":
+			<-lane0Returned
+			return probe.TransferStats{}, sentinel
+		default:
+			return probe.TransferStats{}, fmt.Errorf("unexpected remote addr %q", remoteAddr)
+		}
+	}
+
+	_, err := externalDirectUDPSendDiscardParallel(context.Background(),
+		[]net.PacketConn{stubExternalDirectUDPPacketConn{}, stubExternalDirectUDPPacketConn{}},
+		[]string{"lane0", "lane1"},
+		bytes.NewReader(bytes.Repeat([]byte("x"), 1<<20)),
+		probe.SendConfig{ChunkSize: 1024},
+	)
+	if !errors.Is(err, sentinel) {
+		t.Fatalf("externalDirectUDPSendDiscardParallel() error = %v, want %v", err, sentinel)
+	}
+}
+
 func TestExternalDirectUDPDiscardSpoolParallelSendsIndependentLanes(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -5274,7 +5400,7 @@ func TestExternalDirectUDPCandidateSetsGatherPerConnAndInferWANPerPort(t *testin
 	portA := connA.LocalAddr().(*net.UDPAddr).Port
 	portB := connB.LocalAddr().(*net.UDPAddr).Port
 	prev := externalDirectUDPProbeCandidates
-	externalDirectUDPProbeCandidates = func(_ context.Context, conn net.PacketConn, _ *tailcfg.DERPMap, _ publicPortmap) []string {
+	externalDirectUDPProbeCandidates = func(ctx context.Context, conn net.PacketConn, _ *tailcfg.DERPMap, _ publicPortmap) []string {
 		port := conn.LocalAddr().(*net.UDPAddr).Port
 		if port == portA {
 			return []string{
@@ -5298,7 +5424,7 @@ func TestExternalDirectUDPCandidateSetsGatherPerConnAndInferWANPerPort(t *testin
 	}
 }
 
-func TestExternalDirectUDPCandidateSetsRetriesWhenInitialGatherLacksPublicCandidate(t *testing.T) {
+func TestExternalDirectUDPCandidateSetsConfirmsWANFromFirstConnWhenQuickGatherLacksPublicCandidate(t *testing.T) {
 	connA, err := net.ListenPacket("udp4", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -5316,16 +5442,27 @@ func TestExternalDirectUDPCandidateSetsRetriesWhenInitialGatherLacksPublicCandid
 	var mu sync.Mutex
 
 	prev := externalDirectUDPProbeCandidates
-	externalDirectUDPProbeCandidates = func(_ context.Context, conn net.PacketConn, _ *tailcfg.DERPMap, _ publicPortmap) []string {
+	externalDirectUDPProbeCandidates = func(ctx context.Context, conn net.PacketConn, _ *tailcfg.DERPMap, _ publicPortmap) []string {
 		port := conn.LocalAddr().(*net.UDPAddr).Port
+		deadline, ok := ctx.Deadline()
+		if !ok {
+			t.Fatal("externalDirectUDPProbeCandidates() ctx has no deadline, want bounded timeout context")
+		}
+		remaining := time.Until(deadline)
 		mu.Lock()
 		callCount[port]++
 		attempt := callCount[port]
 		mu.Unlock()
-		if attempt == 1 {
+		if remaining < 600*time.Millisecond {
 			return []string{fmt.Sprintf("10.0.4.184:%d", port)}
 		}
-		return []string{fmt.Sprintf("68.20.14.192:%d", port)}
+		if port != portA {
+			t.Fatalf("externalDirectUDPProbeCandidates() long confirm probe on port %d, want only first conn %d", port, portA)
+		}
+		if attempt < 2 {
+			t.Fatalf("externalDirectUDPProbeCandidates() long confirm probe attempt = %d on first conn, want retry after quick gather", attempt)
+		}
+		return []string{fmt.Sprintf("68.20.14.192:%d", portA)}
 	}
 	t.Cleanup(func() { externalDirectUDPProbeCandidates = prev })
 
@@ -5341,8 +5478,50 @@ func TestExternalDirectUDPCandidateSetsRetriesWhenInitialGatherLacksPublicCandid
 	}
 	mu.Lock()
 	defer mu.Unlock()
-	if callCount[portA] < 2 || callCount[portB] < 2 {
-		t.Fatalf("externalDirectUDPProbeCandidates call counts = %#v, want retry for both ports", callCount)
+	if callCount[portA] != 2 || callCount[portB] != 1 {
+		t.Fatalf("externalDirectUDPProbeCandidates call counts = %#v, want first conn retried once and second conn quick-gather only", callCount)
+	}
+}
+
+func TestExternalDirectUDPCandidateSetsPreferWANCandidatesBeforeFlattening(t *testing.T) {
+	conns := make([]net.PacketConn, 0, externalDirectUDPParallelism)
+	defer func() {
+		for _, conn := range conns {
+			_ = conn.Close()
+		}
+	}()
+	for range externalDirectUDPParallelism {
+		conn, err := net.ListenPacket("udp4", "127.0.0.1:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		conns = append(conns, conn)
+	}
+
+	prev := externalDirectUDPProbeCandidates
+	externalDirectUDPProbeCandidates = func(_ context.Context, conn net.PacketConn, _ *tailcfg.DERPMap, _ publicPortmap) []string {
+		port := conn.LocalAddr().(*net.UDPAddr).Port
+		return []string{
+			fmt.Sprintf("172.17.0.1:%d", port),
+			fmt.Sprintf("172.18.0.1:%d", port),
+			fmt.Sprintf("172.19.0.1:%d", port),
+			fmt.Sprintf("192.168.1.9:%d", port),
+			fmt.Sprintf("98.238.217.49:%d", port),
+		}
+	}
+	t.Cleanup(func() { externalDirectUDPProbeCandidates = prev })
+
+	sets := externalDirectUDPCandidateSets(context.Background(), conns, nil, nil)
+	flat := externalDirectUDPFlattenCandidateSets(sets)
+	if len(flat) != rendezvous.MaxClaimCandidates {
+		t.Fatalf("len(flattened) = %d, want %d", len(flat), rendezvous.MaxClaimCandidates)
+	}
+	for _, conn := range conns {
+		port := conn.LocalAddr().(*net.UDPAddr).Port
+		want := fmt.Sprintf("98.238.217.49:%d", port)
+		if !slices.Contains(flat, want) {
+			t.Fatalf("externalDirectUDPCandidateSets() flattened = %v, want public candidate %q preserved ahead of private overflow", flat, want)
+		}
 	}
 }
 

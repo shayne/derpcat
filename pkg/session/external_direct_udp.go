@@ -112,6 +112,7 @@ const (
 
 var externalDirectUDPPreviewTransportCaps = probe.PreviewTransportCaps
 var externalDirectUDPProbeCandidates = publicProbeCandidates
+var externalDirectUDPProbeSendFn = probe.Send
 var externalSendDirectUDPOnlyFn = sendExternalViaDirectUDPOnly
 var externalPrepareDirectUDPSendFn = externalPrepareDirectUDPSend
 var externalExecutePreparedDirectUDPSendFn = externalExecutePreparedDirectUDPSend
@@ -862,7 +863,7 @@ func listenExternalViaDirectUDP(ctx context.Context, cfg ListenConfig) (string, 
 		portmaps := []publicPortmap{publicSessionPortmap(session)}
 		cleanupProbeConns := func() {}
 		if !cfg.ForceRelay {
-			probeConn, probeConns, portmaps, cleanupProbeConns, err = externalAcceptedDirectUDPSet(cfg.Emitter)
+			probeConn, probeConns, portmaps, cleanupProbeConns, err = externalAcceptedDirectUDPSet(session.probeConn, publicSessionPortmap(session), cfg.Emitter)
 			if err != nil {
 				return tok, err
 			}
@@ -1802,16 +1803,39 @@ func externalDirectUDPConns(_ net.PacketConn, _ publicPortmap, parallel int, emi
 	return conns, portmaps, cleanup, nil
 }
 
-func externalAcceptedDirectUDPSet(emitter *telemetry.Emitter) (net.PacketConn, []net.PacketConn, []publicPortmap, func(), error) {
-	probeConns, portmaps, cleanup, err := externalDirectUDPConnsFn(nil, nil, externalDirectUDPParallelism, emitter)
+func externalAcceptedDirectUDPSet(baseConn net.PacketConn, basePM publicPortmap, emitter *telemetry.Emitter) (net.PacketConn, []net.PacketConn, []publicPortmap, func(), error) {
+	if baseConn == nil {
+		probeConns, portmaps, cleanup, err := externalDirectUDPConnsFn(nil, nil, externalDirectUDPParallelism, emitter)
+		if err != nil {
+			return nil, nil, nil, nil, err
+		}
+		if len(probeConns) == 0 || len(portmaps) == 0 {
+			cleanup()
+			return nil, nil, nil, nil, errors.New("direct UDP acceptor sockets unavailable")
+		}
+		return probeConns[0], probeConns, portmaps, cleanup, nil
+	}
+
+	extraParallel := externalDirectUDPParallelism - 1
+	probeConns := []net.PacketConn{baseConn}
+	portmaps := []publicPortmap{basePM}
+	cleanup := func() {}
+	if extraParallel <= 0 {
+		return baseConn, probeConns, portmaps, cleanup, nil
+	}
+
+	extraConns, extraPMs, extraCleanup, err := externalDirectUDPConnsFn(nil, nil, extraParallel, emitter)
 	if err != nil {
 		return nil, nil, nil, nil, err
 	}
-	if len(probeConns) == 0 || len(portmaps) == 0 {
-		cleanup()
+	if len(extraConns) == 0 {
+		extraCleanup()
 		return nil, nil, nil, nil, errors.New("direct UDP acceptor sockets unavailable")
 	}
-	return probeConns[0], probeConns, portmaps, cleanup, nil
+	probeConns = append(probeConns, extraConns...)
+	portmaps = append(portmaps, extraPMs...)
+	cleanup = extraCleanup
+	return baseConn, probeConns, portmaps, cleanup, nil
 }
 
 func externalDirectUDPFlattenCandidateSets(sets [][]string) []string {
@@ -1847,14 +1871,18 @@ func externalDirectUDPCandidateSets(ctx context.Context, conns []net.PacketConn,
 	if fakeTransportEnabled() || externalDirectUDPHasGlobalCandidate(sets) {
 		return externalDirectUDPInferWANPerPort(sets)
 	}
-	retryCtx, cancel := context.WithTimeout(ctx, externalPublicCandidateRefreshWait-externalDirectUDPCandidateGatherWait)
+	if len(conns) == 0 || conns[0] == nil {
+		return externalDirectUDPInferWANPerPort(sets)
+	}
+	var pm publicPortmap
+	if len(portmaps) > 0 {
+		pm = portmaps[0]
+	}
+	retryCtx, cancel := context.WithTimeout(ctx, externalPublicCandidateRefreshWait)
 	defer cancel()
-	retried := externalDirectUDPCandidateSetsWithTimeout(retryCtx, conns, dm, portmaps, externalPublicCandidateRefreshWait-externalDirectUDPCandidateGatherWait)
-	for i := range sets {
-		if len(retried[i]) == 0 {
-			continue
-		}
-		sets[i] = retried[i]
+	confirmed := externalDirectUDPProbeCandidates(retryCtx, conns[0], dm, pm)
+	if len(confirmed) > 0 {
+		sets[0] = externalDirectUDPOrderCandidateStrings(confirmed)
 	}
 	return externalDirectUDPInferWANPerPort(sets)
 }
@@ -1872,11 +1900,18 @@ func externalDirectUDPCandidateSetsWithTimeout(ctx context.Context, conns []net.
 			if i < len(portmaps) {
 				pm = portmaps[i]
 			}
-			sets[i] = externalDirectUDPProbeCandidates(probeCtx, conns[i], dm, pm)
+			sets[i] = externalDirectUDPOrderCandidateStrings(externalDirectUDPProbeCandidates(probeCtx, conns[i], dm, pm))
 		}()
 	}
 	wg.Wait()
 	return sets
+}
+
+func externalDirectUDPOrderCandidateStrings(candidates []string) []string {
+	if fakeTransportEnabled() {
+		return externalDirectUDPPreferLoopbackStrings(candidates)
+	}
+	return externalDirectUDPPreferWANStrings(candidates)
 }
 
 func externalDirectUDPHasGlobalCandidate(sets [][]string) bool {
@@ -1958,6 +1993,9 @@ func externalDirectUDPSelectRemoteAddrs(ctx context.Context, conns []net.PacketC
 		emitter.Debug("udp-remote-fallback-addrs=" + strings.Join(fallback, ","))
 	}
 	fallback = externalDirectUDPFilterFallbackAddrsForSelectedScope(nil, fallback)
+	if emitter != nil {
+		emitter.Debug("udp-filtered-fallback-addrs=" + strings.Join(fallback, ","))
+	}
 	observedByConn := externalDirectUDPObservePunchAddrsByConn(ctx, conns, externalDirectUDPPunchWait)
 	if emitter != nil {
 		emitter.Debug("udp-observed-addrs-by-conn=" + externalDirectUDPFormatObservedAddrsByConn(observedByConn))
@@ -3969,7 +4007,7 @@ func externalDirectUDPSendDiscardSpoolParallel(ctx context.Context, conns []net.
 		laneCfg.RateCeilingMbps = laneRateCeiling
 		src := io.NewSectionReader(spool.File, spool.Offsets[i], spool.Sizes[i])
 		go func(conn net.PacketConn, remoteAddr string, src io.Reader, laneCfg probe.SendConfig) {
-			stats, err := probe.Send(ctx, conn, remoteAddr, src, laneCfg)
+			stats, err := externalDirectUDPProbeSendFn(ctx, conn, remoteAddr, src, laneCfg)
 			results <- externalDirectUDPDiscardSendResult{stats: stats, err: err}
 		}(conn, remoteAddrs[i], src, laneCfg)
 	}
@@ -4060,9 +4098,7 @@ func externalDirectUDPReceiveSectionSpoolParallel(ctx context.Context, conns []n
 	var receiveErr error
 	for range conns {
 		result := <-results
-		if result.err != nil && receiveErr == nil {
-			receiveErr = result.err
-		}
+		receiveErr = externalDirectUDPPreferInformativeError(receiveErr, result.err)
 		externalDirectUDPMergeReceiveStats(&stats, result.stats)
 	}
 	if receiveErr != nil {
@@ -4231,7 +4267,7 @@ func externalDirectUDPSendDiscardParallel(ctx context.Context, conns []net.Packe
 	}
 	if len(conns) == 1 {
 		cfg.RunID = externalDirectUDPLaneRunID(cfg.RunID, 0)
-		return probe.Send(ctx, conns[0], remoteAddrs[0], src, cfg)
+		return externalDirectUDPProbeSendFn(ctx, conns[0], remoteAddrs[0], src, cfg)
 	}
 
 	sendCtx, cancel := context.WithCancel(ctx)
@@ -4251,7 +4287,7 @@ func externalDirectUDPSendDiscardParallel(ctx context.Context, conns []net.Packe
 		laneCfg.RateCeilingMbps = laneRateCeiling
 		go func(conn net.PacketConn, remoteAddr string, reader *io.PipeReader, laneCfg probe.SendConfig) {
 			defer reader.Close()
-			stats, err := probe.Send(sendCtx, conn, remoteAddr, reader, laneCfg)
+			stats, err := externalDirectUDPProbeSendFn(sendCtx, conn, remoteAddr, reader, laneCfg)
 			if err != nil {
 				cancel()
 			}
@@ -4272,14 +4308,12 @@ func externalDirectUDPSendDiscardParallel(ctx context.Context, conns []net.Packe
 	var sendErr error
 	for range conns {
 		result := <-results
-		if result.err != nil && sendErr == nil {
-			sendErr = result.err
-		}
+		sendErr = externalDirectUDPPreferInformativeError(sendErr, result.err)
 		externalDirectUDPMergeSendStats(&stats, result.stats)
 	}
 	stats.CompletedAt = time.Now()
 	if dispatchErr != nil {
-		return probe.TransferStats{}, dispatchErr
+		return probe.TransferStats{}, externalDirectUDPPreferInformativeError(dispatchErr, sendErr)
 	}
 	if sendErr != nil {
 		return probe.TransferStats{}, sendErr
@@ -4288,6 +4322,19 @@ func externalDirectUDPSendDiscardParallel(ctx context.Context, conns []net.Packe
 		stats.FirstByteAt = startedAt
 	}
 	return stats, nil
+}
+
+func externalDirectUDPPreferInformativeError(current, candidate error) error {
+	if current == nil {
+		return candidate
+	}
+	if candidate == nil {
+		return current
+	}
+	if errors.Is(current, context.Canceled) || errors.Is(current, io.ErrClosedPipe) || errors.Is(current, net.ErrClosed) {
+		return candidate
+	}
+	return current
 }
 
 func externalDirectUDPLaneRunIDs(base [16]byte, lanes int) [][16]byte {
@@ -4908,7 +4955,7 @@ func sendExternalRelayUDP(ctx context.Context, src io.Reader, manager *transport
 	peerConn := manager.PeerDatagramConn(ctx)
 	packetConn := newExternalPeerDatagramPacketConn(ctx, peerConn)
 	defer packetConn.Close()
-	_, err := probe.Send(ctx, packetConn, packetConn.remoteAddr.String(), externalDirectUDPBufferedReader(src), probe.SendConfig{
+	_, err := externalDirectUDPProbeSendFn(ctx, packetConn, packetConn.remoteAddr.String(), externalDirectUDPBufferedReader(src), probe.SendConfig{
 		Raw:        true,
 		Transport:  "legacy",
 		ChunkSize:  externalDirectUDPChunkSize,

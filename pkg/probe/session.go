@@ -2130,6 +2130,21 @@ func isNoBufferSpace(err error) bool {
 	return errors.Is(err, syscall.ENOBUFS)
 }
 
+func preferInformativeResultError(current, candidate error) error {
+	if current == nil {
+		return candidate
+	}
+	if candidate == nil {
+		return current
+	}
+	currentFallback := errors.Is(current, context.Canceled) || errors.Is(current, io.ErrClosedPipe) || errors.Is(current, net.ErrClosed)
+	candidateFallback := errors.Is(candidate, context.Canceled) || errors.Is(candidate, io.ErrClosedPipe) || errors.Is(candidate, net.ErrClosed)
+	if currentFallback && !candidateFallback {
+		return candidate
+	}
+	return current
+}
+
 type blastRepairHistory struct {
 	runID           [16]byte
 	chunkSize       int
@@ -4083,10 +4098,9 @@ func ReceiveReliableParallelToWriter(ctx context.Context, conns []net.PacketConn
 		StartedAt:       startedAt,
 		PeakGoodputMbps: receiverDst.PeakMbps(),
 	}
+	var receiveErr error
 	for result := range results {
-		if result.err != nil {
-			return TransferStats{}, result.err
-		}
+		receiveErr = preferInformativeResultError(receiveErr, result.err)
 		out.BytesReceived += result.stats.BytesReceived
 		out.PacketsSent += result.stats.PacketsSent
 		out.PacketsAcked += result.stats.PacketsAcked
@@ -4097,6 +4111,9 @@ func ReceiveReliableParallelToWriter(ctx context.Context, conns []net.PacketConn
 		if out.Transport.Kind == "" {
 			out.Transport = result.stats.Transport
 		}
+	}
+	if receiveErr != nil {
+		return TransferStats{}, receiveErr
 	}
 	if expectedBytes > 0 && out.BytesReceived != expectedBytes {
 		return TransferStats{}, fmt.Errorf("parallel reliable received %d bytes, want %d", out.BytesReceived, expectedBytes)

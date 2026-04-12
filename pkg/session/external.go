@@ -2075,13 +2075,31 @@ func sendClaimAndReceiveDecision(
 	dst key.NodePublic,
 	claim rendezvous.Claim,
 ) (rendezvous.Decision, error) {
+	return sendClaimAndReceiveDecisionWithTelemetry(ctx, client, dst, claim, nil, "")
+}
+
+func sendClaimAndReceiveDecisionWithTelemetry(
+	ctx context.Context,
+	client *derpbind.Client,
+	dst key.NodePublic,
+	claim rendezvous.Claim,
+	emitter *telemetry.Emitter,
+	prefix string,
+) (rendezvous.Decision, error) {
 	decisionCh, unsubscribe := client.SubscribeLossless(func(pkt derpbind.Packet) bool {
 		return pkt.From == dst && isDecisionPayload(pkt.Payload)
 	})
 	defer unsubscribe()
 
+	attempt := 1
+	if emitter != nil {
+		emitter.Debug(prefix + "claim-send-attempt=" + strconv.Itoa(attempt))
+	}
 	if err := sendEnvelope(ctx, client, dst, envelope{Type: envelopeClaim, Claim: &claim}); err != nil {
 		return rendezvous.Decision{}, fmt.Errorf("send claim: %w", err)
+	}
+	if emitter != nil {
+		emitter.Debug(prefix + "claim-send-complete=" + strconv.Itoa(attempt))
 	}
 
 	retry := time.NewTicker(externalClaimRetryInterval)
@@ -2097,10 +2115,20 @@ func sendClaimAndReceiveDecision(
 			if err != nil || env.Type != envelopeDecision || env.Decision == nil {
 				continue
 			}
+			if emitter != nil {
+				emitter.Debug(prefix + "decision-received")
+			}
 			return *env.Decision, nil
 		case <-retry.C:
+			attempt++
+			if emitter != nil {
+				emitter.Debug(prefix + "claim-send-attempt=" + strconv.Itoa(attempt))
+			}
 			if err := sendEnvelope(ctx, client, dst, envelope{Type: envelopeClaim, Claim: &claim}); err != nil {
 				return rendezvous.Decision{}, fmt.Errorf("resend claim: %w", err)
+			}
+			if emitter != nil {
+				emitter.Debug(prefix + "claim-send-complete=" + strconv.Itoa(attempt))
 			}
 		case <-ctx.Done():
 			return rendezvous.Decision{}, ctx.Err()
