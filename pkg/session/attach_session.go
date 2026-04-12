@@ -18,24 +18,26 @@ var (
 var attachDialHook func()
 
 type attachSession struct {
-	mailbox chan net.Conn
-	closed  chan struct{}
-	once    sync.Once
+	mu        sync.Mutex
+	closed    bool
+	conn      net.Conn
+	delivered bool
+	wake      chan struct{}
+	once      sync.Once
 }
 
 func newAttachSession() *attachSession {
 	return &attachSession{
-		mailbox: make(chan net.Conn),
-		closed:  make(chan struct{}),
+		wake: make(chan struct{}),
 	}
 }
 
-func (s *attachSession) close() {
+func (s *attachSession) signal() {
 	if s == nil {
 		return
 	}
 	s.once.Do(func() {
-		close(s.closed)
+		close(s.wake)
 	})
 }
 
@@ -68,52 +70,97 @@ func issueLocalAttachToken() (string, *attachSession, error) {
 	return tok, session, nil
 }
 
-func finishAttachSession(tok string, session *attachSession) {
-	if session == nil {
-		return
-	}
+func removeAttachSession(tok string, session *attachSession) {
 	attachMu.Lock()
 	if attachSessions[tok] == session {
 		delete(attachSessions, tok)
 	}
 	attachMu.Unlock()
-	session.close()
+}
+
+func closeAttachSession(tok string, session *attachSession) {
+	session.mu.Lock()
+	if session.closed {
+		session.mu.Unlock()
+		return
+	}
+	session.closed = true
+	session.mu.Unlock()
+
+	removeAttachSession(tok, session)
+	session.signal()
 }
 
 func ListenAttach(ctx context.Context, cfg AttachListenConfig) (*AttachListener, error) {
+	_ = cfg
 	tok, session, err := issueLocalAttachToken()
 	if err != nil {
 		return nil, err
 	}
 
-	go func() {
-		select {
-		case <-ctx.Done():
-			finishAttachSession(tok, session)
-		case <-session.closed:
-		}
-	}()
-
 	listener := &AttachListener{Token: tok}
 	listener.accept = func(ctx context.Context) (net.Conn, error) {
-		select {
-		case conn := <-session.mailbox:
-			finishAttachSession(tok, session)
-			return conn, nil
-		case <-session.closed:
-			return nil, net.ErrClosed
-		case <-ctx.Done():
-			return nil, ctx.Err()
+		for {
+			session.mu.Lock()
+			if session.conn != nil {
+				conn := session.conn
+				session.conn = nil
+				session.delivered = true
+				session.mu.Unlock()
+				return conn, nil
+			}
+			if session.closed {
+				session.mu.Unlock()
+				return nil, net.ErrClosed
+			}
+			wake := session.wake
+			session.mu.Unlock()
+
+			select {
+			case <-wake:
+				continue
+			case <-ctx.Done():
+				session.mu.Lock()
+				if session.conn != nil {
+					conn := session.conn
+					session.conn = nil
+					session.delivered = true
+					session.mu.Unlock()
+					return conn, nil
+				}
+				if session.closed {
+					session.mu.Unlock()
+					return nil, net.ErrClosed
+				}
+				session.mu.Unlock()
+				return nil, ctx.Err()
+			}
 		}
 	}
 	listener.close = func() error {
-		finishAttachSession(tok, session)
+		closeAttachSession(tok, session)
 		return nil
 	}
+
+	go func() {
+		select {
+		case <-ctx.Done():
+			_ = listener.Close()
+		case <-session.wake:
+		}
+	}()
+
 	return listener, nil
 }
 
 func DialAttach(ctx context.Context, cfg AttachDialConfig) (net.Conn, error) {
+	_ = cfg
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	default:
+	}
+
 	attachMu.Lock()
 	session, ok := attachSessions[cfg.Token]
 	attachMu.Unlock()
@@ -126,16 +173,31 @@ func DialAttach(ctx context.Context, cfg AttachDialConfig) (net.Conn, error) {
 		hook()
 	}
 	select {
-	case session.mailbox <- right:
-		finishAttachSession(cfg.Token, session)
-		return left, nil
-	case <-session.closed:
-		_ = left.Close()
-		_ = right.Close()
-		return nil, net.ErrClosed
 	case <-ctx.Done():
 		_ = left.Close()
 		_ = right.Close()
 		return nil, ctx.Err()
+	default:
 	}
+
+	session.mu.Lock()
+	if session.closed {
+		session.mu.Unlock()
+		_ = left.Close()
+		_ = right.Close()
+		return nil, net.ErrClosed
+	}
+	if session.conn != nil {
+		session.mu.Unlock()
+		_ = left.Close()
+		_ = right.Close()
+		return nil, ErrUnknownSession
+	}
+
+	removeAttachSession(cfg.Token, session)
+	session.conn = right
+	session.mu.Unlock()
+	session.signal()
+
+	return left, nil
 }

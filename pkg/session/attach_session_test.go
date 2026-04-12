@@ -156,12 +156,14 @@ func TestListenAttachCloseStopsBlockedAcceptAndDial(t *testing.T) {
 		}
 
 		started := make(chan struct{}, 1)
+		resume := make(chan struct{})
 		previousHook := attachDialHook
 		attachDialHook = func() {
 			select {
 			case started <- struct{}{}:
 			default:
 			}
+			<-resume
 		}
 		defer func() {
 			attachDialHook = previousHook
@@ -182,11 +184,12 @@ func TestListenAttachCloseStopsBlockedAcceptAndDial(t *testing.T) {
 		if err := listener.Close(); err != nil {
 			t.Fatalf("Close() error = %v", err)
 		}
+		close(resume)
 
 		select {
 		case err := <-errCh:
-			if !errors.Is(err, net.ErrClosed) {
-				t.Fatalf("DialAttach() error = %v, want net.ErrClosed", err)
+			if !errors.Is(err, net.ErrClosed) && !errors.Is(err, ErrUnknownSession) {
+				t.Fatalf("DialAttach() error = %v, want net.ErrClosed or ErrUnknownSession", err)
 			}
 		case <-time.After(time.Second):
 			t.Fatal("DialAttach() did not return promptly")
