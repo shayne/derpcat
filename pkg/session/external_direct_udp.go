@@ -1929,21 +1929,12 @@ func externalDirectUDPSelectRemoteAddrs(ctx context.Context, conns []net.PacketC
 	if emitter != nil {
 		emitter.Debug("udp-remote-fallback-addrs=" + strings.Join(fallback, ","))
 	}
-	if len(fallback) > 0 {
-		fallback = externalDirectUDPFilterFallbackAddrsForSelectedScope(nil, fallback)
-		if emitter != nil {
-			emitter.Debug("udp-observed-addrs-by-conn=" + externalDirectUDPFormatObservedAddrsByConn(make([][]net.Addr, len(conns))))
-			emitter.Debug("udp-selected-addrs=" + strings.Join(fallback, ","))
-			emitter.Debug("udp-remote-observation-skipped=true")
-			emitter.Debug("udp-final-addrs=" + strings.Join(fallback, ","))
-		}
-		return fallback
-	}
+	fallback = externalDirectUDPFilterFallbackAddrsForSelectedScope(nil, fallback)
 	observedByConn := externalDirectUDPObservePunchAddrsByConn(ctx, conns, externalDirectUDPPunchWait)
 	if emitter != nil {
 		emitter.Debug("udp-observed-addrs-by-conn=" + externalDirectUDPFormatObservedAddrsByConn(observedByConn))
 	}
-	selected := externalDirectUDPSelectRemoteAddrsByConn(observedByConn, len(conns), peer)
+	selected := externalDirectUDPSelectRemoteAddrsByConn(observedByConn, len(conns), nil)
 	if emitter != nil {
 		emitter.Debug("udp-selected-addrs=" + strings.Join(selected, ","))
 	}
