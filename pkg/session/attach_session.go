@@ -18,12 +18,11 @@ var (
 var attachDialHook func()
 
 type attachSession struct {
-	mu        sync.Mutex
-	closed    bool
-	conn      net.Conn
-	delivered bool
-	wake      chan struct{}
-	once      sync.Once
+	mu     sync.Mutex
+	closed bool
+	conn   net.Conn
+	wake   chan struct{}
+	once   sync.Once
 }
 
 func newAttachSession() *attachSession {
@@ -105,7 +104,6 @@ func ListenAttach(ctx context.Context, cfg AttachListenConfig) (*AttachListener,
 			if session.conn != nil {
 				conn := session.conn
 				session.conn = nil
-				session.delivered = true
 				session.mu.Unlock()
 				return conn, nil
 			}
@@ -124,7 +122,6 @@ func ListenAttach(ctx context.Context, cfg AttachListenConfig) (*AttachListener,
 				if session.conn != nil {
 					conn := session.conn
 					session.conn = nil
-					session.delivered = true
 					session.mu.Unlock()
 					return conn, nil
 				}
