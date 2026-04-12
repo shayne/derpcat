@@ -11,6 +11,71 @@ import (
 	"strings"
 )
 
+func StreamTar(w io.Writer, srcRoot string) error {
+	info, err := os.Stat(srcRoot)
+	if err != nil {
+		return err
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("%q is not a directory", srcRoot)
+	}
+
+	tw := tar.NewWriter(w)
+	defer tw.Close()
+
+	return filepath.WalkDir(srcRoot, func(path string, d fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if path == srcRoot {
+			return nil
+		}
+
+		info, err := d.Info()
+		if err != nil {
+			return err
+		}
+
+		rel, err := filepath.Rel(srcRoot, path)
+		if err != nil {
+			return err
+		}
+		name := filepath.ToSlash(rel)
+
+		switch {
+		case info.IsDir():
+			hdr, err := tar.FileInfoHeader(info, "")
+			if err != nil {
+				return err
+			}
+			hdr.Name = name + "/"
+			return tw.WriteHeader(hdr)
+		case info.Mode().IsRegular():
+			hdr, err := tar.FileInfoHeader(info, "")
+			if err != nil {
+				return err
+			}
+			hdr.Name = name
+			if err := tw.WriteHeader(hdr); err != nil {
+				return err
+			}
+
+			f, err := os.Open(path)
+			if err != nil {
+				return err
+			}
+			_, copyErr := io.Copy(tw, f)
+			closeErr := f.Close()
+			if copyErr != nil {
+				return copyErr
+			}
+			return closeErr
+		default:
+			return fmt.Errorf("unsupported directory entry %q with mode %v", path, info.Mode())
+		}
+	})
+}
+
 func ExtractTar(r io.Reader, destRoot, topLevel string) error {
 	base := filepath.Join(destRoot, topLevel)
 	if err := os.MkdirAll(base, 0o755); err != nil {

@@ -108,6 +108,61 @@ func TestSendFileTransfersSuggestedFilename(t *testing.T) {
 	}
 }
 
+func TestSendDirectoryTransfersTopLevelDirectory(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	srcParent := t.TempDir()
+	srcDir := filepath.Join(srcParent, "project")
+	if err := os.MkdirAll(filepath.Join(srcDir, "nested"), 0o755); err != nil {
+		t.Fatalf("MkdirAll() error = %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(srcDir, "root.txt"), []byte("root"), 0o600); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(srcDir, "nested", "child.txt"), []byte("child"), 0o600); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+
+	recvDir := t.TempDir()
+	var sendErr bytes.Buffer
+	sendDone := make(chan error, 1)
+	go func() {
+		sendDone <- Send(ctx, SendConfig{
+			What:   srcDir,
+			Stderr: &sendErr,
+		})
+	}()
+
+	token := waitForTokenLine(t, &sendErr)
+	if err := Receive(ctx, ReceiveConfig{
+		Token:      token,
+		OutputPath: recvDir,
+	}); err != nil {
+		t.Fatalf("Receive() error = %v", err)
+	}
+
+	got, err := os.ReadFile(filepath.Join(recvDir, "project", "root.txt"))
+	if err != nil {
+		t.Fatalf("ReadFile() error = %v", err)
+	}
+	if string(got) != "root" {
+		t.Fatalf("root.txt = %q, want %q", got, "root")
+	}
+
+	got, err = os.ReadFile(filepath.Join(recvDir, "project", "nested", "child.txt"))
+	if err != nil {
+		t.Fatalf("ReadFile() error = %v", err)
+	}
+	if string(got) != "child" {
+		t.Fatalf("child.txt = %q, want %q", got, "child")
+	}
+
+	if err := <-sendDone; err != nil {
+		t.Fatalf("Send() error = %v", err)
+	}
+}
+
 func waitForTokenLine(t *testing.T, stderr *bytes.Buffer) string {
 	t.Helper()
 

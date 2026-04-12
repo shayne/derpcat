@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	dharchive "github.com/shayne/derpcat/pkg/derphole/archive"
 	"github.com/shayne/derpcat/pkg/derphole/protocol"
 	"github.com/shayne/derpcat/pkg/session"
 	"github.com/shayne/derpcat/pkg/telemetry"
@@ -149,7 +150,15 @@ func prepareSendTransfer(cfg SendConfig) (protocol.Header, io.Reader, func() err
 	if cfg.What != "" {
 		if info, err := os.Stat(cfg.What); err == nil {
 			if info.IsDir() {
-				return protocol.Header{}, nil, nil, errors.New("directory transfer is not implemented yet")
+				reader, writer := io.Pipe()
+				go func() {
+					writer.CloseWithError(dharchive.StreamTar(writer, cfg.What))
+				}()
+				return protocol.Header{
+					Version: 1,
+					Kind:    protocol.KindDirectoryTar,
+					Name:    filepath.Base(cfg.What),
+				}, reader, reader.Close, nil
 			}
 			file, err := os.Open(cfg.What)
 			if err != nil {
@@ -201,7 +210,7 @@ func readTransfer(conn net.Conn, token string, stdout io.Writer, outputPath stri
 	case protocol.KindFile:
 		return receiveFile(reader, header, outputPath)
 	case protocol.KindDirectoryTar:
-		return errors.New("directory transfer is not implemented yet")
+		return receiveDirectory(reader, header, outputPath)
 	default:
 		return fmt.Errorf("unsupported derphole transfer kind %q", header.Kind)
 	}
@@ -230,4 +239,12 @@ func receiveFile(r io.Reader, header protocol.Header, outputPath string) error {
 	}
 	_, err = io.Copy(f, r)
 	return err
+}
+
+func receiveDirectory(r io.Reader, header protocol.Header, outputPath string) error {
+	destRoot, topLevel, err := ResolveDirectoryOutput(outputPath, header.Name)
+	if err != nil {
+		return err
+	}
+	return dharchive.ExtractTar(r, destRoot, topLevel)
 }

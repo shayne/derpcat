@@ -3,6 +3,8 @@ package archive
 import (
 	"archive/tar"
 	"bytes"
+	"os"
+	"path/filepath"
 	"testing"
 )
 
@@ -21,5 +23,44 @@ func TestExtractTarRejectsParentTraversal(t *testing.T) {
 
 	if err := ExtractTar(bytes.NewReader(buf.Bytes()), t.TempDir(), "photos"); err == nil {
 		t.Fatal("ExtractTar() error = nil, want traversal rejection")
+	}
+}
+
+func TestStreamTarAndExtractTarRoundTrip(t *testing.T) {
+	srcRoot := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(srcRoot, "nested"), 0o755); err != nil {
+		t.Fatalf("MkdirAll() error = %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(srcRoot, "hello.txt"), []byte("hello"), 0o600); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(srcRoot, "nested", "child.txt"), []byte("child"), 0o600); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+
+	var buf bytes.Buffer
+	if err := StreamTar(&buf, srcRoot); err != nil {
+		t.Fatalf("StreamTar() error = %v", err)
+	}
+
+	destRoot := t.TempDir()
+	if err := ExtractTar(bytes.NewReader(buf.Bytes()), destRoot, "payload"); err != nil {
+		t.Fatalf("ExtractTar() error = %v", err)
+	}
+
+	got, err := os.ReadFile(filepath.Join(destRoot, "payload", "hello.txt"))
+	if err != nil {
+		t.Fatalf("ReadFile() error = %v", err)
+	}
+	if string(got) != "hello" {
+		t.Fatalf("hello.txt = %q, want %q", got, "hello")
+	}
+
+	got, err = os.ReadFile(filepath.Join(destRoot, "payload", "nested", "child.txt"))
+	if err != nil {
+		t.Fatalf("ReadFile() error = %v", err)
+	}
+	if string(got) != "child" {
+		t.Fatalf("child.txt = %q, want %q", got, "child")
 	}
 }
