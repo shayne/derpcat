@@ -1814,6 +1814,26 @@ func TestPublicInitialProbeCandidatesKeepsPrivateInterfaceCandidates(t *testing.
 	}
 }
 
+func TestPublicInitialProbeCandidatesKeepsLoopbackForFakeTransport(t *testing.T) {
+	t.Setenv("DERPCAT_FAKE_TRANSPORT", "1")
+	t.Setenv("DERPCAT_FAKE_TRANSPORT_ENABLE_DIRECT_AT", "0")
+
+	conn := &stubPacketConn{localAddr: &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 4242}}
+
+	prevInterfaceAddrs := publicInterfaceAddrs
+	publicInterfaceAddrs = func() ([]net.Addr, error) {
+		return []net.Addr{
+			&net.IPNet{IP: net.IPv4(127, 0, 0, 1), Mask: net.CIDRMask(8, 32)},
+		}, nil
+	}
+	t.Cleanup(func() { publicInterfaceAddrs = prevInterfaceAddrs })
+
+	got := publicInitialProbeCandidates(conn, nil)
+	if !containsString(got, "127.0.0.1:4242") {
+		t.Fatalf("publicInitialProbeCandidates() = %v, want loopback preserved for fake transport direct candidates", got)
+	}
+}
+
 func TestPublicCandidateSourceRefreshesDynamicProbeCandidatesForRealSessions(t *testing.T) {
 	ctx := context.Background()
 	conn := &stubPacketConn{localAddr: &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 4242}}
@@ -1908,6 +1928,10 @@ func TestPublicCandidateSourceReturnsQuicklyWhenSTUNGatherBlocks(t *testing.T) {
 	conn := &stubPacketConn{localAddr: &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 4242}}
 	localCandidates := []net.Addr{&net.UDPAddr{IP: net.IPv4(203, 0, 113, 10), Port: 4242}}
 	stunPackets := make(chan traversal.STUNPacket)
+
+	prevInterfaceAddrs := publicInterfaceAddrs
+	publicInterfaceAddrs = func() ([]net.Addr, error) { return nil, nil }
+	t.Cleanup(func() { publicInterfaceAddrs = prevInterfaceAddrs })
 
 	prevSTUNGather := gatherTraversalCandidatesFromSTUNPackets
 	gatherTraversalCandidatesFromSTUNPackets = func(

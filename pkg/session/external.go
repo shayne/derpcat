@@ -2304,8 +2304,12 @@ func publicInitialProbeCandidates(conn net.PacketConn, pm publicPortmap) []strin
 		ip := prefix.Addr()
 		// Preserve private and link-local interface candidates so same-LAN
 		// peers can still converge on their best direct path. Loopback
-		// addresses are never a valid remote target outside fake transport.
-		if !ip.IsValid() || ip.IsUnspecified() || ip.IsLoopback() {
+		// remains fake-transport-only so direct-upgrade tests still model the
+		// real transport state machine without exposing loopback in production.
+		if !ip.IsValid() || ip.IsUnspecified() {
+			continue
+		}
+		if ip.IsLoopback() && !fakeTransportEnabled() {
 			continue
 		}
 		add(ip, port)
