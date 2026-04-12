@@ -1843,13 +1843,30 @@ func externalDirectUDPFlattenCandidateSets(sets [][]string) []string {
 }
 
 func externalDirectUDPCandidateSets(ctx context.Context, conns []net.PacketConn, dm *tailcfg.DERPMap, portmaps []publicPortmap) [][]string {
+	sets := externalDirectUDPCandidateSetsWithTimeout(ctx, conns, dm, portmaps, externalDirectUDPCandidateGatherWait)
+	if fakeTransportEnabled() || externalDirectUDPHasGlobalCandidate(sets) {
+		return externalDirectUDPInferWANPerPort(sets)
+	}
+	retryCtx, cancel := context.WithTimeout(ctx, externalPublicCandidateRefreshWait-externalDirectUDPCandidateGatherWait)
+	defer cancel()
+	retried := externalDirectUDPCandidateSetsWithTimeout(retryCtx, conns, dm, portmaps, externalPublicCandidateRefreshWait-externalDirectUDPCandidateGatherWait)
+	for i := range sets {
+		if len(retried[i]) == 0 {
+			continue
+		}
+		sets[i] = retried[i]
+	}
+	return externalDirectUDPInferWANPerPort(sets)
+}
+
+func externalDirectUDPCandidateSetsWithTimeout(ctx context.Context, conns []net.PacketConn, dm *tailcfg.DERPMap, portmaps []publicPortmap, wait time.Duration) [][]string {
 	sets := make([][]string, len(conns))
 	var wg sync.WaitGroup
 	wg.Add(len(conns))
 	for i := range conns {
 		go func() {
 			defer wg.Done()
-			probeCtx, cancel := context.WithTimeout(ctx, externalDirectUDPCandidateGatherWait)
+			probeCtx, cancel := context.WithTimeout(ctx, wait)
 			defer cancel()
 			var pm publicPortmap
 			if i < len(portmaps) {
@@ -1859,7 +1876,18 @@ func externalDirectUDPCandidateSets(ctx context.Context, conns []net.PacketConn,
 		}()
 	}
 	wg.Wait()
-	return externalDirectUDPInferWANPerPort(sets)
+	return sets
+}
+
+func externalDirectUDPHasGlobalCandidate(sets [][]string) bool {
+	for _, candidates := range sets {
+		for _, candidate := range candidates {
+			if externalDirectUDPCandidateRank(candidate) == 0 {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func externalDirectUDPInferWANPerPort(sets [][]string) [][]string {

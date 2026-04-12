@@ -5298,6 +5298,54 @@ func TestExternalDirectUDPCandidateSetsGatherPerConnAndInferWANPerPort(t *testin
 	}
 }
 
+func TestExternalDirectUDPCandidateSetsRetriesWhenInitialGatherLacksPublicCandidate(t *testing.T) {
+	connA, err := net.ListenPacket("udp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer connA.Close()
+	connB, err := net.ListenPacket("udp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer connB.Close()
+
+	portA := connA.LocalAddr().(*net.UDPAddr).Port
+	portB := connB.LocalAddr().(*net.UDPAddr).Port
+	callCount := make(map[int]int)
+	var mu sync.Mutex
+
+	prev := externalDirectUDPProbeCandidates
+	externalDirectUDPProbeCandidates = func(_ context.Context, conn net.PacketConn, _ *tailcfg.DERPMap, _ publicPortmap) []string {
+		port := conn.LocalAddr().(*net.UDPAddr).Port
+		mu.Lock()
+		callCount[port]++
+		attempt := callCount[port]
+		mu.Unlock()
+		if attempt == 1 {
+			return []string{fmt.Sprintf("10.0.4.184:%d", port)}
+		}
+		return []string{fmt.Sprintf("68.20.14.192:%d", port)}
+	}
+	t.Cleanup(func() { externalDirectUDPProbeCandidates = prev })
+
+	sets := externalDirectUDPCandidateSets(context.Background(), []net.PacketConn{connA, connB}, nil, nil)
+	flat := externalDirectUDPFlattenCandidateSets(sets)
+	for _, want := range []string{
+		fmt.Sprintf("68.20.14.192:%d", portA),
+		fmt.Sprintf("68.20.14.192:%d", portB),
+	} {
+		if !slices.Contains(flat, want) {
+			t.Fatalf("externalDirectUDPCandidateSets() flattened = %v, want %q after retry", flat, want)
+		}
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if callCount[portA] < 2 || callCount[portB] < 2 {
+		t.Fatalf("externalDirectUDPProbeCandidates call counts = %#v, want retry for both ports", callCount)
+	}
+}
+
 func TestExternalDirectUDPSectionSpoolRoundTripsAcrossLoopback(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
