@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/shayne/derpcat/pkg/derphole/protocol"
 	"github.com/shayne/derpcat/pkg/session"
 	"github.com/shayne/derpcat/pkg/token"
 )
@@ -364,6 +365,101 @@ func TestOfferPrefersSessionErrorOverClosedPipe(t *testing.T) {
 	})
 	if !errors.Is(err, sentinel) {
 		t.Fatalf("Send() error = %v, want %v", err, sentinel)
+	}
+}
+
+func TestSendDoesNotFinishProgressWhenSessionFailsAfterDrainingInput(t *testing.T) {
+	prev := derpholeSessionSend
+	t.Cleanup(func() {
+		derpholeSessionSend = prev
+	})
+
+	derpholeSessionSend = func(_ context.Context, cfg session.SendConfig) error {
+		if _, err := io.Copy(io.Discard, cfg.StdioIn); err != nil {
+			return err
+		}
+		return context.DeadlineExceeded
+	}
+
+	srcDir := t.TempDir()
+	srcPath := filepath.Join(srcDir, "payload.bin")
+	if err := os.WriteFile(srcPath, bytes.Repeat([]byte("z"), 64*1024), 0o600); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+	tok, err := token.Encode(token.Token{
+		Version:      token.SupportedVersion,
+		ExpiresUnix:  time.Now().Add(time.Hour).Unix(),
+		Capabilities: token.CapabilityStdio,
+	})
+	if err != nil {
+		t.Fatalf("token.Encode() error = %v", err)
+	}
+
+	var stderr bytes.Buffer
+	err = Send(context.Background(), SendConfig{
+		Token:          tok,
+		What:           srcPath,
+		Stderr:         &stderr,
+		ProgressOutput: &stderr,
+	})
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Send() error = %v, want %v", err, context.DeadlineExceeded)
+	}
+	if strings.Contains(stderr.String(), "100%|") {
+		t.Fatalf("send stderr = %q, want no final 100%% progress on failed session", stderr.String())
+	}
+}
+
+func TestSendPassesKnownFileWireSizeToSession(t *testing.T) {
+	prev := derpholeSessionSend
+	t.Cleanup(func() {
+		derpholeSessionSend = prev
+	})
+
+	sentinel := errors.New("session stopped")
+	var got session.SendConfig
+	derpholeSessionSend = func(_ context.Context, cfg session.SendConfig) error {
+		got = cfg
+		if rc, ok := cfg.StdioIn.(io.ReadCloser); ok {
+			_ = rc.Close()
+		}
+		return sentinel
+	}
+
+	payload := bytes.Repeat([]byte("q"), 4096)
+	srcDir := t.TempDir()
+	srcPath := filepath.Join(srcDir, "payload.bin")
+	if err := os.WriteFile(srcPath, payload, 0o600); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+	tok, err := token.Encode(token.Token{
+		Version:      token.SupportedVersion,
+		ExpiresUnix:  time.Now().Add(time.Hour).Unix(),
+		Capabilities: token.CapabilityStdio,
+	})
+	if err != nil {
+		t.Fatalf("token.Encode() error = %v", err)
+	}
+
+	err = Send(context.Background(), SendConfig{
+		Token: tok,
+		What:  srcPath,
+	})
+	if !errors.Is(err, sentinel) {
+		t.Fatalf("Send() error = %v, want %v", err, sentinel)
+	}
+	headerBytes, err := protocol.HeaderWireSize(protocol.Header{
+		Version: 1,
+		Kind:    protocol.KindFile,
+		Name:    "payload.bin",
+		Size:    int64(len(payload)),
+		Verify:  VerificationString(tok),
+	})
+	if err != nil {
+		t.Fatalf("HeaderWireSize() error = %v", err)
+	}
+	if want := headerBytes + int64(len(payload)); got.StdioExpectedBytes != want {
+		t.Fatalf("StdioExpectedBytes = %d, want %d", got.StdioExpectedBytes, want)
 	}
 }
 

@@ -3364,6 +3364,9 @@ func (c *blastStreamReceiveCoordinator) acceptStripedSequentialPacketLocked(stat
 		} else if state.finalTotal != packet.Offset {
 			return errors.New("striped blast done packets disagree on final size")
 		}
+		if err := c.validateFinalTotalLocked("striped blast", state.finalTotal); err != nil {
+			return err
+		}
 		stripe.expectedSeq++
 	}
 	return nil
@@ -3774,6 +3777,9 @@ func (c *blastStreamReceiveCoordinator) completeRun(ctx context.Context, runID [
 	if state == nil || !state.complete() {
 		return false, nil
 	}
+	if err := c.validateFinalTotalLocked("blast", state.totalBytes); err != nil {
+		return false, err
+	}
 	if err := c.flushGlobalPayload(state); err != nil {
 		return false, err
 	}
@@ -3782,6 +3788,20 @@ func (c *blastStreamReceiveCoordinator) completeRun(ctx context.Context, runID [
 		return false, err
 	}
 	return true, nil
+}
+
+func (c *blastStreamReceiveCoordinator) validateFinalTotalLocked(label string, finalTotal uint64) error {
+	if c == nil || c.expectedBytes <= 0 {
+		return nil
+	}
+	expected := uint64(c.expectedBytes)
+	if finalTotal < expected {
+		return fmt.Errorf("%s incomplete: received %d bytes, want %d", label, finalTotal, expected)
+	}
+	if finalTotal > expected {
+		return fmt.Errorf("%s final size %d exceeds expected %d", label, finalTotal, expected)
+	}
+	return nil
 }
 
 func (c *blastStreamReceiveCoordinator) recoverFEC(ctx context.Context, runID [16]byte, state *blastReceiveRunState) error {

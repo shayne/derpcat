@@ -61,6 +61,8 @@ type sendTransfer struct {
 	progressTotal int64
 }
 
+const verificationPlaceholder = "0000-0000-0000"
+
 var (
 	derpholeSessionDialAttach = session.DialAttach
 	derpholeSessionListen     = session.Listen
@@ -304,7 +306,22 @@ func prepareSendTransfer(cfg SendConfig) (sendTransfer, error) {
 	}, nil
 }
 
-func writeTransfer(w io.Writer, tx sendTransfer, progressOut, stderr io.Writer) error {
+func transferSessionExpectedBytes(tx sendTransfer) int64 {
+	if tx.progressTotal < 0 {
+		return -1
+	}
+	header := tx.header
+	if header.Verify == "" {
+		header.Verify = verificationPlaceholder
+	}
+	headerBytes, err := protocol.HeaderWireSize(header)
+	if err != nil {
+		return -1
+	}
+	return headerBytes + tx.progressTotal
+}
+
+func writeTransferWithProgress(w io.Writer, tx sendTransfer, progressOut, stderr io.Writer) (*ProgressReporter, error) {
 	if tx.summary != "" && stderr != nil {
 		fmt.Fprintln(stderr, tx.summary)
 	}
@@ -315,12 +332,23 @@ func writeTransfer(w io.Writer, tx sendTransfer, progressOut, stderr io.Writer) 
 	}
 
 	if err := protocol.WriteHeader(w, tx.header); err != nil {
-		return err
+		return progress, err
 	}
 	_, err := io.Copy(w, body)
+	return progress, err
+}
+
+func finishTransferProgress(progress *ProgressReporter, err error) {
 	if err == nil {
 		progress.Finish()
+		return
 	}
+	progress.Abort()
+}
+
+func writeTransfer(w io.Writer, tx sendTransfer, progressOut, stderr io.Writer) error {
+	progress, err := writeTransferWithProgress(w, tx, progressOut, stderr)
+	finishTransferProgress(progress, err)
 	return err
 }
 
@@ -330,12 +358,13 @@ func offerTransfer(ctx context.Context, cfg SendConfig, tx sendTransfer) error {
 	offerErrCh := make(chan error, 1)
 	go func() {
 		_, err := derpholeSessionOffer(ctx, session.OfferConfig{
-			Emitter:        cfg.Emitter,
-			TokenSink:      tokenSink,
-			StdioIn:        pipeReader,
-			UsePublicDERP:  cfg.UsePublicDERP,
-			ForceRelay:     cfg.ForceRelay,
-			ParallelPolicy: cfg.ParallelPolicy,
+			Emitter:            cfg.Emitter,
+			TokenSink:          tokenSink,
+			StdioIn:            pipeReader,
+			StdioExpectedBytes: transferSessionExpectedBytes(tx),
+			UsePublicDERP:      cfg.UsePublicDERP,
+			ForceRelay:         cfg.ForceRelay,
+			ParallelPolicy:     cfg.ParallelPolicy,
 		})
 		offerErrCh <- err
 	}()
@@ -352,31 +381,36 @@ func offerTransfer(ctx context.Context, cfg SendConfig, tx sendTransfer) error {
 	tx.header.Verify = VerificationString(token)
 	WriteSendInstruction(cfg.Stderr, token)
 
-	writeErr := writeTransfer(pipeWriter, tx, cfg.ProgressOutput, cfg.Stderr)
+	progress, writeErr := writeTransferWithProgress(pipeWriter, tx, cfg.ProgressOutput, cfg.Stderr)
 	_ = pipeWriter.CloseWithError(writeErr)
 	offerErr := <-offerErrCh
-	return preferSessionPipeError(writeErr, offerErr)
+	err := preferSessionPipeError(writeErr, offerErr)
+	finishTransferProgress(progress, err)
+	return err
 }
 
 func sendViaSession(ctx context.Context, cfg SendConfig, tx sendTransfer) error {
 	pipeReader, pipeWriter := io.Pipe()
 	sendErrCh := make(chan error, 1)
+	tx.header.Verify = VerificationString(cfg.Token)
 	go func() {
 		sendErrCh <- derpholeSessionSend(ctx, session.SendConfig{
-			Token:          cfg.Token,
-			Emitter:        cfg.Emitter,
-			StdioIn:        pipeReader,
-			UsePublicDERP:  cfg.UsePublicDERP,
-			ForceRelay:     cfg.ForceRelay,
-			ParallelPolicy: cfg.ParallelPolicy,
+			Token:              cfg.Token,
+			Emitter:            cfg.Emitter,
+			StdioIn:            pipeReader,
+			StdioExpectedBytes: transferSessionExpectedBytes(tx),
+			UsePublicDERP:      cfg.UsePublicDERP,
+			ForceRelay:         cfg.ForceRelay,
+			ParallelPolicy:     cfg.ParallelPolicy,
 		})
 	}()
 
-	tx.header.Verify = VerificationString(cfg.Token)
-	writeErr := writeTransfer(pipeWriter, tx, cfg.ProgressOutput, cfg.Stderr)
+	progress, writeErr := writeTransferWithProgress(pipeWriter, tx, cfg.ProgressOutput, cfg.Stderr)
 	_ = pipeWriter.CloseWithError(writeErr)
 	sendErr := <-sendErrCh
-	return preferSessionPipeError(writeErr, sendErr)
+	err := preferSessionPipeError(writeErr, sendErr)
+	finishTransferProgress(progress, err)
+	return err
 }
 
 func readTransfer(r io.Reader, token string, stdout io.Writer, outputPath string, stderr, progressOut io.Writer) error {
@@ -432,9 +466,13 @@ func receiveFile(r io.Reader, header protocol.Header, outputPath string, stderr,
 	}
 
 	if header.Size > 0 {
-		_, err = io.CopyN(f, r, header.Size)
+		var copied int64
+		copied, err = io.CopyN(f, r, header.Size)
 		if err == nil {
 			progress.Finish()
+		}
+		if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+			return fmt.Errorf("incomplete file transfer: received %s of %s: %w", formatProgressBytes(copied), formatProgressBytes(header.Size), err)
 		}
 		return err
 	}

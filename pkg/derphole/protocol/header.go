@@ -31,6 +31,17 @@ type Header struct {
 	Metadata []byte `json:"metadata,omitempty"`
 }
 
+func HeaderWireSize(h Header) (int64, error) {
+	raw, err := json.Marshal(h)
+	if err != nil {
+		return 0, err
+	}
+	if len(raw) > maxHeaderSize {
+		return 0, fmt.Errorf("header too large: %d bytes", len(raw))
+	}
+	return int64(len(magic) + 4 + len(raw)), nil
+}
+
 func WriteHeader(w io.Writer, h Header) error {
 	raw, err := json.Marshal(h)
 	if err != nil {

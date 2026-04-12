@@ -4878,6 +4878,13 @@ func TestExternalDirectUDPStreamStartRequestsProbeRatesForUnknownStreams(t *test
 	}
 }
 
+func TestExternalDirectUDPStreamStartIncludesKnownExpectedBytes(t *testing.T) {
+	got := externalDirectUDPStreamStart(externalDirectUDPMaxRateMbps, 12345)
+	if got.ExpectedBytes != 12345 {
+		t.Fatalf("externalDirectUDPStreamStart().ExpectedBytes = %d, want 12345", got.ExpectedBytes)
+	}
+}
+
 func TestExternalDirectUDPSelectRateFromProbeSamplesUsesDeliveredGoodput(t *testing.T) {
 	sent := []directUDPRateProbeSample{
 		{RateMbps: 350, BytesSent: 9_000_000, DurationMillis: 200},

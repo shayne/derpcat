@@ -26,21 +26,23 @@ type AttachListenConfig struct {
 }
 
 type SendConfig struct {
-	Token          string
-	Emitter        *telemetry.Emitter
-	StdioIn        io.Reader
-	ForceRelay     bool
-	UsePublicDERP  bool
-	ParallelPolicy ParallelPolicy
+	Token              string
+	Emitter            *telemetry.Emitter
+	StdioIn            io.Reader
+	StdioExpectedBytes int64
+	ForceRelay         bool
+	UsePublicDERP      bool
+	ParallelPolicy     ParallelPolicy
 }
 
 type OfferConfig struct {
-	Emitter        *telemetry.Emitter
-	TokenSink      chan<- string
-	StdioIn        io.Reader
-	ForceRelay     bool
-	UsePublicDERP  bool
-	ParallelPolicy ParallelPolicy
+	Emitter            *telemetry.Emitter
+	TokenSink          chan<- string
+	StdioIn            io.Reader
+	StdioExpectedBytes int64
+	ForceRelay         bool
+	UsePublicDERP      bool
+	ParallelPolicy     ParallelPolicy
 }
 
 type ReceiveConfig struct {

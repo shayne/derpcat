@@ -217,6 +217,89 @@ func TestStripedRawTransferCompletesAcrossLoopback(t *testing.T) {
 	}
 }
 
+func TestReceiveBlastStreamParallelToWriterRejectsShortStripedFinalTotal(t *testing.T) {
+	server0, err := net.ListenPacket("udp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer server0.Close()
+	server1, err := net.ListenPacket("udp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer server1.Close()
+	client, err := net.ListenPacket("udp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	runID := testRunID(0x91)
+	var out bytes.Buffer
+	errCh := make(chan error, 1)
+	go func() {
+		_, err := ReceiveBlastStreamParallelToWriter(ctx, []net.PacketConn{server0, server1}, &out, ReceiveConfig{
+			Blast:         true,
+			ExpectedRunID: runID,
+		}, 1024)
+		errCh <- err
+	}()
+
+	writeProbePacket(t, client, server0.LocalAddr(), Packet{
+		Version:  ProtocolVersion,
+		Type:     PacketTypeHello,
+		StripeID: 0,
+		RunID:    runID,
+		Seq:      2,
+	})
+	writeProbePacket(t, client, server1.LocalAddr(), Packet{
+		Version:  ProtocolVersion,
+		Type:     PacketTypeHello,
+		StripeID: 1,
+		RunID:    runID,
+		Seq:      2,
+	})
+	writeProbePacket(t, client, server0.LocalAddr(), Packet{
+		Version:  ProtocolVersion,
+		Type:     PacketTypeData,
+		StripeID: 0,
+		RunID:    runID,
+		Seq:      0,
+		Offset:   0,
+		Payload:  bytes.Repeat([]byte("a"), 512),
+	})
+	writeProbePacket(t, client, server0.LocalAddr(), Packet{
+		Version:  ProtocolVersion,
+		Type:     PacketTypeDone,
+		StripeID: 0,
+		RunID:    runID,
+		Seq:      1,
+		Offset:   512,
+	})
+	writeProbePacket(t, client, server1.LocalAddr(), Packet{
+		Version:  ProtocolVersion,
+		Type:     PacketTypeDone,
+		StripeID: 1,
+		RunID:    runID,
+		Seq:      0,
+		Offset:   512,
+	})
+
+	select {
+	case err := <-errCh:
+		if err == nil {
+			t.Fatalf("ReceiveBlastStreamParallelToWriter() error = nil after %d bytes, want incomplete stream error", out.Len())
+		}
+		if !strings.Contains(err.Error(), "want 1024") {
+			t.Fatalf("ReceiveBlastStreamParallelToWriter() error = %v, want expected byte count", err)
+		}
+	case <-ctx.Done():
+		t.Fatal("ReceiveBlastStreamParallelToWriter() did not return before context deadline")
+	}
+}
+
 func TestTransferStatsCaptureFirstByte(t *testing.T) {
 	src := bytes.Repeat([]byte("derpcat"), 1<<12)
 	a, err := net.ListenPacket("udp4", "127.0.0.1:0")

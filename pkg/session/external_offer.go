@@ -144,11 +144,12 @@ func offerExternal(ctx context.Context, cfg OfferConfig) (string, error) {
 		}
 
 		sendCfg := SendConfig{
-			Emitter:        cfg.Emitter,
-			StdioIn:        cfg.StdioIn,
-			ForceRelay:     cfg.ForceRelay,
-			UsePublicDERP:  cfg.UsePublicDERP,
-			ParallelPolicy: cfg.ParallelPolicy,
+			Emitter:            cfg.Emitter,
+			StdioIn:            cfg.StdioIn,
+			StdioExpectedBytes: cfg.StdioExpectedBytes,
+			ForceRelay:         cfg.ForceRelay,
+			UsePublicDERP:      cfg.UsePublicDERP,
+			ParallelPolicy:     cfg.ParallelPolicy,
 		}
 		var sendErr error
 		if cfg.ForceRelay {

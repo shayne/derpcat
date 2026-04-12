@@ -87,6 +87,19 @@ func (p *ProgressReporter) Finish() {
 	p.renderLocked(true, progressNow())
 }
 
+func (p *ProgressReporter) Abort() {
+	if p == nil {
+		return
+	}
+
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	if p.wroteLine {
+		fmt.Fprintln(p.out)
+	}
+}
+
 func (p *ProgressReporter) renderLocked(final bool, now time.Time) {
 	elapsed := now.Sub(p.start)
 	if elapsed <= 0 {
