@@ -14,6 +14,7 @@ const (
 	CapabilityStdio uint32 = 1 << iota
 	CapabilityShare
 	CapabilityAttach
+	CapabilityStdioOffer
 )
 
 type Token struct {

@@ -1753,6 +1753,12 @@ func TestPublicInitialProbeCandidatesDoesNotSynchronouslyGatherTraversalCandidat
 	conn := &stubPacketConn{localAddr: &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 4242}}
 	mapped := netip.MustParseAddrPort("198.51.100.10:54321")
 	pm := &sessionLifecyclePortmap{have: true, snapshot: mapped}
+	prevInterfaceAddrs := publicInterfaceAddrs
+	publicInterfaceAddrs = func() ([]net.Addr, error) {
+		return []net.Addr{
+			&net.IPNet{IP: net.IPv4(203, 0, 113, 5), Mask: net.CIDRMask(24, 32)},
+		}, nil
+	}
 
 	called := false
 	prev := gatherTraversalCandidates
@@ -1762,20 +1768,49 @@ func TestPublicInitialProbeCandidatesDoesNotSynchronouslyGatherTraversalCandidat
 	}
 	t.Cleanup(func() {
 		gatherTraversalCandidates = prev
+		publicInterfaceAddrs = prevInterfaceAddrs
 	})
 
 	got := publicInitialProbeCandidates(conn, pm)
 	if called {
 		t.Fatal("publicInitialProbeCandidates() synchronously called gatherTraversalCandidates")
 	}
-	if !containsString(got, "127.0.0.1:4242") {
-		t.Fatalf("publicInitialProbeCandidates() = %v, want local socket candidate", got)
+	if !containsString(got, "203.0.113.5:4242") {
+		t.Fatalf("publicInitialProbeCandidates() = %v, want public interface candidate", got)
 	}
 	if !containsString(got, mapped.String()) {
 		t.Fatalf("publicInitialProbeCandidates() = %v, want mapped candidate %q", got, mapped)
 	}
 	if containsString(got, "203.0.113.10:4242") {
 		t.Fatalf("publicInitialProbeCandidates() = %v, want no gathered traversal candidate", got)
+	}
+}
+
+func TestPublicInitialProbeCandidatesKeepsPrivateInterfaceCandidates(t *testing.T) {
+	conn := &stubPacketConn{localAddr: &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 4242}}
+	mapped := netip.MustParseAddrPort("198.51.100.10:54321")
+	pm := &sessionLifecyclePortmap{have: true, snapshot: mapped}
+
+	prevInterfaceAddrs := publicInterfaceAddrs
+	publicInterfaceAddrs = func() ([]net.Addr, error) {
+		return []net.Addr{
+			&net.IPNet{IP: net.IPv4(127, 0, 0, 1), Mask: net.CIDRMask(8, 32)},
+			&net.IPNet{IP: net.IPv4(10, 0, 4, 2), Mask: net.CIDRMask(24, 32)},
+			&net.IPNet{IP: net.IPv4(172, 17, 0, 1), Mask: net.CIDRMask(16, 32)},
+			&net.IPNet{IP: net.IPv4(192, 168, 1, 9), Mask: net.CIDRMask(24, 32)},
+		}, nil
+	}
+	t.Cleanup(func() { publicInterfaceAddrs = prevInterfaceAddrs })
+
+	got := publicInitialProbeCandidates(conn, pm)
+	if containsString(got, "127.0.0.1:4242") {
+		t.Fatalf("publicInitialProbeCandidates() = %v, want loopback excluded", got)
+	}
+	if !containsString(got, "10.0.4.2:4242") || !containsString(got, "172.17.0.1:4242") || !containsString(got, "192.168.1.9:4242") {
+		t.Fatalf("publicInitialProbeCandidates() = %v, want private interface candidates preserved for same-LAN direct paths", got)
+	}
+	if !containsString(got, mapped.String()) {
+		t.Fatalf("publicInitialProbeCandidates() = %v, want mapped candidate %q", got, mapped)
 	}
 }
 
@@ -1871,7 +1906,7 @@ func TestPublicCandidateSourceReturnsQuicklyWhenSTUNGatherBlocks(t *testing.T) {
 	defer cancel()
 
 	conn := &stubPacketConn{localAddr: &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 4242}}
-	localCandidates := []net.Addr{&net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 4242}}
+	localCandidates := []net.Addr{&net.UDPAddr{IP: net.IPv4(203, 0, 113, 10), Port: 4242}}
 	stunPackets := make(chan traversal.STUNPacket)
 
 	prevSTUNGather := gatherTraversalCandidatesFromSTUNPackets
@@ -1901,8 +1936,8 @@ func TestPublicCandidateSourceReturnsQuicklyWhenSTUNGatherBlocks(t *testing.T) {
 		if elapsed := time.Since(started); elapsed > time.Second {
 			t.Fatalf("publicCandidateSource() took %s, want sub-second fallback when STUN gather blocks", elapsed)
 		}
-		if !containsAddrString(got, "127.0.0.1:4242") {
-			t.Fatalf("publicCandidateSource() = %v, want fallback local candidate 127.0.0.1:4242", got)
+		if !containsAddrString(got, "203.0.113.10:4242") {
+			t.Fatalf("publicCandidateSource() = %v, want fallback public candidate 203.0.113.10:4242", got)
 		}
 	case <-time.After(time.Second):
 		cancel()

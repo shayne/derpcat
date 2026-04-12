@@ -34,6 +34,23 @@ type SendConfig struct {
 	ParallelPolicy ParallelPolicy
 }
 
+type OfferConfig struct {
+	Emitter        *telemetry.Emitter
+	TokenSink      chan<- string
+	StdioIn        io.Reader
+	ForceRelay     bool
+	UsePublicDERP  bool
+	ParallelPolicy ParallelPolicy
+}
+
+type ReceiveConfig struct {
+	Token         string
+	Emitter       *telemetry.Emitter
+	StdioOut      io.Writer
+	ForceRelay    bool
+	UsePublicDERP bool
+}
+
 type AttachDialConfig struct {
 	Token          string
 	Emitter        *telemetry.Emitter

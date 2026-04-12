@@ -7,15 +7,16 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net"
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	dharchive "github.com/shayne/derpcat/pkg/derphole/archive"
 	"github.com/shayne/derpcat/pkg/derphole/protocol"
 	"github.com/shayne/derpcat/pkg/session"
 	"github.com/shayne/derpcat/pkg/telemetry"
+	"github.com/shayne/derpcat/pkg/token"
 )
 
 type SendConfig struct {
@@ -68,7 +69,22 @@ func Send(ctx context.Context, cfg SendConfig) error {
 	}
 
 	if cfg.Token == "" {
-		listener, err := session.ListenAttach(ctx, session.AttachListenConfig{
+		return offerTransfer(ctx, cfg, tx)
+	}
+
+	tok, err := token.Decode(cfg.Token, time.Now())
+	if err != nil {
+		return err
+	}
+	switch {
+	case tok.Capabilities&token.CapabilityStdio != 0:
+		return sendViaSession(ctx, cfg, tx)
+	case tok.Capabilities&token.CapabilityStdioOffer != 0:
+		return errors.New("this code expects `derphole receive`, not `derphole send`")
+	case tok.Capabilities&token.CapabilityAttach != 0:
+		tx.header.Verify = VerificationString(cfg.Token)
+		conn, err := session.DialAttach(ctx, session.AttachDialConfig{
+			Token:         cfg.Token,
 			Emitter:       cfg.Emitter,
 			UsePublicDERP: cfg.UsePublicDERP,
 			ForceRelay:    cfg.ForceRelay,
@@ -76,33 +92,11 @@ func Send(ctx context.Context, cfg SendConfig) error {
 		if err != nil {
 			return err
 		}
-		defer listener.Close()
-
-		tx.header.Verify = VerificationString(listener.Token)
-		WriteSendInstruction(cfg.Stderr, listener.Token)
-
-		conn, err := listener.Accept(ctx)
-		if err != nil {
-			return err
-		}
 		defer conn.Close()
-
 		return writeTransfer(conn, tx, cfg.ProgressOutput, cfg.Stderr)
+	default:
+		return errors.New("unsupported receive code")
 	}
-
-	tx.header.Verify = VerificationString(cfg.Token)
-	conn, err := session.DialAttach(ctx, session.AttachDialConfig{
-		Token:         cfg.Token,
-		Emitter:       cfg.Emitter,
-		UsePublicDERP: cfg.UsePublicDERP,
-		ForceRelay:    cfg.ForceRelay,
-	})
-	if err != nil {
-		return err
-	}
-	defer conn.Close()
-
-	return writeTransfer(conn, tx, cfg.ProgressOutput, cfg.Stderr)
 }
 
 func Receive(ctx context.Context, cfg ReceiveConfig) error {
@@ -112,7 +106,85 @@ func Receive(ctx context.Context, cfg ReceiveConfig) error {
 	}
 
 	if cfg.Allocate {
-		listener, err := session.ListenAttach(ctx, session.AttachListenConfig{
+		tokenSink := make(chan string, 1)
+		pipeReader, pipeWriter := io.Pipe()
+		listenErrCh := make(chan error, 1)
+		go func() {
+			_, err := session.Listen(ctx, session.ListenConfig{
+				Emitter:       cfg.Emitter,
+				TokenSink:     tokenSink,
+				StdioOut:      pipeWriter,
+				UsePublicDERP: cfg.UsePublicDERP,
+				ForceRelay:    cfg.ForceRelay,
+			})
+			if err != nil {
+				_ = pipeWriter.CloseWithError(err)
+			}
+			listenErrCh <- err
+		}()
+
+		var token string
+		select {
+		case token = <-tokenSink:
+		case err := <-listenErrCh:
+			return err
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+
+		WriteReceiveToken(cfg.Stderr, token)
+		readErr := readTransfer(pipeReader, token, cfg.Stdout, cfg.OutputPath, cfg.Stderr, cfg.ProgressOutput)
+		listenErr := <-listenErrCh
+		if readErr != nil {
+			return readErr
+		}
+		return listenErr
+	}
+
+	receiveToken := cfg.Token
+	if receiveToken == "" && cfg.PromptFor != nil {
+		var err error
+		receiveToken, err = cfg.PromptFor(stdin, cfg.Stderr)
+		if err != nil {
+			return err
+		}
+	}
+	if receiveToken == "" {
+		return errors.New("receive code is required")
+	}
+
+	tok, err := token.Decode(receiveToken, time.Now())
+	if err != nil {
+		return err
+	}
+	switch {
+	case tok.Capabilities&token.CapabilityStdioOffer != 0:
+		pipeReader, pipeWriter := io.Pipe()
+		receiveErrCh := make(chan error, 1)
+		go func() {
+			err := session.Receive(ctx, session.ReceiveConfig{
+				Token:         receiveToken,
+				Emitter:       cfg.Emitter,
+				StdioOut:      pipeWriter,
+				UsePublicDERP: cfg.UsePublicDERP,
+				ForceRelay:    cfg.ForceRelay,
+			})
+			if err != nil {
+				_ = pipeWriter.CloseWithError(err)
+			}
+			receiveErrCh <- err
+		}()
+		readErr := readTransfer(pipeReader, receiveToken, cfg.Stdout, cfg.OutputPath, cfg.Stderr, cfg.ProgressOutput)
+		receiveErr := <-receiveErrCh
+		if readErr != nil {
+			return readErr
+		}
+		return receiveErr
+	case tok.Capabilities&token.CapabilityStdio != 0:
+		return errors.New("this code expects `derphole send`, not `derphole receive`")
+	case tok.Capabilities&token.CapabilityAttach != 0:
+		conn, err := session.DialAttach(ctx, session.AttachDialConfig{
+			Token:         receiveToken,
 			Emitter:       cfg.Emitter,
 			UsePublicDERP: cfg.UsePublicDERP,
 			ForceRelay:    cfg.ForceRelay,
@@ -120,43 +192,11 @@ func Receive(ctx context.Context, cfg ReceiveConfig) error {
 		if err != nil {
 			return err
 		}
-		defer listener.Close()
-
-		WriteReceiveToken(cfg.Stderr, listener.Token)
-
-		conn, err := listener.Accept(ctx)
-		if err != nil {
-			return err
-		}
 		defer conn.Close()
-
-		return readTransfer(conn, listener.Token, cfg.Stdout, cfg.OutputPath, cfg.Stderr, cfg.ProgressOutput)
+		return readTransfer(conn, receiveToken, cfg.Stdout, cfg.OutputPath, cfg.Stderr, cfg.ProgressOutput)
+	default:
+		return errors.New("unsupported send code")
 	}
-
-	token := cfg.Token
-	if token == "" && cfg.PromptFor != nil {
-		var err error
-		token, err = cfg.PromptFor(stdin, cfg.Stderr)
-		if err != nil {
-			return err
-		}
-	}
-	if token == "" {
-		return errors.New("receive code is required")
-	}
-
-	conn, err := session.DialAttach(ctx, session.AttachDialConfig{
-		Token:         token,
-		Emitter:       cfg.Emitter,
-		UsePublicDERP: cfg.UsePublicDERP,
-		ForceRelay:    cfg.ForceRelay,
-	})
-	if err != nil {
-		return err
-	}
-	defer conn.Close()
-
-	return readTransfer(conn, token, cfg.Stdout, cfg.OutputPath, cfg.Stderr, cfg.ProgressOutput)
 }
 
 func prepareSendTransfer(cfg SendConfig) (sendTransfer, error) {
@@ -261,12 +301,71 @@ func writeTransfer(w io.Writer, tx sendTransfer, progressOut, stderr io.Writer) 
 	return err
 }
 
-func readTransfer(conn net.Conn, token string, stdout io.Writer, outputPath string, stderr, progressOut io.Writer) error {
+func offerTransfer(ctx context.Context, cfg SendConfig, tx sendTransfer) error {
+	pipeReader, pipeWriter := io.Pipe()
+	tokenSink := make(chan string, 1)
+	offerErrCh := make(chan error, 1)
+	go func() {
+		_, err := session.Offer(ctx, session.OfferConfig{
+			Emitter:       cfg.Emitter,
+			TokenSink:     tokenSink,
+			StdioIn:       pipeReader,
+			UsePublicDERP: cfg.UsePublicDERP,
+			ForceRelay:    cfg.ForceRelay,
+		})
+		offerErrCh <- err
+	}()
+
+	var token string
+	select {
+	case token = <-tokenSink:
+	case err := <-offerErrCh:
+		return err
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+
+	tx.header.Verify = VerificationString(token)
+	WriteSendInstruction(cfg.Stderr, token)
+
+	writeErr := writeTransfer(pipeWriter, tx, cfg.ProgressOutput, cfg.Stderr)
+	_ = pipeWriter.CloseWithError(writeErr)
+	offerErr := <-offerErrCh
+	if writeErr != nil {
+		return writeErr
+	}
+	return offerErr
+}
+
+func sendViaSession(ctx context.Context, cfg SendConfig, tx sendTransfer) error {
+	pipeReader, pipeWriter := io.Pipe()
+	sendErrCh := make(chan error, 1)
+	go func() {
+		sendErrCh <- session.Send(ctx, session.SendConfig{
+			Token:         cfg.Token,
+			Emitter:       cfg.Emitter,
+			StdioIn:       pipeReader,
+			UsePublicDERP: cfg.UsePublicDERP,
+			ForceRelay:    cfg.ForceRelay,
+		})
+	}()
+
+	tx.header.Verify = VerificationString(cfg.Token)
+	writeErr := writeTransfer(pipeWriter, tx, cfg.ProgressOutput, cfg.Stderr)
+	_ = pipeWriter.CloseWithError(writeErr)
+	sendErr := <-sendErrCh
+	if writeErr != nil {
+		return writeErr
+	}
+	return sendErr
+}
+
+func readTransfer(r io.Reader, token string, stdout io.Writer, outputPath string, stderr, progressOut io.Writer) error {
 	if stdout == nil {
 		stdout = io.Discard
 	}
 
-	reader := bufio.NewReader(conn)
+	reader := bufio.NewReader(r)
 	header, err := protocol.ReadHeader(reader)
 	if err != nil {
 		return err

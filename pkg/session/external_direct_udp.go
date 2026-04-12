@@ -13,6 +13,7 @@ import (
 	"net"
 	"net/netip"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -92,6 +93,7 @@ const (
 	externalRelayPrefixDERPSustainedMax            = 64 << 10
 	externalRelayPrefixDERPStartupBytes            = 4 << 20
 	externalRelayPrefixDERPHandoffAckWait          = 5 * time.Second
+	externalRelayPrefixDirectPrepStallWait         = 250 * time.Millisecond
 )
 
 var externalDirectUDPRateProbeMagic = [16]byte{0, 'd', 'e', 'r', 'p', 'c', 'a', 't', '-', 'r', 'a', 't', 'e', '-', 'v', '1'}
@@ -135,6 +137,28 @@ type externalDirectUDPSendPlan struct {
 	probeRates           []int
 	sentProbeSamples     []directUDPRateProbeSample
 	receivedProbeSamples []directUDPRateProbeSample
+}
+
+type externalDirectUDPHandoffReadyContextKey struct{}
+
+type externalDirectUDPHandoffReadySignal struct {
+	ch   chan struct{}
+	once sync.Once
+}
+
+func withExternalDirectUDPHandoffReadySignal(ctx context.Context) (context.Context, <-chan struct{}) {
+	signal := &externalDirectUDPHandoffReadySignal{ch: make(chan struct{})}
+	return context.WithValue(ctx, externalDirectUDPHandoffReadyContextKey{}, signal), signal.ch
+}
+
+func signalExternalDirectUDPHandoffReady(ctx context.Context) {
+	signal, _ := ctx.Value(externalDirectUDPHandoffReadyContextKey{}).(*externalDirectUDPHandoffReadySignal)
+	if signal == nil {
+		return
+	}
+	signal.once.Do(func() {
+		close(signal.ch)
+	})
 }
 
 type externalDirectUDPBudget struct {
@@ -382,6 +406,7 @@ func externalPrepareDirectUDPSend(ctx context.Context, tok token.Token, derpClie
 	if err := externalDirectUDPWaitStartAckFn(ctx, startAckCh); err != nil {
 		return plan, err
 	}
+	signalExternalDirectUDPHandoffReady(ctx)
 
 	selectedRateMbps := activeRateMbps
 	var sentProbeSamples []directUDPRateProbeSample
@@ -490,7 +515,7 @@ func externalPrepareDirectUDPReceive(ctx context.Context, dst io.Writer, tok tok
 	if err := externalDirectUDPWaitReadyFn(ctx, readyCh); err != nil {
 		return plan, err
 	}
-	remoteAddrs := externalDirectUDPParallelCandidateStrings(remoteCandidates, len(probeConns))
+	remoteAddrs := externalDirectUDPParallelCandidateStringsForPeer(remoteCandidates, len(probeConns), peerAddr)
 	if len(remoteAddrs) > 0 {
 		probeConns, remoteAddrs = externalDirectUDPPairs(probeConns, remoteAddrs)
 	}
@@ -852,6 +877,18 @@ func sendExternalViaRelayPrefixThenDirectUDP(ctx context.Context, rcfg externalR
 		directReadyCh <- directReadyResult{addr: addr, err: err}
 	}()
 
+	handoffRelay := func() (bool, error) {
+		close(relayStopCh)
+		if err := <-relayErrCh; err != nil {
+			return false, err
+		}
+		if spool.Done() {
+			emitExternalTransferMetricsComplete(metrics, rcfg.cfg.Emitter, "udp-send", probe.TransferStats{}, time.Now())
+			return true, nil
+		}
+		return false, spool.RewindTo(spool.AckedWatermark())
+	}
+
 	select {
 	case relayErr := <-relayErrCh:
 		directCancel()
@@ -871,6 +908,7 @@ func sendExternalViaRelayPrefixThenDirectUDP(ctx context.Context, rcfg externalR
 		}
 		prepCtx, prepCancel := context.WithCancel(ctx)
 		defer prepCancel()
+		prepCtx, handoffReadyCh := withExternalDirectUDPHandoffReadySignal(prepCtx)
 		type sendPrepResult struct {
 			plan externalDirectUDPSendPlan
 			err  error
@@ -880,45 +918,73 @@ func sendExternalViaRelayPrefixThenDirectUDP(ctx context.Context, rcfg externalR
 			plan, err := externalPrepareDirectUDPSendFn(prepCtx, rcfg.tok, rcfg.derpClient, rcfg.listenerDERP, ready.addr, rcfg.probeConns, rcfg.remoteCandidates, rcfg.readyAckCh, rcfg.startAckCh, rcfg.rateProbeCh, rcfg.cfg)
 			prepCh <- sendPrepResult{plan: plan, err: err}
 		}()
-
-		select {
-		case relayErr := <-relayErrCh:
-			prepCancel()
-			if relayErr != nil {
-				return relayErr
+		stallTimer := time.NewTimer(externalRelayPrefixDirectPrepStallWait)
+		defer stallTimer.Stop()
+		stallFired := false
+		handoffReady := false
+		postHandoff := func() error {
+			done, err := handoffRelay()
+			if err != nil {
+				return err
 			}
-			emitExternalTransferMetricsComplete(metrics, rcfg.cfg.Emitter, "udp-send", probe.TransferStats{}, time.Now())
-			return nil
-		case prep := <-prepCh:
+			if done {
+				return nil
+			}
+			prep := <-prepCh
 			if prep.err != nil {
-				relayErr := <-relayErrCh
-				if relayErr != nil {
-					return relayErr
-				}
-				emitExternalTransferMetricsComplete(metrics, rcfg.cfg.Emitter, "udp-send", probe.TransferStats{}, time.Now())
-				return nil
-			}
-			if externalRelayPrefixShouldFinishRelay(spool) {
-				relayErr := <-relayErrCh
-				if relayErr != nil {
-					return relayErr
-				}
-				emitExternalTransferMetricsComplete(metrics, rcfg.cfg.Emitter, "udp-send", probe.TransferStats{}, time.Now())
-				return nil
-			}
-			close(relayStopCh)
-			if err := <-relayErrCh; err != nil {
-				return err
-			}
-			if spool.Done() {
-				emitExternalTransferMetricsComplete(metrics, rcfg.cfg.Emitter, "udp-send", probe.TransferStats{}, time.Now())
-				return nil
-			}
-			if err := spool.RewindTo(spool.AckedWatermark()); err != nil {
-				return err
+				return prep.err
 			}
 			externalDirectUDPActivateDirectPath(rcfg.pathEmitter, rcfg.transportManager, rcfg.punchCancel)
 			return externalExecutePreparedDirectUDPSendFn(ctx, newExternalHandoffSpoolReader(spool), prep.plan, rcfg.cfg, metrics)
+		}
+
+		for {
+			select {
+			case relayErr := <-relayErrCh:
+				prepCancel()
+				if relayErr != nil {
+					return relayErr
+				}
+				emitExternalTransferMetricsComplete(metrics, rcfg.cfg.Emitter, "udp-send", probe.TransferStats{}, time.Now())
+				return nil
+			case prep := <-prepCh:
+				if prep.err != nil {
+					relayErr := <-relayErrCh
+					if relayErr != nil {
+						return relayErr
+					}
+					emitExternalTransferMetricsComplete(metrics, rcfg.cfg.Emitter, "udp-send", probe.TransferStats{}, time.Now())
+					return nil
+				}
+				if externalRelayPrefixShouldFinishRelay(spool) {
+					relayErr := <-relayErrCh
+					if relayErr != nil {
+						return relayErr
+					}
+					emitExternalTransferMetricsComplete(metrics, rcfg.cfg.Emitter, "udp-send", probe.TransferStats{}, time.Now())
+					return nil
+				}
+				done, err := handoffRelay()
+				if err != nil {
+					return err
+				}
+				if done {
+					return nil
+				}
+				externalDirectUDPActivateDirectPath(rcfg.pathEmitter, rcfg.transportManager, rcfg.punchCancel)
+				return externalExecutePreparedDirectUDPSendFn(ctx, newExternalHandoffSpoolReader(spool), prep.plan, rcfg.cfg, metrics)
+			case <-stallTimer.C:
+				stallFired = true
+				if handoffReady {
+					return postHandoff()
+				}
+			case <-handoffReadyCh:
+				handoffReady = true
+				handoffReadyCh = nil
+				if stallFired {
+					return postHandoff()
+				}
+			}
 		}
 	}
 }
@@ -1706,9 +1772,9 @@ func externalDirectUDPParallelCandidateStringsForPeer(candidates []net.Addr, par
 		parallel = 1
 	}
 	ordered := probe.CandidateStringsInOrder(candidates)
-	if peer != nil && len(ordered) == 0 {
-		if peerAddr, ok := externalDirectUDPAddrPort(peer); ok {
-			peerCandidate := peerAddr.String()
+	if peerAddr, ok := externalDirectUDPAddrPort(peer); ok {
+		peerCandidate := peerAddr.String()
+		if !slices.Contains(ordered, peerCandidate) {
 			ordered = append(ordered, peerCandidate)
 		}
 	}

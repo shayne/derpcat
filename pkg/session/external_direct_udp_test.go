@@ -652,6 +652,231 @@ func TestSendExternalViaRelayPrefixThenDirectUDPCompletesSmallPayloadBeforeSlowD
 	}
 }
 
+func TestSendExternalViaRelayPrefixThenDirectUDPPausesRelayBeforeDirectPrep(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+
+	prevSendRelay := externalSendExternalHandoffDERPFn
+	relayPaused := make(chan struct{})
+	externalSendExternalHandoffDERPFn = func(ctx context.Context, client *derpbind.Client, peerDERP key.NodePublic, spool *externalHandoffSpool, stop <-chan struct{}, metrics *externalTransferMetrics) error {
+		select {
+		case <-stop:
+			close(relayPaused)
+			return nil
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	t.Cleanup(func() { externalSendExternalHandoffDERPFn = prevSendRelay })
+
+	prevWaitDirectUDPAddr := waitExternalDirectUDPAddr
+	waitExternalDirectUDPAddr = func(context.Context, net.PacketConn, *transport.Manager) (net.Addr, error) {
+		return &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 12345}, nil
+	}
+	t.Cleanup(func() { waitExternalDirectUDPAddr = prevWaitDirectUDPAddr })
+
+	prevPrepareDirectUDPSend := externalPrepareDirectUDPSendFn
+	externalPrepareDirectUDPSendFn = func(ctx context.Context, tok token.Token, derpClient *derpbind.Client, listenerDERP key.NodePublic, peerAddr net.Addr, probeConns []net.PacketConn, remoteCandidates []net.Addr, readyAckCh <-chan derpbind.Packet, startAckCh <-chan derpbind.Packet, rateProbeCh <-chan derpbind.Packet, cfg SendConfig) (externalDirectUDPSendPlan, error) {
+		signalExternalDirectUDPHandoffReady(ctx)
+		select {
+		case <-relayPaused:
+			return externalDirectUDPSendPlan{}, nil
+		case <-ctx.Done():
+			return externalDirectUDPSendPlan{}, ctx.Err()
+		}
+	}
+	t.Cleanup(func() { externalPrepareDirectUDPSendFn = prevPrepareDirectUDPSend })
+
+	prevExecutePreparedDirectUDPSend := externalExecutePreparedDirectUDPSendFn
+	directInvoked := false
+	externalExecutePreparedDirectUDPSendFn = func(ctx context.Context, src io.Reader, plan externalDirectUDPSendPlan, cfg SendConfig, metrics *externalTransferMetrics) error {
+		directInvoked = true
+		return nil
+	}
+	t.Cleanup(func() { externalExecutePreparedDirectUDPSendFn = prevExecutePreparedDirectUDPSend })
+
+	payload := bytes.Repeat([]byte("relay-pause-before-direct"), 1<<15)
+	err := sendExternalViaRelayPrefixThenDirectUDP(ctx, externalRelayPrefixSendConfig{
+		src:          bytes.NewReader(payload),
+		decision:     rendezvous.Decision{Accept: &rendezvous.AcceptInfo{}},
+		derpClient:   nil,
+		listenerDERP: key.NodePublic{},
+		cfg:          SendConfig{},
+	})
+	if err != nil {
+		t.Fatalf("sendExternalViaRelayPrefixThenDirectUDP() error = %v", err)
+	}
+	if !directInvoked {
+		t.Fatal("sendExternalViaRelayPrefixThenDirectUDP() did not execute direct send after pausing relay")
+	}
+}
+
+func TestSendExternalViaRelayPrefixThenDirectUDPDoesNotResumeRelayAfterHandoff(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+
+	const acked = 64 << 10
+	payload := bytes.Repeat([]byte("small-tail-after-handoff"), 1<<12)
+
+	prevSendRelay := externalSendExternalHandoffDERPFn
+	relayPaused := make(chan struct{})
+	relayCalls := 0
+	externalSendExternalHandoffDERPFn = func(ctx context.Context, client *derpbind.Client, peerDERP key.NodePublic, spool *externalHandoffSpool, stop <-chan struct{}, metrics *externalTransferMetrics) error {
+		relayCalls++
+		if relayCalls > 1 {
+			return errors.New("unexpected post-handoff relay resume")
+		}
+		for {
+			_, err := spool.NextChunk()
+			if err == nil {
+				continue
+			}
+			if errors.Is(err, io.EOF) {
+				break
+			}
+			return err
+		}
+		if err := spool.AckTo(acked); err != nil {
+			return err
+		}
+		select {
+		case <-stop:
+			close(relayPaused)
+			return nil
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	t.Cleanup(func() { externalSendExternalHandoffDERPFn = prevSendRelay })
+
+	prevWaitDirectUDPAddr := waitExternalDirectUDPAddr
+	waitExternalDirectUDPAddr = func(context.Context, net.PacketConn, *transport.Manager) (net.Addr, error) {
+		return &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 12345}, nil
+	}
+	t.Cleanup(func() { waitExternalDirectUDPAddr = prevWaitDirectUDPAddr })
+
+	prevPrepareDirectUDPSend := externalPrepareDirectUDPSendFn
+	externalPrepareDirectUDPSendFn = func(ctx context.Context, tok token.Token, derpClient *derpbind.Client, listenerDERP key.NodePublic, peerAddr net.Addr, probeConns []net.PacketConn, remoteCandidates []net.Addr, readyAckCh <-chan derpbind.Packet, startAckCh <-chan derpbind.Packet, rateProbeCh <-chan derpbind.Packet, cfg SendConfig) (externalDirectUDPSendPlan, error) {
+		signalExternalDirectUDPHandoffReady(ctx)
+		select {
+		case <-relayPaused:
+			return externalDirectUDPSendPlan{}, nil
+		case <-ctx.Done():
+			return externalDirectUDPSendPlan{}, ctx.Err()
+		}
+	}
+	t.Cleanup(func() { externalPrepareDirectUDPSendFn = prevPrepareDirectUDPSend })
+
+	prevExecutePreparedDirectUDPSend := externalExecutePreparedDirectUDPSendFn
+	directInvoked := false
+	externalExecutePreparedDirectUDPSendFn = func(ctx context.Context, src io.Reader, plan externalDirectUDPSendPlan, cfg SendConfig, metrics *externalTransferMetrics) error {
+		directInvoked = true
+		_, err := io.Copy(io.Discard, src)
+		return err
+	}
+	t.Cleanup(func() { externalExecutePreparedDirectUDPSendFn = prevExecutePreparedDirectUDPSend })
+
+	err := sendExternalViaRelayPrefixThenDirectUDP(ctx, externalRelayPrefixSendConfig{
+		src:          bytes.NewReader(payload),
+		decision:     rendezvous.Decision{Accept: &rendezvous.AcceptInfo{}},
+		derpClient:   nil,
+		listenerDERP: key.NodePublic{},
+		cfg:          SendConfig{},
+	})
+	if err != nil {
+		t.Fatalf("sendExternalViaRelayPrefixThenDirectUDP() error = %v", err)
+	}
+	if !directInvoked {
+		t.Fatal("sendExternalViaRelayPrefixThenDirectUDP() did not continue on direct path after handoff")
+	}
+	if relayCalls != 1 {
+		t.Fatalf("sendExternalViaRelayPrefixThenDirectUDP() relay calls = %d, want 1", relayCalls)
+	}
+}
+
+func TestSendExternalViaRelayPrefixThenDirectUDPWaitsForHandoffReadyBeforeStoppingRelay(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+
+	const acked = 64 << 10
+	payload := bytes.Repeat([]byte("handoff-ready-gate"), 1<<12)
+
+	prevSendRelay := externalSendExternalHandoffDERPFn
+	prepReady := make(chan struct{})
+	relayPaused := make(chan struct{})
+	externalSendExternalHandoffDERPFn = func(ctx context.Context, client *derpbind.Client, peerDERP key.NodePublic, spool *externalHandoffSpool, stop <-chan struct{}, metrics *externalTransferMetrics) error {
+		for {
+			_, err := spool.NextChunk()
+			if err == nil {
+				continue
+			}
+			if errors.Is(err, io.EOF) {
+				break
+			}
+			return err
+		}
+		if err := spool.AckTo(acked); err != nil {
+			return err
+		}
+		select {
+		case <-stop:
+			select {
+			case <-prepReady:
+			default:
+				return errors.New("relay stopped before handoff-ready signal")
+			}
+			close(relayPaused)
+			return nil
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	t.Cleanup(func() { externalSendExternalHandoffDERPFn = prevSendRelay })
+
+	prevWaitDirectUDPAddr := waitExternalDirectUDPAddr
+	waitExternalDirectUDPAddr = func(context.Context, net.PacketConn, *transport.Manager) (net.Addr, error) {
+		return &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 12345}, nil
+	}
+	t.Cleanup(func() { waitExternalDirectUDPAddr = prevWaitDirectUDPAddr })
+
+	prevPrepareDirectUDPSend := externalPrepareDirectUDPSendFn
+	externalPrepareDirectUDPSendFn = func(ctx context.Context, tok token.Token, derpClient *derpbind.Client, listenerDERP key.NodePublic, peerAddr net.Addr, probeConns []net.PacketConn, remoteCandidates []net.Addr, readyAckCh <-chan derpbind.Packet, startAckCh <-chan derpbind.Packet, rateProbeCh <-chan derpbind.Packet, cfg SendConfig) (externalDirectUDPSendPlan, error) {
+		time.Sleep(350 * time.Millisecond)
+		signalExternalDirectUDPHandoffReady(ctx)
+		close(prepReady)
+		select {
+		case <-relayPaused:
+			return externalDirectUDPSendPlan{}, nil
+		case <-ctx.Done():
+			return externalDirectUDPSendPlan{}, ctx.Err()
+		}
+	}
+	t.Cleanup(func() { externalPrepareDirectUDPSendFn = prevPrepareDirectUDPSend })
+
+	prevExecutePreparedDirectUDPSend := externalExecutePreparedDirectUDPSendFn
+	directInvoked := false
+	externalExecutePreparedDirectUDPSendFn = func(ctx context.Context, src io.Reader, plan externalDirectUDPSendPlan, cfg SendConfig, metrics *externalTransferMetrics) error {
+		directInvoked = true
+		_, err := io.Copy(io.Discard, src)
+		return err
+	}
+	t.Cleanup(func() { externalExecutePreparedDirectUDPSendFn = prevExecutePreparedDirectUDPSend })
+
+	err := sendExternalViaRelayPrefixThenDirectUDP(ctx, externalRelayPrefixSendConfig{
+		src:          bytes.NewReader(payload),
+		decision:     rendezvous.Decision{Accept: &rendezvous.AcceptInfo{}},
+		derpClient:   nil,
+		listenerDERP: key.NodePublic{},
+		cfg:          SendConfig{},
+	})
+	if err != nil {
+		t.Fatalf("sendExternalViaRelayPrefixThenDirectUDP() error = %v", err)
+	}
+	if !directInvoked {
+		t.Fatal("sendExternalViaRelayPrefixThenDirectUDP() did not execute direct send after gated handoff")
+	}
+}
+
 func TestExternalDirectUDPBufferedWriterUsesDiscardForNullDevice(t *testing.T) {
 	devNull, err := os.OpenFile(os.DevNull, os.O_WRONLY, 0)
 	if err != nil {
@@ -1280,6 +1505,22 @@ func TestExternalDirectUDPParallelCandidateStringsPreferLoopbackForFakeTransport
 	want := []string{"127.0.0.1:11111", "127.0.0.1:22222"}
 	if fmt.Sprint(got) != fmt.Sprint(want) {
 		t.Fatalf("externalDirectUDPParallelCandidateStringsForPeer(fake) = %v, want %v", got, want)
+	}
+}
+
+func TestExternalDirectUDPParallelCandidateStringsIncludeObservedPeerAddr(t *testing.T) {
+	peer, err := net.ResolveUDPAddr("udp", "198.51.100.8:44321")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	got := externalDirectUDPParallelCandidateStringsForPeer(parseCandidateStrings([]string{
+		"172.17.0.1:11111",
+		"172.17.0.1:22222",
+	}), 1, peer)
+	want := []string{"198.51.100.8:44321"}
+	if fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Fatalf("externalDirectUDPParallelCandidateStringsForPeer(observed) = %v, want %v", got, want)
 	}
 }
 

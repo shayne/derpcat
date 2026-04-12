@@ -29,6 +29,9 @@ func openSendSource(ctx context.Context, cfg SendConfig) (io.ReadCloser, error) 
 
 func openListenSink(ctx context.Context, cfg ListenConfig) (io.WriteCloser, error) {
 	if cfg.StdioOut != nil {
+		if dst, ok := cfg.StdioOut.(io.WriteCloser); ok {
+			return dst, nil
+		}
 		return nopWriteCloser{Writer: cfg.StdioOut}, nil
 	}
 	return nopWriteCloser{Writer: io.Discard}, nil

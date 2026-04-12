@@ -183,7 +183,7 @@ func derpPublicKeyRaw32(pub key.NodePublic) [32]byte {
 	return raw
 }
 
-func issuePublicSession(ctx context.Context) (string, *relaySession, error) {
+func issuePublicSessionWithCapabilities(ctx context.Context, capabilities uint32) (string, *relaySession, error) {
 	dm, err := derpbind.FetchMap(ctx, publicDERPMapURL())
 	if err != nil {
 		return "", nil, err
@@ -227,7 +227,7 @@ func issuePublicSession(ctx context.Context) (string, *relaySession, error) {
 		DERPPublic:      derpPublicKeyRaw32(derpClient.PublicKey()),
 		QUICPublic:      wgPublic,
 		BearerSecret:    bearerSecret,
-		Capabilities:    token.CapabilityStdio,
+		Capabilities:    capabilities,
 	}
 	if bootstrapAddr, ok := externalNativeTCPTokenBootstrapAddr(); ok {
 		tokValue.SetNativeTCPBootstrapAddr(bootstrapAddr)
@@ -257,6 +257,10 @@ func issuePublicSession(ctx context.Context) (string, *relaySession, error) {
 	}
 	attachPublicPortmap(session, newBoundPublicPortmap(probeConn, nil))
 	return tok, session, nil
+}
+
+func issuePublicSession(ctx context.Context) (string, *relaySession, error) {
+	return issuePublicSessionWithCapabilities(ctx, token.CapabilityStdio)
 }
 
 func sendExternal(ctx context.Context, cfg SendConfig) error {
@@ -2298,9 +2302,13 @@ func publicInitialProbeCandidates(conn net.PacketConn, pm publicPortmap) []strin
 			continue
 		}
 		ip := prefix.Addr()
-		if ip.IsLoopback() || ip.IsPrivate() || ip.IsGlobalUnicast() {
-			add(ip, port)
+		// Preserve private and link-local interface candidates so same-LAN
+		// peers can still converge on their best direct path. Loopback
+		// addresses are never a valid remote target outside fake transport.
+		if !ip.IsValid() || ip.IsUnspecified() || ip.IsLoopback() {
+			continue
 		}
+		add(ip, port)
 	}
 
 	if pm != nil {
