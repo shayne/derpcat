@@ -11,45 +11,53 @@ export VERSION COMMIT BUILD_DATE
 bash "${ROOT_DIR}/tools/packaging/build-vendor.sh"
 bash "${ROOT_DIR}/tools/packaging/build-npm.sh"
 
-test -x "${ROOT_DIR}/dist/vendor/x86_64-unknown-linux-musl/derpcat/derpcat"
-test -x "${ROOT_DIR}/dist/vendor/aarch64-unknown-linux-musl/derpcat/derpcat"
-test -x "${ROOT_DIR}/dist/vendor/x86_64-apple-darwin/derpcat/derpcat"
-test -x "${ROOT_DIR}/dist/vendor/aarch64-apple-darwin/derpcat/derpcat"
+for product in derpcat derphole; do
+  test -x "${ROOT_DIR}/dist/vendor/x86_64-unknown-linux-musl/${product}/${product}"
+  test -x "${ROOT_DIR}/dist/vendor/aarch64-unknown-linux-musl/${product}/${product}"
+  test -x "${ROOT_DIR}/dist/vendor/x86_64-apple-darwin/${product}/${product}"
+  test -x "${ROOT_DIR}/dist/vendor/aarch64-apple-darwin/${product}/${product}"
+done
 
 mkdir -p "${ROOT_DIR}/dist/raw"
-cp "${ROOT_DIR}/dist/vendor/x86_64-unknown-linux-musl/derpcat/derpcat" "${ROOT_DIR}/dist/raw/derpcat-linux-amd64"
-cp "${ROOT_DIR}/dist/vendor/aarch64-unknown-linux-musl/derpcat/derpcat" "${ROOT_DIR}/dist/raw/derpcat-linux-arm64"
-cp "${ROOT_DIR}/dist/vendor/x86_64-apple-darwin/derpcat/derpcat" "${ROOT_DIR}/dist/raw/derpcat-darwin-amd64"
-cp "${ROOT_DIR}/dist/vendor/aarch64-apple-darwin/derpcat/derpcat" "${ROOT_DIR}/dist/raw/derpcat-darwin-arm64"
+for product in derpcat derphole; do
+  cp "${ROOT_DIR}/dist/vendor/x86_64-unknown-linux-musl/${product}/${product}" "${ROOT_DIR}/dist/raw/${product}-linux-amd64"
+  cp "${ROOT_DIR}/dist/vendor/aarch64-unknown-linux-musl/${product}/${product}" "${ROOT_DIR}/dist/raw/${product}-linux-arm64"
+  cp "${ROOT_DIR}/dist/vendor/x86_64-apple-darwin/${product}/${product}" "${ROOT_DIR}/dist/raw/${product}-darwin-amd64"
+  cp "${ROOT_DIR}/dist/vendor/aarch64-apple-darwin/${product}/${product}" "${ROOT_DIR}/dist/raw/${product}-darwin-arm64"
+done
 
 bash "${ROOT_DIR}/tools/packaging/build-release-assets.sh"
 
-test -f "${ROOT_DIR}/dist/release/derpcat-linux-amd64.tar.gz"
-test -f "${ROOT_DIR}/dist/release/derpcat-linux-amd64.tar.gz.sha256"
-test -f "${ROOT_DIR}/dist/release/derpcat-linux-arm64.tar.gz"
-test -f "${ROOT_DIR}/dist/release/derpcat-linux-arm64.tar.gz.sha256"
-test -f "${ROOT_DIR}/dist/release/derpcat-darwin-amd64.tar.gz"
-test -f "${ROOT_DIR}/dist/release/derpcat-darwin-amd64.tar.gz.sha256"
-test -f "${ROOT_DIR}/dist/release/derpcat-darwin-arm64.tar.gz"
-test -f "${ROOT_DIR}/dist/release/derpcat-darwin-arm64.tar.gz.sha256"
+for product in derpcat derphole; do
+  test -f "${ROOT_DIR}/dist/release/${product}-linux-amd64.tar.gz"
+  test -f "${ROOT_DIR}/dist/release/${product}-linux-amd64.tar.gz.sha256"
+  test -f "${ROOT_DIR}/dist/release/${product}-linux-arm64.tar.gz"
+  test -f "${ROOT_DIR}/dist/release/${product}-linux-arm64.tar.gz.sha256"
+  test -f "${ROOT_DIR}/dist/release/${product}-darwin-amd64.tar.gz"
+  test -f "${ROOT_DIR}/dist/release/${product}-darwin-amd64.tar.gz.sha256"
+  test -f "${ROOT_DIR}/dist/release/${product}-darwin-arm64.tar.gz"
+  test -f "${ROOT_DIR}/dist/release/${product}-darwin-arm64.tar.gz.sha256"
+done
 
-node -e "const fs=require('fs'); const pkg=JSON.parse(fs.readFileSync('${ROOT_DIR}/dist/npm/package.json','utf8')); if (pkg.version !== process.env.VERSION.replace(/^v/,'')) { process.exit(1); }"
-npm_launcher_version="$(node "${ROOT_DIR}/dist/npm/bin/derpcat.js" version)"
-if [ "${npm_launcher_version}" != "${VERSION}" ]; then
-  echo "packaged launcher version mismatch: ${npm_launcher_version} != ${VERSION}" >&2
-  exit 1
-fi
+for product in derpcat derphole; do
+  node -e "const fs=require('fs'); const pkg=JSON.parse(fs.readFileSync('${ROOT_DIR}/dist/npm-${product}/package.json','utf8')); if (pkg.version !== process.env.VERSION.replace(/^v/,'')) { process.exit(1); }"
+  npm_launcher_version="$(node "${ROOT_DIR}/dist/npm-${product}/bin/${product}.js" version)"
+  if [ "${npm_launcher_version}" != "${VERSION}" ]; then
+    echo "packaged launcher version mismatch for ${product}: ${npm_launcher_version} != ${VERSION}" >&2
+    exit 1
+  fi
 
-package_name="$(node -e "const fs=require('fs'); const pkg=JSON.parse(fs.readFileSync('${ROOT_DIR}/dist/npm/package.json','utf8')); process.stdout.write(pkg.name)")"
-if [ "${package_name}" != "derpcat" ]; then
-  echo "packaged npm metadata mismatch: ${package_name}" >&2
-  exit 1
-fi
+  package_name="$(node -e "const fs=require('fs'); const pkg=JSON.parse(fs.readFileSync('${ROOT_DIR}/dist/npm-${product}/package.json','utf8')); process.stdout.write(pkg.name)")"
+  if [ "${package_name}" != "${product}" ]; then
+    echo "packaged npm metadata mismatch: ${package_name}" >&2
+    exit 1
+  fi
 
-pkg_version="$(node -e "const fs=require('fs'); const pkg=JSON.parse(fs.readFileSync('${ROOT_DIR}/dist/npm/package.json','utf8')); process.stdout.write(pkg.version)")"
-publish_args=("${ROOT_DIR}/dist/npm" --access public --dry-run)
-if [[ "${pkg_version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+-.+ ]]; then
-  publish_args+=(--tag dev)
-fi
+  pkg_version="$(node -e "const fs=require('fs'); const pkg=JSON.parse(fs.readFileSync('${ROOT_DIR}/dist/npm-${product}/package.json','utf8')); process.stdout.write(pkg.version)")"
+  publish_args=("${ROOT_DIR}/dist/npm-${product}" --access public --dry-run)
+  if [[ "${pkg_version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+-.+ ]]; then
+    publish_args+=(--tag dev)
+  fi
 
-npm publish "${publish_args[@]}"
+  npm publish "${publish_args[@]}"
+done

@@ -13,7 +13,7 @@ const triples = new Map([
   ["linux:x64", "x86_64-unknown-linux-musl"],
   ["linux:arm64", "aarch64-unknown-linux-musl"],
   ["darwin:x64", "x86_64-apple-darwin"],
-  ["darwin:arm64", "aarch64-apple-darwin"],
+  ["darwin:arm64", "aarch64-apple-darwin"]
 ]);
 
 const triple = triples.get(`${process.platform}:${process.arch}`);
@@ -31,7 +31,7 @@ if (!existsSync(binaryPath)) {
 
 const child = spawn(binaryPath, process.argv.slice(2), {
   stdio: "inherit",
-  env: { ...process.env, DERPCAT_MANAGED_BY_NPM: "1" },
+  env: { ...process.env, DERPCAT_MANAGED_BY_NPM: "1" }
 });
 
 child.on("error", (err) => {

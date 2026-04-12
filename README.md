@@ -1,12 +1,15 @@
 # derpcat
 
-`derpcat` is a standalone CLI for moving bytes between two hosts and sharing local TCP services with a single copy-paste token.
+This repository ships two standalone CLIs:
 
-It uses the public Tailscale [DERP](#what-is-derp) relay network for rendezvous and relay fallback, but it is **not** affiliated with Tailscale, does **not** require a Tailscale account or tailnet, and does **not** use `tailscaled` for transport.
+- `derpcat` for raw byte streams and temporary local TCP service sharing
+- `derphole` for wormhole-shaped text, file, directory, and SSH invite flows on the same transport stack
 
-`derpcat` is **not** a WireGuard overlay and **not** a VPN. Tailscale builds a general-purpose secure network on WireGuard. `derpcat` is optimized for a different job: one session, one token, one transfer or shared service, on the shortest secure path it can find for that session. See [Transport Model](#transport-model), [Why It Is Fast](#why-it-is-fast), and [Security Model](#security-model).
+Both use the public Tailscale [DERP](#what-is-derp) relay network for rendezvous and relay fallback, but they are **not** affiliated with Tailscale, do **not** require a Tailscale account or tailnet, and do **not** use `tailscaled` for transport.
 
-For one-shot transfers and temporary service sharing, `derpcat` can beat sending the same traffic through a WireGuard-based overlay because it does not first build a general-purpose encrypted network path and then send application traffic through it. It uses DERP for rendezvous and fallback, then moves the live session onto the best direct path it can establish for that workload. Details are in [Transport Model](#transport-model) and [How This Differs From Tailscale / WireGuard](#how-this-differs-from-tailscale--wireguard).
+`derpcat` and `derphole` are **not** WireGuard overlays and **not** VPNs. Tailscale builds a general-purpose secure network on WireGuard. These tools are optimized for a different job: one session, one token, one transfer or shared service, on the shortest secure path they can find for that session. See [Transport Model](#transport-model), [Why It Is Fast](#why-it-is-fast), and [Security Model](#security-model).
+
+For one-shot transfers and temporary service sharing, `derpcat` can beat sending the same traffic through a WireGuard-based overlay because it does not first build a general-purpose encrypted network path and then send application traffic through it. `derphole` uses the same session and transport machinery, but wraps it in a more human-oriented CLI. Both use DERP for rendezvous and fallback, then move the live session onto the best direct path they can establish for that workload. Details are in [Transport Model](#transport-model) and [How This Differs From Tailscale / WireGuard](#how-this-differs-from-tailscale--wireguard).
 
 It does **not** require:
 
@@ -17,10 +20,19 @@ It does **not** require:
 
 The token printed by `listen` or `share` carries session authorization. Public sessions still fetch the DERP map at runtime so both sides can find relay/bootstrap nodes. See [Security Model](#security-model) for what the token authorizes and what intermediaries can and cannot see.
 
-`derpcat` supports two primary modes:
+## Pick the CLI
+
+Use `derpcat` when you want transport primitives:
 
 - one-shot byte-stream transfer with `listen` and `send`
 - long-lived local service sharing with `share` and `open`
+
+Use `derphole` when you want wormhole-shaped workflows:
+
+- text transfer
+- file transfer
+- directory transfer
+- SSH public key exchange for `authorized_keys`
 
 ## Quick Start
 
@@ -46,6 +58,44 @@ For a quick text example:
 
 ```bash
 printf 'hello\n' | npx -y derpcat@latest send <token>
+```
+
+### Send a File with `derphole`
+
+On the sending machine:
+
+```bash
+npx -y derphole@latest send ./photo.jpg
+```
+
+`send` prints a command for the receiving machine. Run that command there:
+
+```bash
+npx -y derphole@latest receive <code>
+```
+
+Text uses the same shape:
+
+```bash
+npx -y derphole@latest send hello
+```
+
+Directories stream as tar on the wire and re-materialize on the receiver:
+
+```bash
+npx -y derphole@latest send ./project-dir
+```
+
+For SSH access exchange, the host receiving access runs:
+
+```bash
+npx -y derphole@latest ssh invite --user deploy
+```
+
+The other side accepts with:
+
+```bash
+npx -y derphole@latest ssh accept <token>
 ```
 
 ### Watch Progress with `pv`
@@ -103,12 +153,14 @@ Use the development channel for the latest commit published from `main`:
 
 ```bash
 npx -y derpcat@dev version
+npx -y derphole@dev version
 ```
 
-By default, `listen`, `send`, `share`, and `open` keep transport status quiet. `listen` and `share` still print the token you need, and `open` still prints the local listening address. Use `--verbose` to see state transitions like `connected-relay` and `connected-direct`:
+By default, `listen`, `send`, `share`, and `open` keep transport status quiet. `listen` and `share` still print the token you need, and `open` still prints the local listening address. `derphole` keeps the same quiet default and only prints the user-facing instruction or token needed to complete the transfer. Use `--verbose` to see state transitions like `connected-relay` and `connected-direct`:
 
 ```bash
 npx -y derpcat@latest --verbose listen
+npx -y derphole@latest --verbose send ./photo.jpg
 ```
 
 Want transport details after the examples? Jump to [Transport Model](#transport-model), [Behavior](#behavior), or [Security Model](#security-model).
@@ -234,6 +286,8 @@ mise run check
 mise run build
 ```
 
+`mise run build` writes both `dist/derpcat` and `dist/derphole`.
+
 ## Verification
 
 Local smoke test:
@@ -252,9 +306,9 @@ REMOTE_HOST=my-server.example.com mise run promotion-1g
 
 ## Releases
 
-- npm package: `derpcat`
-- production channel: `@latest`
-- development channel: `@dev`
+- npm packages: `derpcat`, `derphole`
+- production channel: `@latest` on each package
+- development channel: `@dev` on each package
 - bootstrap runbook: [docs/releases/npm-bootstrap.md](docs/releases/npm-bootstrap.md)
 
 ## What Is DERP?

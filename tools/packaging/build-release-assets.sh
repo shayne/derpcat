@@ -14,18 +14,19 @@ else
   checksum_cmd=(shasum -a 256)
 fi
 
-for asset in \
-  derpcat-linux-amd64 \
-  derpcat-linux-arm64 \
-  derpcat-darwin-amd64 \
-  derpcat-darwin-arm64
-
-do
-  if [ ! -f "${RAW_DIR}/${asset}" ]; then
-    echo "missing raw asset: ${RAW_DIR}/${asset}" >&2
-    exit 1
-  fi
-  chmod +x "${RAW_DIR}/${asset}"
-  tar -czf "${OUT_DIR}/${asset}.tar.gz" -C "${RAW_DIR}" "${asset}"
-  (cd "${OUT_DIR}" && "${checksum_cmd[@]}" "${asset}.tar.gz" > "${asset}.tar.gz.sha256")
+for product in derpcat derphole; do
+  for asset in \
+    "${product}-linux-amd64" \
+    "${product}-linux-arm64" \
+    "${product}-darwin-amd64" \
+    "${product}-darwin-arm64"
+  do
+    if [ ! -f "${RAW_DIR}/${asset}" ]; then
+      echo "missing raw asset: ${RAW_DIR}/${asset}" >&2
+      exit 1
+    fi
+    chmod +x "${RAW_DIR}/${asset}"
+    tar -czf "${OUT_DIR}/${asset}.tar.gz" -C "${RAW_DIR}" "${asset}"
+    (cd "${OUT_DIR}" && "${checksum_cmd[@]}" "${asset}.tar.gz" > "${asset}.tar.gz.sha256")
+  done
 done

@@ -1,33 +1,48 @@
 # Manual npm Bootstrap Publish
 
-This runbook covers the first npm publish before GitHub trusted publishing is configured.
+This runbook covers the first npm publish before GitHub trusted publishing is configured. The repository now ships two npm packages: `derpcat` and `derphole`.
 
 ## Prerequisites
 
-- npm account that can claim and publish the `derpcat` package name
+- npm account that can claim and publish the `derpcat` and `derphole` package names
 - local `npm whoami` succeeds
 - run from the repository root
 - `mise` and the release toolchain are available locally
 - clean git working tree
 
-## Build and validate `0.0.1`
+## Build and validate release artifacts
+
+Build the binaries, release tarballs, and both npm package directories:
 
 ```bash
 VERSION=v0.0.1 COMMIT=$(git rev-parse HEAD) BUILD_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ) mise run release:build-all
-VERSION=v0.0.1 mise run release:npm-dry-run
-node ./dist/npm/bin/derpcat.js version
+```
+
+Validate the npm payloads with an unpublished prerelease version. This avoids dry-run failures when `0.0.1` already exists for one package but not the other:
+
+```bash
+VERSION=v0.0.1-dev.$(date -u +%Y%m%d%H%M%S) mise run release:npm-dry-run
+node ./dist/npm-derpcat/bin/derpcat.js version
+node ./dist/npm-derphole/bin/derphole.js version
 ```
 
 Expected output:
 
-- `npm publish --dry-run` succeeds
-- `node ./dist/npm/bin/derpcat.js version` prints `v0.0.1`
+- `npm publish --dry-run` succeeds for `dist/npm-derpcat`
+- `npm publish --dry-run` succeeds for `dist/npm-derphole`
+- `node ./dist/npm-derpcat/bin/derpcat.js version` prints `v0.0.1`
+- `node ./dist/npm-derphole/bin/derphole.js version` prints `v0.0.1`
 
 ## Publish
 
+Publish both packages if both are being bootstrapped:
+
 ```bash
-npm publish ./dist/npm --access public
+npm publish ./dist/npm-derpcat --access public
+npm publish ./dist/npm-derphole --access public
 ```
+
+If only one package still needs manual bootstrap, publish only that package directory.
 
 ## After trusted publisher setup
 

@@ -12,21 +12,23 @@ rm -rf "${OUT_DIR}"
 mkdir -p "${OUT_DIR}"
 
 targets=(
-  "linux amd64 x86_64-unknown-linux-musl derpcat"
-  "linux arm64 aarch64-unknown-linux-musl derpcat"
-  "darwin amd64 x86_64-apple-darwin derpcat"
-  "darwin arm64 aarch64-apple-darwin derpcat"
+  "linux amd64 x86_64-unknown-linux-musl"
+  "linux arm64 aarch64-unknown-linux-musl"
+  "darwin amd64 x86_64-apple-darwin"
+  "darwin arm64 aarch64-apple-darwin"
 )
 
 for target in "${targets[@]}"; do
-  read -r goos goarch triple binary <<<"${target}"
-  dest_dir="${OUT_DIR}/${triple}/derpcat"
-  mkdir -p "${dest_dir}"
-  CGO_ENABLED=0 GOOS="${goos}" GOARCH="${goarch}" \
-    go build \
-      -trimpath \
-      -ldflags "-X main.version=${VERSION} -X main.commit=${COMMIT} -X main.buildDate=${BUILD_DATE}" \
-      -o "${dest_dir}/${binary}" \
-      ./cmd/derpcat
-  chmod +x "${dest_dir}/${binary}"
+  read -r goos goarch triple <<<"${target}"
+  for product in derpcat derphole; do
+    dest_dir="${OUT_DIR}/${triple}/${product}"
+    mkdir -p "${dest_dir}"
+    CGO_ENABLED=0 GOOS="${goos}" GOARCH="${goarch}" \
+      go build \
+        -trimpath \
+        -ldflags "-X main.version=${VERSION} -X main.commit=${COMMIT} -X main.buildDate=${BUILD_DATE}" \
+        -o "${dest_dir}/${product}" \
+        ./cmd/${product}
+    chmod +x "${dest_dir}/${product}"
+  done
 done

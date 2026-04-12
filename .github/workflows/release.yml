@@ -63,30 +63,54 @@ jobs:
       - name: Vet
         run: mise run vet
 
-  build-derpcat:
-    name: Build derpcat (${{ matrix.goos }}/${{ matrix.goarch }})
+  build-binaries:
+    name: Build ${{ matrix.product }} (${{ matrix.goos }}/${{ matrix.goarch }})
     runs-on: ${{ matrix.runner }}
     needs: [meta]
     strategy:
       fail-fast: false
       matrix:
         include:
-          - runner: ubuntu-latest
+          - product: derpcat
+            runner: ubuntu-latest
             goos: linux
             goarch: amd64
             asset: derpcat-linux-amd64
-          - runner: ubuntu-latest
+          - product: derpcat
+            runner: ubuntu-latest
             goos: linux
             goarch: arm64
             asset: derpcat-linux-arm64
-          - runner: macos-latest
+          - product: derpcat
+            runner: macos-latest
             goos: darwin
             goarch: amd64
             asset: derpcat-darwin-amd64
-          - runner: macos-latest
+          - product: derpcat
+            runner: macos-latest
             goos: darwin
             goarch: arm64
             asset: derpcat-darwin-arm64
+          - product: derphole
+            runner: ubuntu-latest
+            goos: linux
+            goarch: amd64
+            asset: derphole-linux-amd64
+          - product: derphole
+            runner: ubuntu-latest
+            goos: linux
+            goarch: arm64
+            asset: derphole-linux-arm64
+          - product: derphole
+            runner: macos-latest
+            goos: darwin
+            goarch: amd64
+            asset: derphole-darwin-amd64
+          - product: derphole
+            runner: macos-latest
+            goos: darwin
+            goarch: arm64
+            asset: derphole-darwin-arm64
     steps:
       - name: Checkout
         uses: actions/checkout@v5
@@ -105,7 +129,7 @@ jobs:
             go build -trimpath \
               -ldflags "-X main.version=${VERSION} -X main.commit=${COMMIT} -X main.buildDate=${BUILD_DATE}" \
               -o dist/${{ matrix.asset }} \
-              ./cmd/derpcat
+              ./cmd/${{ matrix.product }}
       - name: Upload artifact
         uses: actions/upload-artifact@v6
         with:
@@ -116,7 +140,7 @@ jobs:
   release-prod:
     name: Publish release
     runs-on: ubuntu-latest
-    needs: [meta, check, build-derpcat, publish-npm-prod]
+    needs: [meta, check, build-binaries, publish-npm-prod]
     if: needs.meta.outputs.is_tag == 'true'
     permissions:
       actions: read
@@ -136,14 +160,20 @@ jobs:
             -n derpcat-linux-amd64 \
             -n derpcat-linux-arm64 \
             -n derpcat-darwin-amd64 \
-            -n derpcat-darwin-arm64
-          for asset in derpcat-linux-amd64 derpcat-linux-arm64 derpcat-darwin-amd64 derpcat-darwin-arm64; do
+            -n derpcat-darwin-arm64 \
+            -n derphole-linux-amd64 \
+            -n derphole-linux-arm64 \
+            -n derphole-darwin-amd64 \
+            -n derphole-darwin-arm64
+          for asset in derpcat-linux-amd64 derpcat-linux-arm64 derpcat-darwin-amd64 derpcat-darwin-arm64 derphole-linux-amd64 derphole-linux-arm64 derphole-darwin-amd64 derphole-darwin-arm64; do
             cp "dist/downloads/$asset/$asset" "dist/raw/$asset"
           done
       - name: Verify binary version
         run: |
-          chmod +x dist/raw/derpcat-linux-amd64
-          test "$(dist/raw/derpcat-linux-amd64 version)" = "${{ needs.meta.outputs.version }}"
+          for asset in dist/raw/derpcat-linux-amd64 dist/raw/derphole-linux-amd64; do
+            chmod +x "$asset"
+            test "$("$asset" version)" = "${{ needs.meta.outputs.version }}"
+          done
       - name: Package tarballs + checksums
         run: bash ./tools/packaging/build-release-assets.sh
       - name: Publish release
@@ -160,6 +190,14 @@ jobs:
             dist/release/derpcat-darwin-amd64.tar.gz.sha256
             dist/release/derpcat-darwin-arm64.tar.gz
             dist/release/derpcat-darwin-arm64.tar.gz.sha256
+            dist/release/derphole-linux-amd64.tar.gz
+            dist/release/derphole-linux-amd64.tar.gz.sha256
+            dist/release/derphole-linux-arm64.tar.gz
+            dist/release/derphole-linux-arm64.tar.gz.sha256
+            dist/release/derphole-darwin-amd64.tar.gz
+            dist/release/derphole-darwin-amd64.tar.gz.sha256
+            dist/release/derphole-darwin-arm64.tar.gz
+            dist/release/derphole-darwin-arm64.tar.gz.sha256
           )
           if gh release view "$TAG" -R "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             gh release upload "$TAG" -R "$GITHUB_REPOSITORY" "${files[@]}" --clobber
@@ -170,7 +208,7 @@ jobs:
   release-dev:
     name: Publish dev release
     runs-on: ubuntu-latest
-    needs: [meta, check, build-derpcat, publish-npm-dev]
+    needs: [meta, check, build-binaries, publish-npm-dev]
     if: needs.meta.outputs.is_main == 'true'
     permissions:
       actions: read
@@ -192,14 +230,20 @@ jobs:
             -n derpcat-linux-amd64 \
             -n derpcat-linux-arm64 \
             -n derpcat-darwin-amd64 \
-            -n derpcat-darwin-arm64
-          for asset in derpcat-linux-amd64 derpcat-linux-arm64 derpcat-darwin-amd64 derpcat-darwin-arm64; do
+            -n derpcat-darwin-arm64 \
+            -n derphole-linux-amd64 \
+            -n derphole-linux-arm64 \
+            -n derphole-darwin-amd64 \
+            -n derphole-darwin-arm64
+          for asset in derpcat-linux-amd64 derpcat-linux-arm64 derpcat-darwin-amd64 derpcat-darwin-arm64 derphole-linux-amd64 derphole-linux-arm64 derphole-darwin-amd64 derphole-darwin-arm64; do
             cp "dist/downloads/$asset/$asset" "dist/raw/$asset"
           done
       - name: Verify binary version
         run: |
-          chmod +x dist/raw/derpcat-linux-amd64
-          test "$(dist/raw/derpcat-linux-amd64 version)" = "${{ needs.meta.outputs.version }}"
+          for asset in dist/raw/derpcat-linux-amd64 dist/raw/derphole-linux-amd64; do
+            chmod +x "$asset"
+            test "$("$asset" version)" = "${{ needs.meta.outputs.version }}"
+          done
       - name: Package tarballs + checksums
         run: bash ./tools/packaging/build-release-assets.sh
       - name: Update dev tag
@@ -221,6 +265,14 @@ jobs:
             dist/release/derpcat-darwin-amd64.tar.gz.sha256
             dist/release/derpcat-darwin-arm64.tar.gz
             dist/release/derpcat-darwin-arm64.tar.gz.sha256
+            dist/release/derphole-linux-amd64.tar.gz
+            dist/release/derphole-linux-amd64.tar.gz.sha256
+            dist/release/derphole-linux-arm64.tar.gz
+            dist/release/derphole-linux-arm64.tar.gz.sha256
+            dist/release/derphole-darwin-amd64.tar.gz
+            dist/release/derphole-darwin-amd64.tar.gz.sha256
+            dist/release/derphole-darwin-arm64.tar.gz
+            dist/release/derphole-darwin-arm64.tar.gz.sha256
           )
           if gh release view dev -R "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             gh release edit dev -R "$GITHUB_REPOSITORY" --title Dev --prerelease
@@ -230,9 +282,9 @@ jobs:
           fi
 
   publish-packages-prod:
-    name: Build npm artifact (prod)
+    name: Build npm artifacts (prod)
     runs-on: ubuntu-latest
-    needs: [meta, check, build-derpcat]
+    needs: [meta, check, build-binaries]
     if: needs.meta.outputs.is_tag == 'true'
     steps:
       - name: Checkout
@@ -254,50 +306,58 @@ jobs:
             -n derpcat-linux-amd64 \
             -n derpcat-linux-arm64 \
             -n derpcat-darwin-amd64 \
-            -n derpcat-darwin-arm64
-          for asset in derpcat-linux-amd64 derpcat-linux-arm64 derpcat-darwin-amd64 derpcat-darwin-arm64; do
+            -n derpcat-darwin-arm64 \
+            -n derphole-linux-amd64 \
+            -n derphole-linux-arm64 \
+            -n derphole-darwin-amd64 \
+            -n derphole-darwin-arm64
+          for asset in derpcat-linux-amd64 derpcat-linux-arm64 derpcat-darwin-amd64 derpcat-darwin-arm64 derphole-linux-amd64 derphole-linux-arm64 derphole-darwin-amd64 derphole-darwin-arm64; do
             cp "dist/downloads/$asset/$asset" "dist/raw/$asset"
           done
       - name: Stage vendored binaries
         run: |
           rm -rf dist/vendor
-          mkdir -p \
-            dist/vendor/x86_64-unknown-linux-musl/derpcat \
-            dist/vendor/aarch64-unknown-linux-musl/derpcat \
-            dist/vendor/x86_64-apple-darwin/derpcat \
-            dist/vendor/aarch64-apple-darwin/derpcat
-          cp dist/raw/derpcat-linux-amd64 dist/vendor/x86_64-unknown-linux-musl/derpcat/derpcat
-          cp dist/raw/derpcat-linux-arm64 dist/vendor/aarch64-unknown-linux-musl/derpcat/derpcat
-          cp dist/raw/derpcat-darwin-amd64 dist/vendor/x86_64-apple-darwin/derpcat/derpcat
-          cp dist/raw/derpcat-darwin-arm64 dist/vendor/aarch64-apple-darwin/derpcat/derpcat
-          chmod +x \
-            dist/vendor/x86_64-unknown-linux-musl/derpcat/derpcat \
-            dist/vendor/aarch64-unknown-linux-musl/derpcat/derpcat \
-            dist/vendor/x86_64-apple-darwin/derpcat/derpcat \
-            dist/vendor/aarch64-apple-darwin/derpcat/derpcat
+          stage() {
+            local product="$1" asset="$2" triple="$3"
+            mkdir -p "dist/vendor/${triple}/${product}"
+            cp "dist/raw/${asset}" "dist/vendor/${triple}/${product}/${product}"
+            chmod +x "dist/vendor/${triple}/${product}/${product}"
+          }
+          stage derpcat derpcat-linux-amd64 x86_64-unknown-linux-musl
+          stage derpcat derpcat-linux-arm64 aarch64-unknown-linux-musl
+          stage derpcat derpcat-darwin-amd64 x86_64-apple-darwin
+          stage derpcat derpcat-darwin-arm64 aarch64-apple-darwin
+          stage derphole derphole-linux-amd64 x86_64-unknown-linux-musl
+          stage derphole derphole-linux-arm64 aarch64-unknown-linux-musl
+          stage derphole derphole-darwin-amd64 x86_64-apple-darwin
+          stage derphole derphole-darwin-arm64 aarch64-apple-darwin
       - name: Build npm artifact
         run: |
           VERSION=${{ needs.meta.outputs.version }}
           export VERSION
           bash ./tools/packaging/build-npm.sh
-      - name: Smoke test packaged launcher
-        run: node ./dist/npm/bin/derpcat.js version
+      - name: Smoke test packaged launchers
+        run: |
+          node ./dist/npm-derpcat/bin/derpcat.js version
+          node ./dist/npm-derphole/bin/derphole.js version
       - name: Validate npm publish (dry-run)
-        run: npm publish ./dist/npm --access public --dry-run
+        run: |
+          npm publish ./dist/npm-derpcat --access public --dry-run
+          npm publish ./dist/npm-derphole --access public --dry-run
       - name: Package npm artifact
         run: |
-          tar -czf dist/npm.tgz -C dist npm
+          tar -czf dist/npm-packages.tgz -C dist npm-derpcat npm-derphole
       - name: Upload package artifact
         uses: actions/upload-artifact@v6
         with:
           name: package-artifacts-prod
-          path: dist/npm.tgz
+          path: dist/npm-packages.tgz
           if-no-files-found: error
 
   publish-packages-dev:
-    name: Build npm artifact (dev)
+    name: Build npm artifacts (dev)
     runs-on: ubuntu-latest
-    needs: [meta, check, build-derpcat]
+    needs: [meta, check, build-binaries]
     if: needs.meta.outputs.is_main == 'true'
     steps:
       - name: Checkout
@@ -319,44 +379,52 @@ jobs:
             -n derpcat-linux-amd64 \
             -n derpcat-linux-arm64 \
             -n derpcat-darwin-amd64 \
-            -n derpcat-darwin-arm64
-          for asset in derpcat-linux-amd64 derpcat-linux-arm64 derpcat-darwin-amd64 derpcat-darwin-arm64; do
+            -n derpcat-darwin-arm64 \
+            -n derphole-linux-amd64 \
+            -n derphole-linux-arm64 \
+            -n derphole-darwin-amd64 \
+            -n derphole-darwin-arm64
+          for asset in derpcat-linux-amd64 derpcat-linux-arm64 derpcat-darwin-amd64 derpcat-darwin-arm64 derphole-linux-amd64 derphole-linux-arm64 derphole-darwin-amd64 derphole-darwin-arm64; do
             cp "dist/downloads/$asset/$asset" "dist/raw/$asset"
           done
       - name: Stage vendored binaries
         run: |
           rm -rf dist/vendor
-          mkdir -p \
-            dist/vendor/x86_64-unknown-linux-musl/derpcat \
-            dist/vendor/aarch64-unknown-linux-musl/derpcat \
-            dist/vendor/x86_64-apple-darwin/derpcat \
-            dist/vendor/aarch64-apple-darwin/derpcat
-          cp dist/raw/derpcat-linux-amd64 dist/vendor/x86_64-unknown-linux-musl/derpcat/derpcat
-          cp dist/raw/derpcat-linux-arm64 dist/vendor/aarch64-unknown-linux-musl/derpcat/derpcat
-          cp dist/raw/derpcat-darwin-amd64 dist/vendor/x86_64-apple-darwin/derpcat/derpcat
-          cp dist/raw/derpcat-darwin-arm64 dist/vendor/aarch64-apple-darwin/derpcat/derpcat
-          chmod +x \
-            dist/vendor/x86_64-unknown-linux-musl/derpcat/derpcat \
-            dist/vendor/aarch64-unknown-linux-musl/derpcat/derpcat \
-            dist/vendor/x86_64-apple-darwin/derpcat/derpcat \
-            dist/vendor/aarch64-apple-darwin/derpcat/derpcat
+          stage() {
+            local product="$1" asset="$2" triple="$3"
+            mkdir -p "dist/vendor/${triple}/${product}"
+            cp "dist/raw/${asset}" "dist/vendor/${triple}/${product}/${product}"
+            chmod +x "dist/vendor/${triple}/${product}/${product}"
+          }
+          stage derpcat derpcat-linux-amd64 x86_64-unknown-linux-musl
+          stage derpcat derpcat-linux-arm64 aarch64-unknown-linux-musl
+          stage derpcat derpcat-darwin-amd64 x86_64-apple-darwin
+          stage derpcat derpcat-darwin-arm64 aarch64-apple-darwin
+          stage derphole derphole-linux-amd64 x86_64-unknown-linux-musl
+          stage derphole derphole-linux-arm64 aarch64-unknown-linux-musl
+          stage derphole derphole-darwin-amd64 x86_64-apple-darwin
+          stage derphole derphole-darwin-arm64 aarch64-apple-darwin
       - name: Build npm artifact
         run: |
           VERSION=${{ needs.meta.outputs.version }}
           export VERSION
           bash ./tools/packaging/build-npm.sh
-      - name: Smoke test packaged launcher
-        run: node ./dist/npm/bin/derpcat.js version
+      - name: Smoke test packaged launchers
+        run: |
+          node ./dist/npm-derpcat/bin/derpcat.js version
+          node ./dist/npm-derphole/bin/derphole.js version
       - name: Validate npm publish (dry-run)
-        run: npm publish ./dist/npm --access public --dry-run --tag dev
+        run: |
+          npm publish ./dist/npm-derpcat --access public --dry-run --tag dev
+          npm publish ./dist/npm-derphole --access public --dry-run --tag dev
       - name: Package npm artifact
         run: |
-          tar -czf dist/npm.tgz -C dist npm
+          tar -czf dist/npm-packages.tgz -C dist npm-derpcat npm-derphole
       - name: Upload package artifact
         uses: actions/upload-artifact@v6
         with:
           name: package-artifacts-dev
-          path: dist/npm.tgz
+          path: dist/npm-packages.tgz
           if-no-files-found: error
 
   publish-npm-prod:
@@ -379,18 +447,20 @@ jobs:
           rm -rf dist/downloads
           mkdir -p dist/downloads
           gh run download "$GITHUB_RUN_ID" -R "$GITHUB_REPOSITORY" --dir dist/downloads -n package-artifacts-prod
-          pkg=$(find dist/downloads -name npm.tgz -print -quit)
+          pkg=$(find dist/downloads -name npm-packages.tgz -print -quit)
           test -n "$pkg"
-          cp "$pkg" dist/npm.tgz
+          cp "$pkg" dist/npm-packages.tgz
       - name: Unpack npm artifact
-        run: tar -xzf dist/npm.tgz -C dist
+        run: tar -xzf dist/npm-packages.tgz -C dist
       - name: Setup Node
         uses: actions/setup-node@v6
         with:
           node-version: 24
           registry-url: https://registry.npmjs.org
-      - name: Publish npm package
-        run: npm publish ./dist/npm --access public
+      - name: Publish npm packages
+        run: |
+          npm publish ./dist/npm-derpcat --access public
+          npm publish ./dist/npm-derphole --access public
 
   publish-npm-dev:
     name: Publish npm package (dev tag)
@@ -412,15 +482,17 @@ jobs:
           rm -rf dist/downloads
           mkdir -p dist/downloads
           gh run download "$GITHUB_RUN_ID" -R "$GITHUB_REPOSITORY" --dir dist/downloads -n package-artifacts-dev
-          pkg=$(find dist/downloads -name npm.tgz -print -quit)
+          pkg=$(find dist/downloads -name npm-packages.tgz -print -quit)
           test -n "$pkg"
-          cp "$pkg" dist/npm.tgz
+          cp "$pkg" dist/npm-packages.tgz
       - name: Unpack npm artifact
-        run: tar -xzf dist/npm.tgz -C dist
+        run: tar -xzf dist/npm-packages.tgz -C dist
       - name: Setup Node
         uses: actions/setup-node@v6
         with:
           node-version: 24
           registry-url: https://registry.npmjs.org
-      - name: Publish npm package (dev tag)
-        run: npm publish ./dist/npm --access public --tag dev
+      - name: Publish npm packages (dev tag)
+        run: |
+          npm publish ./dist/npm-derpcat --access public --tag dev
+          npm publish ./dist/npm-derphole --access public --tag dev
