@@ -60,7 +60,11 @@ func sendFile(this js.Value, args []js.Value) any {
 			return nil, errors.New("no active offer")
 		}
 		defer current.Close()
-		err := current.Send(ctx, jsFileSource{file: file}, callbacks)
+		var direct webrelay.DirectTransport
+		if len(args) >= 3 {
+			direct = newJSDirectTransport(args[2])
+		}
+		err := current.SendWithOptions(ctx, jsFileSource{file: file}, callbacks, webrelay.TransferOptions{Direct: direct})
 		return nil, err
 	})
 }
@@ -73,7 +77,11 @@ func receiveFile(this js.Value, args []js.Value) any {
 	sink := &jsFileSink{api: args[1]}
 	callbacks := newCallbacks(args[2])
 	return promise(func(ctx context.Context) (any, error) {
-		return nil, webrelay.Receive(ctx, tok, sink, callbacks)
+		var direct webrelay.DirectTransport
+		if len(args) >= 4 {
+			direct = newJSDirectTransport(args[3])
+		}
+		return nil, webrelay.ReceiveWithOptions(ctx, tok, sink, callbacks, webrelay.TransferOptions{Direct: direct})
 	})
 }
 
