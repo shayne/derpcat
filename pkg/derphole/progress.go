@@ -26,6 +26,7 @@ type ProgressReporter struct {
 	rateBytes     progressEMA
 	rateSeconds   progressEMA
 	wroteLine     bool
+	lastLineLen   int
 	mu            sync.Mutex
 	current       int64
 }
@@ -132,7 +133,7 @@ func (p *ProgressReporter) renderLocked(final bool, now time.Time) {
 	}
 	bar := strings.Repeat("#", filled) + strings.Repeat(".", progressBarWidth-filled)
 	line := fmt.Sprintf(
-		"\r%3.0f%%|%s| %s/%s [%s<%s, %s/s]",
+		"%3.0f%%|%s| %s/%s [%s<%s, %s/s]",
 		percent*100,
 		bar,
 		formatProgressBytes(p.current),
@@ -141,10 +142,17 @@ func (p *ProgressReporter) renderLocked(final bool, now time.Time) {
 		eta,
 		formatProgressBytes(int64(rate)),
 	)
-	fmt.Fprint(p.out, line)
+	// Match tqdm's status_printer: shorter redraws must erase stale tail chars.
+	padding := ""
+	if p.lastLineLen > len(line) {
+		padding = strings.Repeat(" ", p.lastLineLen-len(line))
+	}
+	fmt.Fprintf(p.out, "\r%s%s", line, padding)
+	p.lastLineLen = len(line)
 	p.wroteLine = true
 	if final {
 		fmt.Fprintln(p.out)
+		p.lastLineLen = 0
 	}
 }
 
