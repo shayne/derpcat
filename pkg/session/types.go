@@ -33,6 +33,11 @@ type SendConfig struct {
 	ForceRelay         bool
 	UsePublicDERP      bool
 	ParallelPolicy     ParallelPolicy
+
+	// Relay-prefix upgrades already have a live payload path. Blocking pre-data
+	// UDP probes would create an app-visible stall, so the data path ramps using
+	// real transfer feedback instead.
+	skipDirectUDPRateProbes bool
 }
 
 type OfferConfig struct {
