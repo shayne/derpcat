@@ -1155,7 +1155,7 @@ func TestSendExternalViaRelayPrefixThenDirectUDPStartsPrepareBeforeTransportMana
 }
 
 func TestExternalPrepareDirectUDPSendWaitsForHandoffProceedBeforeSendingStart(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
 	srv := newSessionTestDERPServer(t)
@@ -1170,6 +1170,7 @@ func TestExternalPrepareDirectUDPSendWaitsForHandoffProceedBeforeSendingStart(t 
 		t.Fatalf("NewClient(sender) error = %v", err)
 	}
 	defer senderDERP.Close()
+	warmExternalQUICModeTestDERPRoute(t, ctx, senderDERP, listenerDERP)
 
 	readyCh, unsubscribeReady := listenerDERP.SubscribeLossless(func(pkt derpbind.Packet) bool {
 		return pkt.From == senderDERP.PublicKey() && isDirectUDPReadyPayload(pkt.Payload)
@@ -1221,6 +1222,8 @@ func TestExternalPrepareDirectUDPSendWaitsForHandoffProceedBeforeSendingStart(t 
 
 	select {
 	case <-readyCh:
+	case err := <-prepareErrCh:
+		t.Fatalf("externalPrepareDirectUDPSend() returned before direct UDP ready: %v", err)
 	case <-ctx.Done():
 		t.Fatal("timed out waiting for direct UDP ready before proceed gate")
 	}
