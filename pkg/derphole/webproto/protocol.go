@@ -29,6 +29,13 @@ const (
 	FrameDone
 	FrameAck
 	FrameAbort
+	FrameWebRTCOffer
+	FrameWebRTCAnswer
+	FrameWebRTCIceCandidate
+	FrameWebRTCIceComplete
+	FrameDirectReady
+	FramePathSwitch
+	FrameDirectFailed
 )
 
 type Frame struct {
@@ -47,6 +54,31 @@ type Ack struct {
 }
 
 type Abort struct {
+	Reason string `json:"reason,omitempty"`
+}
+
+type WebRTCSignal struct {
+	Kind             string `json:"kind"`
+	Type             string `json:"type"`
+	SDP              string `json:"sdp,omitempty"`
+	Candidate        string `json:"candidate,omitempty"`
+	SDPMid           string `json:"sdpMid,omitempty"`
+	SDPMLineIndex    int    `json:"sdpMLineIndex,omitempty"`
+	UsernameFragment string `json:"usernameFragment,omitempty"`
+}
+
+type DirectReady struct {
+	BytesReceived int64  `json:"bytes_received"`
+	NextSeq       uint64 `json:"next_seq"`
+}
+
+type PathSwitch struct {
+	Path          string `json:"path"`
+	BytesReceived int64  `json:"bytes_received"`
+	NextSeq       uint64 `json:"next_seq"`
+}
+
+type DirectFailed struct {
 	Reason string `json:"reason,omitempty"`
 }
 
@@ -91,5 +123,5 @@ func IsWebFrame(raw []byte) bool {
 }
 
 func validKind(kind FrameKind) bool {
-	return kind >= FrameClaim && kind <= FrameAbort
+	return kind >= FrameClaim && kind <= FrameDirectFailed
 }

@@ -44,6 +44,45 @@ type Callbacks struct {
 	Progress func(Progress)
 }
 
+type DirectRole string
+
+const (
+	DirectRoleSender   DirectRole = "sender"
+	DirectRoleReceiver DirectRole = "receiver"
+)
+
+type DirectSignalPeer interface {
+	SendSignal(context.Context, webproto.FrameKind, uint64, []byte) error
+	Signals() <-chan webproto.Frame
+}
+
+type DirectTransport interface {
+	Start(context.Context, DirectRole, DirectSignalPeer) error
+	Ready() <-chan struct{}
+	Failed() <-chan error
+	SendFrame(context.Context, []byte) error
+	ReceiveFrames() <-chan []byte
+	Close() error
+}
+
+type TransferOptions struct {
+	Direct DirectTransport
+}
+
+type sendPath uint8
+
+const (
+	sendPathRelay sendPath = iota
+	sendPathDirect
+)
+
+func chooseSendPath(opts TransferOptions, directActive bool) sendPath {
+	if opts.Direct != nil && directActive {
+		return sendPathDirect
+	}
+	return sendPathRelay
+}
+
 type FileSource interface {
 	Name() string
 	Size() int64
@@ -60,6 +99,39 @@ type Offer struct {
 	client *derpbind.Client
 	token  token.Token
 	gate   *rendezvous.Gate
+}
+
+type directState struct {
+	ready          bool
+	active         bool
+	fallbackReason string
+}
+
+func (s *directState) noteFailureBeforeSwitch(err error) {
+	s.ready = false
+	s.active = false
+	if err != nil {
+		s.fallbackReason = err.Error()
+	}
+}
+
+func marshalDirectReadyFrame(nextSeq uint64, bytesReceived int64) (webproto.Frame, error) {
+	payload, err := json.Marshal(webproto.DirectReady{
+		BytesReceived: bytesReceived,
+		NextSeq:       nextSeq,
+	})
+	if err != nil {
+		return webproto.Frame{}, err
+	}
+	return webproto.Frame{
+		Kind:    webproto.FrameDirectReady,
+		Seq:     nextSeq,
+		Payload: payload,
+	}, nil
+}
+
+func unmarshalFramePayload(frame webproto.Frame, dst any) error {
+	return json.Unmarshal(frame.Payload, dst)
 }
 
 func NewOffer(ctx context.Context) (*Offer, string, error) {
