@@ -447,7 +447,7 @@ func (o *Offer) sendDataWindowed(ctx context.Context, src FileSource, cb Callbac
 			return offset, seq, directTransport, direct, notifyAbort(ctx, o.client, peerDERP, directErr)
 		}
 		if direct != nil && directTransport != nil && direct.ready && !direct.active {
-			switched, err := trySwitchDirectWithReplay(ctx, o.client, peerDERP, peerCh, directTransport, window)
+			switched, err := trySwitchDirect(ctx, o.client, peerDERP, peerCh, seq, window.ackedOffset())
 			if err != nil {
 				return offset, seq, directTransport, direct, err
 			}
