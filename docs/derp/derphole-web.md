@@ -44,6 +44,12 @@ offer, answer, and ICE candidate messages through DERP control frames. When the
 data channel opens and both sides agree on the current byte offset and sequence,
 the sender switches subsequent data frames to the direct WebRTC path.
 
+The browser demo starts each transfer over DERP relay, then automatically
+attempts WebRTC direct transport. DERP remains the safety net for blocked
+WebRTC, failed ICE, or browser policy restrictions. Browser-to-CLI and
+CLI-to-browser use the same WebRTC signaling frames as browser-to-browser;
+native CLI uses a Pion-backed WebRTC transport.
+
 If WebRTC is unavailable or fails before handoff, the transfer remains on DERP
 relay. If WebRTC fails after handoff, the transfer fails instead of guessing at
 resumption state. This matches the native direct-path rule: fallback is safe

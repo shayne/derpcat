@@ -66,6 +66,7 @@
 
     pc.onicecandidate = (event) => {
       if (event.candidate) {
+        status("webrtc-ice-candidate");
         emitSignal({
           kind: "candidate",
           candidate: event.candidate.candidate,
@@ -75,6 +76,7 @@
         });
         return;
       }
+      status("webrtc-ice-complete");
       emitSignal({ kind: "ice-complete" });
     };
 
@@ -128,10 +130,12 @@
     async function start(role, nextSignalSink) {
       signalSink = nextSignalSink;
       status("probing-direct");
+      status(`webrtc-role-${role}`);
       if (role === "sender") {
         attachChannel(pc.createDataChannel("derphole", { ordered: true }));
         const offer = await pc.createOffer();
         await pc.setLocalDescription(offer);
+        status("webrtc-offer");
         emitSignal({ kind: "offer", type: offer.type, sdp: offer.sdp || "" });
       }
     }
@@ -141,14 +145,17 @@
         signal = JSON.parse(signal);
       }
       if (signal.kind === "offer") {
+        status("webrtc-offer-received");
         await pc.setRemoteDescription({ type: signal.type, sdp: signal.sdp });
         await flushPendingCandidates();
         const answer = await pc.createAnswer();
         await pc.setLocalDescription(answer);
+        status("webrtc-answer");
         emitSignal({ kind: "answer", type: answer.type, sdp: answer.sdp || "" });
         return;
       }
       if (signal.kind === "answer") {
+        status("webrtc-answer-received");
         await pc.setRemoteDescription({ type: signal.type, sdp: signal.sdp });
         await flushPendingCandidates();
         return;
