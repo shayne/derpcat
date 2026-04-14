@@ -432,7 +432,7 @@ func (o *Offer) sendDataWindowed(ctx context.Context, src FileSource, cb Callbac
 		}
 
 		if direct != nil && directTransport != nil && direct.ready && !direct.active && offset > 0 {
-			switched, err := trySwitchDirect(ctx, o.client, peerDERP, peerCh, seq, window.ackedOffset())
+			switched, err := trySwitchDirectWithReplay(ctx, o.client, peerDERP, peerCh, directTransport, seq, window)
 			if err != nil {
 				return offset, seq, directTransport, direct, err
 			}
@@ -691,8 +691,17 @@ func pollSendDirectState(cb Callbacks, direct *directState, transport DirectTran
 	return transport, nil
 }
 
-func trySwitchDirect(ctx context.Context, client derpClient, peerDERP key.NodePublic, frames <-chan derpbind.Packet, nextSeq uint64, bytesReceived int64) (bool, error) {
-	ready, err := marshalDirectReadyFrame(nextSeq, bytesReceived)
+func trySwitchDirectWithReplay(ctx context.Context, client derpClient, peerDERP key.NodePublic, frames <-chan derpbind.Packet, direct DirectTransport, nextSeq uint64, window *relayWindow) (bool, error) {
+	if direct == nil || window == nil {
+		return false, nil
+	}
+	switchOffset := window.ackedOffset()
+	replay := window.replayFrom(switchOffset)
+	switchSeq := nextSeq
+	if len(replay) > 0 {
+		switchSeq = replay[0].Seq
+	}
+	ready, err := marshalDirectReadyFrame(switchSeq, switchOffset)
 	if err != nil {
 		return false, err
 	}
@@ -717,12 +726,31 @@ func trySwitchDirect(ctx context.Context, client derpClient, peerDERP key.NodePu
 				if err := json.Unmarshal(frame.Payload, &sw); err != nil {
 					continue
 				}
-				return sw.Path == "webrtc" && sw.BytesReceived == bytesReceived && sw.NextSeq == nextSeq, nil
+				if sw.Path != "webrtc" || sw.BytesReceived != switchOffset || sw.NextSeq != switchSeq {
+					return false, nil
+				}
+				for _, replayFrame := range replay {
+					if err := sendDirectFrame(ctx, direct, webproto.FrameData, replayFrame.Seq, replayFrame.Payload); err != nil {
+						return false, err
+					}
+					window.ack(replayFrame.NextOffset)
+				}
+				return true, nil
 			case webproto.FrameAbort:
 				return false, decodeAbort(frame.Payload)
+			case webproto.FrameAck:
+				ack, err := decodeAck(frame.Payload)
+				if err == nil {
+					window.ack(ack.BytesReceived)
+				}
 			}
 		case <-timer.C:
 			return false, nil
+		case err := <-direct.Failed():
+			if err == nil {
+				err = errors.New("direct path failed")
+			}
+			return false, err
 		case <-ctx.Done():
 			return false, ctx.Err()
 		}

@@ -871,6 +871,96 @@ func TestSendWithOptionsActiveDirectFailureDoesNotResumeRelay(t *testing.T) {
 	}
 }
 
+func TestDirectSwitchReplaysUnackedRelayFrames(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	client := newFakeDERPClient()
+	peerDERP := key.NewNode().Public()
+	direct := newFakeDirect()
+	window := newRelayWindow(relayWindowConfig{MaxBytes: 64, MaxFrames: 8})
+	window.push(relayFrame{Seq: 2, Offset: 3, NextOffset: 6, Payload: []byte("def"), Sent: true})
+	window.push(relayFrame{Seq: 3, Offset: 6, NextOffset: 9, Payload: []byte("ghi"), Sent: true})
+	window.ack(3)
+
+	client.sendHook = func(_ key.NodePublic, payload []byte) {
+		frame, err := webproto.Parse(payload)
+		if err != nil {
+			t.Fatalf("Parse(sent frame) error = %v", err)
+		}
+		if frame.Kind == webproto.FrameDirectReady {
+			var ready webproto.DirectReady
+			if err := json.Unmarshal(frame.Payload, &ready); err != nil {
+				t.Fatalf("Unmarshal(DirectReady) error = %v", err)
+			}
+			client.emit(peerDERP, mustMarshalFrame(t, webproto.FramePathSwitch, ready.NextSeq, webproto.PathSwitch{
+				Path:          "webrtc",
+				BytesReceived: ready.BytesReceived,
+				NextSeq:       ready.NextSeq,
+			}))
+		}
+	}
+	frames, unsubscribe := client.SubscribeLossless(func(pkt derpbind.Packet) bool {
+		return pkt.From == peerDERP && webproto.IsWebFrame(pkt.Payload)
+	})
+	defer unsubscribe()
+
+	switched, err := trySwitchDirectWithReplay(ctx, client, peerDERP, frames, direct, 4, window)
+	if err != nil {
+		t.Fatalf("trySwitchDirectWithReplay() error = %v", err)
+	}
+	if !switched {
+		t.Fatal("trySwitchDirectWithReplay() switched = false, want true")
+	}
+
+	got := direct.sentFrames(t)
+	if len(got) != 2 {
+		t.Fatalf("direct frame count = %d, want 2", len(got))
+	}
+	if got[0].Kind != webproto.FrameData || got[0].Seq != 2 || string(got[0].Payload) != "def" {
+		t.Fatalf("first replay frame = %+v", got[0])
+	}
+	if got[1].Kind != webproto.FrameData || got[1].Seq != 3 || string(got[1].Payload) != "ghi" {
+		t.Fatalf("second replay frame = %+v", got[1])
+	}
+}
+
+func TestReceiveFramesDiscardsRelayDuplicateAfterDirectSwitch(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	client := newFakeDERPClient()
+	peerDERP := key.NewNode().Public()
+	sink := &fakeSink{}
+	direct := newFakeDirect()
+	derpFrames := make(chan derpbind.Packet, 16)
+	merged, stopMerge := mergeFrameSources(ctx, derpFrames, direct)
+	defer stopMerge()
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- receiveFrames(ctx, client, peerDERP, merged, direct, sink, Callbacks{})
+	}()
+
+	derpFrames <- derpbind.Packet{From: peerDERP, Payload: mustMarshalFrame(t, webproto.FrameMeta, 0, webproto.Meta{Name: "file.txt", Size: 6})}
+	derpFrames <- derpbind.Packet{From: peerDERP, Payload: mustMarshalFrame(t, webproto.FrameData, 1, []byte("abc"))}
+	derpFrames <- derpbind.Packet{From: peerDERP, Payload: mustMarshalFrame(t, webproto.FrameDirectReady, 2, webproto.DirectReady{BytesReceived: 3, NextSeq: 2})}
+	client.waitForSentKind(t, webproto.FramePathSwitch)
+
+	direct.recvCh <- mustMarshalFrame(t, webproto.FrameData, 2, []byte("def"))
+	derpFrames <- derpbind.Packet{From: peerDERP, Payload: mustMarshalFrame(t, webproto.FrameData, 2, []byte("def"))}
+	direct.recvCh <- mustMarshalFrame(t, webproto.FrameDone, 3, nil)
+	close(direct.recvCh)
+	close(derpFrames)
+
+	if err := <-errCh; err != nil {
+		t.Fatalf("receiveFrames() error = %v", err)
+	}
+	if got := sink.buf.String(); got != "abcdef" {
+		t.Fatalf("sink data = %q, want abcdef", got)
+	}
+}
+
 func TestReceiveFramesActiveDirectFailureReturnsImmediately(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
