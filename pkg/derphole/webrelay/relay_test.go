@@ -510,6 +510,79 @@ func TestSendWithOptionsDirectFailureBeforeHandoffKeepsRelay(t *testing.T) {
 	}
 }
 
+func TestSendWithOptionsPipelinesRelayDataBeforeAck(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	client := newFakeDERPClient()
+	peerDERP := key.NewNode().Public()
+	tok, err := newToken(client.PublicKey(), 1)
+	if err != nil {
+		t.Fatalf("newToken() error = %v", err)
+	}
+
+	source := newFakeSource("file.txt", []byte("abc"), []byte("def"), []byte("ghi"))
+	metaAcked := make(chan struct{})
+	releaseDataAcks := make(chan struct{})
+	var dataSent int
+
+	client.sendHook = func(_ key.NodePublic, payload []byte) {
+		frame, err := webproto.Parse(payload)
+		if err != nil {
+			t.Fatalf("Parse(sent frame) error = %v", err)
+		}
+		switch frame.Kind {
+		case webproto.FrameMeta:
+			client.emit(peerDERP, mustMarshalFrame(t, webproto.FrameAck, 0, webproto.Ack{BytesReceived: 0}))
+			close(metaAcked)
+		case webproto.FrameData:
+			dataSent++
+			if dataSent == 3 {
+				go func() {
+					<-releaseDataAcks
+					client.emit(peerDERP, mustMarshalFrame(t, webproto.FrameAck, 0, webproto.Ack{BytesReceived: 3}))
+					client.emit(peerDERP, mustMarshalFrame(t, webproto.FrameAck, 0, webproto.Ack{BytesReceived: 6}))
+					client.emit(peerDERP, mustMarshalFrame(t, webproto.FrameAck, 0, webproto.Ack{BytesReceived: 9}))
+				}()
+			}
+		case webproto.FrameDone:
+			client.emit(peerDERP, mustMarshalFrame(t, webproto.FrameAck, 0, webproto.Ack{BytesReceived: 9}))
+		}
+	}
+
+	offer := &Offer{client: client, token: tok, gate: rendezvous.NewGate(tok)}
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- offer.Send(ctx, source, Callbacks{})
+	}()
+
+	client.waitForSubscribers(t, 1)
+	claim, err := newClaim(tok, peerDERP)
+	if err != nil {
+		t.Fatalf("newClaim() error = %v", err)
+	}
+	client.emit(peerDERP, mustMarshalFrame(t, webproto.FrameClaim, 0, claim))
+
+	select {
+	case <-metaAcked:
+	case <-ctx.Done():
+		t.Fatal("timed out waiting for metadata ack")
+	}
+
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) && dataSent < 3 {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if dataSent < 3 {
+		t.Fatalf("data frames sent before ack = %d, want 3", dataSent)
+	}
+	close(releaseDataAcks)
+
+	if err := <-errCh; err != nil {
+		t.Fatalf("Send() error = %v", err)
+	}
+}
+
 func TestReceiveFramesDirectReadySwitchesAndMergesDirectData(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
