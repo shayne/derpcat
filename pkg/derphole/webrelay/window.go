@@ -67,6 +67,13 @@ func (w *relayWindow) unsent() []relayFrame {
 	return out
 }
 
+func (w *relayWindow) firstUnacked() (relayFrame, bool) {
+	if len(w.frames) == 0 {
+		return relayFrame{}, false
+	}
+	return cloneRelayFrame(w.frames[0]), true
+}
+
 func (w *relayWindow) ack(bytesReceived int64) {
 	if bytesReceived <= w.acked {
 		return

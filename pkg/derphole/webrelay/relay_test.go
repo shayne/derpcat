@@ -23,6 +23,7 @@ type fakeDirect struct {
 	failCh    chan error
 	recvCh    chan []byte
 	sendHook  func([]byte) error
+	startHook func(context.Context, DirectRole, DirectSignalPeer) error
 
 	sentMu sync.Mutex
 	sent   [][]byte
@@ -36,7 +37,12 @@ func newFakeDirect() *fakeDirect {
 	}
 }
 
-func (d *fakeDirect) Start(context.Context, DirectRole, DirectSignalPeer) error { return nil }
+func (d *fakeDirect) Start(ctx context.Context, role DirectRole, peer DirectSignalPeer) error {
+	if d.startHook != nil {
+		return d.startHook(ctx, role, peer)
+	}
+	return nil
+}
 
 func (d *fakeDirect) Ready() <-chan struct{} { return d.readyCh }
 
@@ -520,6 +526,72 @@ func TestReceiveWrappersPreserveNilSinkError(t *testing.T) {
 	}
 }
 
+func TestReceiveWithClientBuffersDirectSignalSentImmediatelyAfterDecision(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	client := newFakeDERPClient()
+	peerDERP := key.NewNode().Public()
+	tok, err := newToken(peerDERP, 1)
+	if err != nil {
+		t.Fatalf("newToken() error = %v", err)
+	}
+
+	offerSeen := make(chan struct{})
+	direct := newFakeDirect()
+	direct.startHook = func(ctx context.Context, role DirectRole, peer DirectSignalPeer) error {
+		if role != DirectRoleReceiver {
+			t.Fatalf("direct role = %q, want %q", role, DirectRoleReceiver)
+		}
+		go func() {
+			for {
+				select {
+				case frame, ok := <-peer.Signals():
+					if !ok {
+						return
+					}
+					if frame.Kind == webproto.FrameWebRTCOffer {
+						close(offerSeen)
+						return
+					}
+				case <-ctx.Done():
+					return
+				}
+			}
+		}()
+		return nil
+	}
+
+	client.sendHook = func(_ key.NodePublic, payload []byte) {
+		frame, err := webproto.Parse(payload)
+		if err != nil {
+			t.Fatalf("Parse(sent frame) error = %v", err)
+		}
+		if frame.Kind != webproto.FrameClaim {
+			return
+		}
+		client.emit(peerDERP, mustMarshalFrame(t, webproto.FrameDecision, 0, rendezvous.Decision{Accepted: true}))
+		client.emit(peerDERP, mustMarshalFrame(t, webproto.FrameWebRTCOffer, 0, webproto.WebRTCSignal{
+			Kind: "offer",
+			Type: "offer",
+			SDP:  "v=0\r\n",
+		}))
+	}
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- receiveWithClient(ctx, tok, client, &fakeSink{}, Callbacks{}, TransferOptions{Direct: direct})
+	}()
+
+	select {
+	case <-offerSeen:
+	case <-ctx.Done():
+		t.Fatal("timed out waiting for direct offer buffered across claim decision")
+	}
+	cancel()
+	<-errCh
+}
+
 func TestSendWithOptionsDirectFailureBeforeHandoffKeepsRelay(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -652,6 +724,74 @@ func TestSendWithOptionsPipelinesRelayDataBeforeAck(t *testing.T) {
 	}
 	close(releaseDataAcks)
 
+	if err := <-errCh; err != nil {
+		t.Fatalf("Send() error = %v", err)
+	}
+}
+
+func TestSendWithOptionsRetransmitsOldestFrameOnDuplicateAck(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	client := newFakeDERPClient()
+	peerDERP := key.NewNode().Public()
+	tok, err := newToken(client.PublicKey(), 1)
+	if err != nil {
+		t.Fatalf("newToken() error = %v", err)
+	}
+
+	source := newFakeSource("file.txt", []byte("abc"), []byte("def"), []byte("ghi"))
+	var seq2Sends atomic.Int32
+	var seq3Seen atomic.Bool
+	doneAcked := make(chan struct{})
+	client.sendHook = func(_ key.NodePublic, payload []byte) {
+		frame, err := webproto.Parse(payload)
+		if err != nil {
+			t.Fatalf("Parse(sent frame) error = %v", err)
+		}
+		switch frame.Kind {
+		case webproto.FrameMeta:
+			client.emit(peerDERP, mustMarshalFrame(t, webproto.FrameAck, 0, webproto.Ack{BytesReceived: 0}))
+		case webproto.FrameData:
+			switch frame.Seq {
+			case 1:
+				client.emit(peerDERP, mustMarshalFrame(t, webproto.FrameAck, 0, webproto.Ack{BytesReceived: 3}))
+			case 2:
+				if seq2Sends.Add(1) == 2 {
+					client.emit(peerDERP, mustMarshalFrame(t, webproto.FrameAck, 0, webproto.Ack{BytesReceived: 9}))
+				}
+			case 3:
+				if seq3Seen.CompareAndSwap(false, true) {
+					client.emit(peerDERP, mustMarshalFrame(t, webproto.FrameAck, 0, webproto.Ack{BytesReceived: 3}))
+				}
+			}
+		case webproto.FrameDone:
+			client.emit(peerDERP, mustMarshalFrame(t, webproto.FrameAck, 0, webproto.Ack{BytesReceived: 9}))
+			close(doneAcked)
+		}
+	}
+
+	offer := &Offer{client: client, token: tok, gate: rendezvous.NewGate(tok)}
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- offer.Send(ctx, source, Callbacks{})
+	}()
+
+	client.waitForSubscribers(t, 1)
+	claim, err := newClaim(tok, peerDERP)
+	if err != nil {
+		t.Fatalf("newClaim() error = %v", err)
+	}
+	client.emit(peerDERP, mustMarshalFrame(t, webproto.FrameClaim, 0, claim))
+
+	select {
+	case <-doneAcked:
+	case <-ctx.Done():
+		t.Fatal("timed out waiting for retransmitted frame to complete transfer")
+	}
+	if got := seq2Sends.Load(); got < 2 {
+		t.Fatalf("seq 2 sends = %d, want retransmission", got)
+	}
 	if err := <-errCh; err != nil {
 		t.Fatalf("Send() error = %v", err)
 	}

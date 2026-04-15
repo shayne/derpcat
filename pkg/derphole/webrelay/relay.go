@@ -24,7 +24,7 @@ import (
 
 const (
 	chunkBytes         = webproto.MaxPayloadBytes
-	relayWindowBytes   = 8 << 20
+	relayWindowBytes   = 256 << 10
 	relayWindowFrames  = relayWindowBytes / chunkBytes
 	maxPendingFrames   = relayWindowFrames * 2
 	claimRetryDelay    = 250 * time.Millisecond
@@ -434,7 +434,7 @@ func (o *Offer) sendDataWindowed(ctx context.Context, src FileSource, cb Callbac
 		}
 
 		if direct != nil && direct.ready && !direct.active && !window.empty() {
-			if err := awaitRelayWindowAck(ctx, peerCh, window); err != nil {
+			if err := awaitRelayWindowAck(ctx, o.client, peerDERP, peerCh, window); err != nil {
 				if err := abortIfContextDone(ctx, o.client, peerDERP); err != nil {
 					return offset, seq, directTransport, direct, err
 				}
@@ -468,7 +468,7 @@ func (o *Offer) sendDataWindowed(ctx context.Context, src FileSource, cb Callbac
 			continue
 		}
 
-		if err := awaitRelayWindowAck(ctx, peerCh, window); err != nil {
+		if err := awaitRelayWindowAck(ctx, o.client, peerDERP, peerCh, window); err != nil {
 			if err := abortIfContextDone(ctx, o.client, peerDERP); err != nil {
 				return offset, seq, directTransport, direct, err
 			}
@@ -509,9 +509,21 @@ func receive(ctx context.Context, encodedToken string, sink FileSink, cb Callbac
 		return err
 	}
 	defer client.Close()
+	return receiveWithClient(ctx, tok, client, sink, cb, opts)
+}
 
+func receiveWithClient(ctx context.Context, tok token.Token, client derpClient, sink FileSink, cb Callbacks, opts TransferOptions) error {
 	peerDERP := keyNodePublicFromRaw32(tok.DERPPublic)
 	cb.trace("claim-peer=" + peerDERP.ShortString())
+
+	directTransport := opts.Direct
+	var signalPeer *derpSignalPeer
+	if directTransport != nil {
+		signalPeer = newDERPSignalPeer(ctx, client, peerDERP)
+		defer signalPeer.close()
+		defer directTransport.Close()
+	}
+
 	frames, unsubscribe := client.SubscribeLossless(func(pkt derpbind.Packet) bool {
 		return pkt.From == peerDERP && webproto.IsWebFrame(pkt.Payload)
 	})
@@ -525,12 +537,7 @@ func receive(ctx context.Context, encodedToken string, sink FileSink, cb Callbac
 		return err
 	}
 
-	directTransport := opts.Direct
-	var signalPeer *derpSignalPeer
 	if directTransport != nil {
-		signalPeer = newDERPSignalPeer(ctx, client, peerDERP)
-		defer signalPeer.close()
-		defer directTransport.Close()
 		if err := directTransport.Start(ctx, DirectRoleReceiver, signalPeer); err != nil {
 			directTransport = nil
 		} else {
@@ -919,8 +926,32 @@ func awaitAck(ctx context.Context, frames <-chan derpbind.Packet, wantBytes int6
 	return awaitAckOrDirectFailure(ctx, frames, wantBytes, timeout, nil)
 }
 
-func awaitRelayWindowAck(ctx context.Context, frames <-chan derpbind.Packet, window *relayWindow) error {
+func awaitRelayWindowAck(ctx context.Context, client derpClient, peerDERP key.NodePublic, frames <-chan derpbind.Packet, window *relayWindow) error {
+	timer := time.NewTimer(frameRetryDelay)
+	defer timer.Stop()
+	lastRetransmitAck := int64(-1)
+
+	resetTimer := func() {
+		if !timer.Stop() {
+			select {
+			case <-timer.C:
+			default:
+			}
+		}
+		timer.Reset(frameRetryDelay)
+	}
+	retransmitOldest := func() error {
+		frame, ok := window.firstUnacked()
+		if !ok {
+			return nil
+		}
+		return sendRelayDataFrame(ctx, client, peerDERP, frame)
+	}
+
 	for {
+		if window.empty() {
+			return nil
+		}
 		select {
 		case pkt, ok := <-frames:
 			if !ok {
@@ -936,10 +967,29 @@ func awaitRelayWindowAck(ctx context.Context, frames <-chan derpbind.Packet, win
 				if err != nil {
 					continue
 				}
+				before := window.ackedOffset()
 				window.ack(ack.BytesReceived)
-				return nil
+				after := window.ackedOffset()
+				if after > before || window.empty() {
+					return nil
+				}
+				if lastRetransmitAck != after {
+					if err := retransmitOldest(); err != nil {
+						return err
+					}
+					lastRetransmitAck = after
+					resetTimer()
+				}
 			case webproto.FrameAbort:
 				return decodeAbort(frame.Payload)
+			}
+		case <-timer.C:
+			if err := retransmitOldest(); err != nil {
+				return err
+			}
+			if !window.empty() {
+				lastRetransmitAck = window.ackedOffset()
+				timer.Reset(frameRetryDelay)
 			}
 		case <-ctx.Done():
 			return ctx.Err()

@@ -21,6 +21,16 @@ func TestRelayWindowEnforcesFrameAndByteLimits(t *testing.T) {
 	}
 }
 
+func TestDefaultRelayWindowStaysDERPFriendly(t *testing.T) {
+	const maxBrowserRelayBurst = 256 << 10
+	if relayWindowBytes > maxBrowserRelayBurst {
+		t.Fatalf("relayWindowBytes = %d, want <= %d", relayWindowBytes, maxBrowserRelayBurst)
+	}
+	if relayWindowFrames != relayWindowBytes/chunkBytes {
+		t.Fatalf("relayWindowFrames = %d, want %d", relayWindowFrames, relayWindowBytes/chunkBytes)
+	}
+}
+
 func TestRelayWindowAckRetiresOnlyCommittedFrames(t *testing.T) {
 	w := newRelayWindow(relayWindowConfig{MaxBytes: 64, MaxFrames: 8})
 	w.push(relayFrame{Seq: 1, Offset: 0, NextOffset: 3, Payload: []byte("abc")})
