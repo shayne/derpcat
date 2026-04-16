@@ -9,7 +9,7 @@ import (
 
 var registry = yargs.Registry{
 	Command: yargs.CommandInfo{
-		Name:        "derpcat-probe",
+		Name:        "derphole-probe",
 		Description: "Experimental direct UDP benchmark probe.",
 	},
 	SubCommands: map[string]yargs.CommandSpec{
@@ -89,5 +89,5 @@ func runHelp(args []string, stderr io.Writer) int {
 }
 
 func subcommandUsageLine(name string) string {
-	return fmt.Sprintf("usage: derpcat-probe %s\n", name)
+	return fmt.Sprintf("usage: derphole-probe %s\n", name)
 }

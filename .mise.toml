@@ -36,7 +36,6 @@ shell = "bash -c"
 run = """
 set -euo pipefail
 mkdir -p dist
-go build -o dist/derpcat ./cmd/derpcat
 go build -o dist/derphole ./cmd/derphole
 """
 
@@ -45,7 +44,6 @@ shell = "bash -c"
 run = """
 set -euo pipefail
 mkdir -p dist
-GOOS=linux GOARCH=amd64 go build -o dist/derpcat-linux-amd64 ./cmd/derpcat
 GOOS=linux GOARCH=amd64 go build -o dist/derphole-linux-amd64 ./cmd/derphole
 """
 

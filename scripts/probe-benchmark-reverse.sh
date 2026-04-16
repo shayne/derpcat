@@ -14,13 +14,13 @@ if [[ -z "${probe_transport}" ]]; then
 		probe_transport="legacy"
 	fi
 fi
-probe_local_bin="dist/derpcat-probe"
-probe_remote_bin="dist/derpcat-probe-linux-amd64"
-remote_probe="/tmp/derpcat-probe"
+probe_local_bin="dist/derphole-probe"
+probe_remote_bin="dist/derphole-probe-linux-amd64"
+remote_probe="/tmp/derphole-probe"
 
 mkdir -p dist
-go build -o "${probe_local_bin}" ./cmd/derpcat-probe
-GOOS=linux GOARCH=amd64 go build -o "${probe_remote_bin}" ./cmd/derpcat-probe
+go build -o "${probe_local_bin}" ./cmd/derphole-probe
+GOOS=linux GOARCH=amd64 go build -o "${probe_remote_bin}" ./cmd/derphole-probe
 ssh "${remote_user}@${target}" "rm -f '${remote_probe}'" >/dev/null
 scp "${probe_remote_bin}" "${remote_user}@${target}:${remote_probe}" >/dev/null
 ssh "${remote_user}@${target}" "chmod 0755 '${remote_probe}'"

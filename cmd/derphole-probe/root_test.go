@@ -39,7 +39,7 @@ func TestRunHelpCommandShowsSubcommandHelp(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("run() code = %d, want 0", code)
 	}
-	if got, want := stderr.String(), "usage: derpcat-probe server\n"; got != want {
+	if got, want := stderr.String(), "usage: derphole-probe server\n"; got != want {
 		t.Fatalf("stderr = %q, want %q", got, want)
 	}
 }
