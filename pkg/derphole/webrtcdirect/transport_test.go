@@ -82,3 +82,79 @@ func TestTransportLoopbackSendsFrame(t *testing.T) {
 		t.Fatal("timed out waiting for received frame")
 	}
 }
+
+func TestTransportLoopbackOpensStripedChannels(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	senderPeer, receiverPeer := newMemoryPeerPair()
+	sender := New()
+	receiver := New()
+	defer sender.Close()
+	defer receiver.Close()
+
+	if err := receiver.Start(ctx, webrelay.DirectRoleReceiver, receiverPeer); err != nil {
+		t.Fatalf("receiver Start() error = %v", err)
+	}
+	if err := sender.Start(ctx, webrelay.DirectRoleSender, senderPeer); err != nil {
+		t.Fatalf("sender Start() error = %v", err)
+	}
+
+	waitTransportReady(t, ctx, sender, "sender")
+	waitTransportReady(t, ctx, receiver, "receiver")
+
+	if got := sender.openChannelCount(); got != dataChannelCount {
+		t.Fatalf("sender openChannelCount() = %d, want %d", got, dataChannelCount)
+	}
+	if got := receiver.openChannelCount(); got != dataChannelCount {
+		t.Fatalf("receiver openChannelCount() = %d, want %d", got, dataChannelCount)
+	}
+	if got := sender.peerConnectionCount(); got != dataChannelCount {
+		t.Fatalf("sender peerConnectionCount() = %d, want %d independent SCTP associations", got, dataChannelCount)
+	}
+	if got := receiver.peerConnectionCount(); got != dataChannelCount {
+		t.Fatalf("receiver peerConnectionCount() = %d, want %d independent SCTP associations", got, dataChannelCount)
+	}
+
+	for seq := uint64(1); seq <= uint64(dataChannelCount*2); seq++ {
+		raw, err := webproto.Marshal(webproto.FrameData, seq, []byte{byte(seq)})
+		if err != nil {
+			t.Fatalf("Marshal(%d) error = %v", seq, err)
+		}
+		if err := sender.SendFrame(ctx, raw); err != nil {
+			t.Fatalf("SendFrame(%d) error = %v", seq, err)
+		}
+	}
+
+	seen := make(map[uint64]bool)
+	for len(seen) < dataChannelCount*2 {
+		select {
+		case raw := <-receiver.ReceiveFrames():
+			frame, err := webproto.Parse(raw)
+			if err != nil {
+				t.Fatalf("Parse() error = %v", err)
+			}
+			seen[frame.Seq] = true
+		case <-ctx.Done():
+			t.Fatalf("timed out waiting for striped frames; got %d", len(seen))
+		}
+	}
+}
+
+func TestSCTPReceiveBufferCoversHighBDPBrowserTransfers(t *testing.T) {
+	const minHighBDPBuffer = 64 << 20
+	if sctpReceiveBufferSize < minHighBDPBuffer {
+		t.Fatalf("sctpReceiveBufferSize = %d, want at least %d", sctpReceiveBufferSize, minHighBDPBuffer)
+	}
+}
+
+func waitTransportReady(t *testing.T, ctx context.Context, tr *Transport, name string) {
+	t.Helper()
+	select {
+	case <-tr.Ready():
+	case err := <-tr.Failed():
+		t.Fatalf("%s failed before ready: %v", name, err)
+	case <-ctx.Done():
+		t.Fatalf("timed out waiting for %s ready", name)
+	}
+}

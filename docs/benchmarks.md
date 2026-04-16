@@ -89,6 +89,16 @@ The reverse probe harness is only valid when the remote host can actually SSH to
 
 Use this after changing `pkg/derphole/webrelay`, `pkg/derphole/webrtcdirect`, `cmd/derphole-web`, or `web/derphole`.
 
+For repeatable browser-send to CLI-receive measurements, use the automated Playwright harness. It builds the web bundle, writes a real temporary input file, drives Chrome on this Mac, copies a native `derphole` receive binary to the remote, verifies received byte count, and reports browser-side wall time plus direct DataChannel stats.
+
+```bash
+SIZE_MB=1024 REMOTE_HOST=root@ktzlxc ./scripts/smoke-web-cli-browser.sh
+```
+
+The harness runs the remote receiver without `--verbose` by default because verbose out-of-order direct-frame traces distort throughput. Use `VERBOSE=1` only when diagnosing direct handoff or frame ordering. Use `DIRECT=0` only for relay-only comparisons.
+
+For manual testing:
+
 1. Build and serve the browser demo locally:
 
 ```bash
@@ -104,7 +114,7 @@ python3 -m http.server --directory "${TMPDIR:-/tmp}/derphole-web-cli-smoke" 8765
 DERPCAT_TEST_DISABLE_TAILSCALE_CANDIDATES=1 go run ./cmd/derpcat derphole receive '<token>'
 ```
 
-Record time to first byte, path-switch time, average throughput, final path, and whether relay fallback was used.
+Record time to first byte, path-switch time, average throughput, final path, and whether relay fallback was used. Do not compare manual verbose runs against quiet harness throughput.
 
 ## Cleanup Guardrails
 

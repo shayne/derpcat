@@ -23,7 +23,7 @@ type relayWindow struct {
 
 func newRelayWindow(cfg relayWindowConfig) *relayWindow {
 	if cfg.MaxBytes <= 0 {
-		cfg.MaxBytes = int64(chunkBytes)
+		cfg.MaxBytes = int64(relayChunkBytes)
 	}
 	if cfg.MaxFrames <= 0 {
 		cfg.MaxFrames = 1

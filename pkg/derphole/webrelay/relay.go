@@ -23,21 +23,25 @@ import (
 )
 
 const (
-	chunkBytes         = webproto.MaxPayloadBytes
-	relayWindowBytes   = 256 << 10
-	relayWindowFrames  = relayWindowBytes / chunkBytes
-	maxPendingFrames   = relayWindowFrames * 2
-	claimRetryDelay    = 250 * time.Millisecond
-	frameRetryDelay    = 2 * time.Second
-	offerTokenTTL      = time.Hour
-	defaultClaimPar    = 1
-	maxFilenameBytes   = 255
-	statusWaitingClaim = "waiting-for-claim"
-	statusClaimed      = "claimed"
-	statusProbing      = "probing-direct"
-	statusRelay        = "connected-relay"
-	statusDirect       = "connected-direct"
-	statusComplete     = "complete"
+	relayChunkBytes        = webproto.MaxRelayPayloadBytes
+	directChunkBytes       = webproto.MaxPayloadBytes
+	relayWindowBytes       = 256 << 10
+	relayWindowFrames      = relayWindowBytes / relayChunkBytes
+	maxPendingFrames       = relayWindowFrames * 2
+	maxPendingBytes        = int64(maxPendingFrames * relayChunkBytes)
+	maxDirectPendingBytes  = 128 << 20
+	maxDirectPendingFrames = maxDirectPendingBytes / directChunkBytes
+	claimRetryDelay        = 250 * time.Millisecond
+	frameRetryDelay        = 250 * time.Millisecond
+	offerTokenTTL          = time.Hour
+	defaultClaimPar        = 1
+	maxFilenameBytes       = 255
+	statusWaitingClaim     = "waiting-for-claim"
+	statusClaimed          = "claimed"
+	statusProbing          = "probing-direct"
+	statusRelay            = "connected-relay"
+	statusDirect           = "connected-direct"
+	statusComplete         = "complete"
 )
 
 type Progress struct {
@@ -382,12 +386,19 @@ func (o *Offer) sendDataWindowed(ctx context.Context, src FileSource, cb Callbac
 			return offset, seq, directTransport, direct, notifyAbort(ctx, o.client, peerDERP, directErr)
 		}
 
-		for !eof && window.canSend(chunkBytes) {
+		for !eof {
+			chunkSize := relayChunkBytes
+			if direct != nil && direct.active && directTransport != nil {
+				chunkSize = directChunkBytes
+			} else if !window.canSend(chunkSize) {
+				break
+			}
+
 			if direct != nil && direct.ready && !direct.active && !window.empty() {
 				break
 			}
 
-			chunk, err := src.ReadChunk(ctx, offset, chunkBytes)
+			chunk, err := src.ReadChunk(ctx, offset, chunkSize)
 			if err != nil {
 				if err := abortIfContextDone(ctx, o.client, peerDERP); err != nil {
 					return offset, seq, directTransport, direct, err
@@ -558,6 +569,7 @@ func receiveFrames(ctx context.Context, client derpClient, peerDERP key.NodePubl
 	var opened bool
 	var directActive bool
 	pendingFrames := make(map[uint64][]byte)
+	var pendingBytes int64
 	var doneSeen bool
 	var doneSeq uint64
 
@@ -577,6 +589,7 @@ func receiveFrames(ctx context.Context, client derpClient, peerDERP key.NodePubl
 				return nil
 			}
 			delete(pendingFrames, expectedSeq)
+			pendingBytes -= int64(len(payload))
 			if err := writeFrame(webproto.Frame{Kind: webproto.FrameData, Seq: expectedSeq, Payload: payload}); err != nil {
 				return err
 			}
@@ -639,20 +652,31 @@ func receiveFrames(ctx context.Context, client derpClient, peerDERP key.NodePubl
 				return abortAndReturn(ctx, client, peerDERP, "data before metadata")
 			}
 			if frame.Seq < expectedSeq {
-				_ = sendAck(ctx, client, peerDERP, received)
+				if !directActive {
+					_ = sendAck(ctx, client, peerDERP, received)
+				}
 				continue
 			}
 			if frame.Seq > expectedSeq {
 				if _, ok := pendingFrames[frame.Seq]; !ok {
-					if len(pendingFrames) >= maxPendingFrames {
+					limitFrames := maxPendingFrames
+					limitBytes := maxPendingBytes
+					if directActive {
+						limitFrames = maxDirectPendingFrames
+						limitBytes = maxDirectPendingBytes
+					}
+					if len(pendingFrames) >= limitFrames || pendingBytes+int64(len(frame.Payload)) > limitBytes {
 						return abortAndReturn(ctx, client, peerDERP, "too many out-of-order data frames")
 					}
 					pendingFrames[frame.Seq] = append([]byte(nil), frame.Payload...)
+					pendingBytes += int64(len(frame.Payload))
 					if len(pendingFrames) == 1 || len(pendingFrames)%64 == 0 {
 						cb.trace(fmt.Sprintf("receive-buffered seq=%d expected=%d pending=%d", frame.Seq, expectedSeq, len(pendingFrames)))
 					}
 				}
-				_ = sendAck(ctx, client, peerDERP, received)
+				if !directActive {
+					_ = sendAck(ctx, client, peerDERP, received)
+				}
 				continue
 			}
 			if err := writeFrame(frame); err != nil {
@@ -661,8 +685,10 @@ func receiveFrames(ctx context.Context, client derpClient, peerDERP key.NodePubl
 			if err := drainPending(); err != nil {
 				return err
 			}
-			if err := sendAck(ctx, client, peerDERP, received); err != nil {
-				return err
+			if !directActive {
+				if err := sendAck(ctx, client, peerDERP, received); err != nil {
+					return err
+				}
 			}
 			if complete, err := completeIfDone(); err != nil || complete {
 				return err
@@ -695,7 +721,9 @@ func receiveFrames(ctx context.Context, client derpClient, peerDERP key.NodePubl
 			if complete, err := completeIfDone(); err != nil || complete {
 				return err
 			}
-			_ = sendAck(ctx, client, peerDERP, received)
+			if !directActive {
+				_ = sendAck(ctx, client, peerDERP, received)
+			}
 		case webproto.FrameAbort:
 			return decodeAbort(frame.Payload)
 		}
@@ -789,22 +817,38 @@ func trySwitchDirectWithReplay(ctx context.Context, client derpClient, peerDERP 
 	if direct == nil || window == nil {
 		return false, nil
 	}
-	switchOffset := window.ackedOffset()
-	replay := window.replayFrom(switchOffset)
-	switchSeq := nextSeq
-	if len(replay) > 0 {
-		switchSeq = replay[0].Seq
-	}
-	cb.trace(fmt.Sprintf("send-direct-ready bytes=%d next_seq=%d replay_frames=%d", switchOffset, switchSeq, len(replay)))
-	ready, err := marshalDirectReadyFrame(switchSeq, switchOffset)
-	if err != nil {
-		return false, err
-	}
-	if err := sendFrame(ctx, client, peerDERP, ready.Kind, ready.Seq, ready.Payload); err != nil {
-		return false, err
-	}
 	timer := time.NewTimer(frameRetryDelay)
 	defer timer.Stop()
+	resetTimer := func() {
+		if !timer.Stop() {
+			select {
+			case <-timer.C:
+			default:
+			}
+		}
+		timer.Reset(frameRetryDelay)
+	}
+	sendReady := func() error {
+		switchOffset := window.ackedOffset()
+		replay := window.replayFrom(switchOffset)
+		switchSeq := nextSeq
+		if len(replay) > 0 {
+			switchSeq = replay[0].Seq
+		}
+		cb.trace(fmt.Sprintf("send-direct-ready bytes=%d next_seq=%d replay_frames=%d", switchOffset, switchSeq, len(replay)))
+		ready, err := marshalDirectReadyFrame(switchSeq, switchOffset)
+		if err != nil {
+			return err
+		}
+		if err := sendFrame(ctx, client, peerDERP, ready.Kind, ready.Seq, ready.Payload); err != nil {
+			return err
+		}
+		resetTimer()
+		return nil
+	}
+	if err := sendReady(); err != nil {
+		return false, err
+	}
 	for {
 		select {
 		case pkt, ok := <-frames:
@@ -821,9 +865,14 @@ func trySwitchDirectWithReplay(ctx context.Context, client derpClient, peerDERP 
 				if err := json.Unmarshal(frame.Payload, &sw); err != nil {
 					continue
 				}
-				if sw.Path != "webrtc" || sw.BytesReceived != switchOffset || sw.NextSeq != switchSeq {
-					return false, nil
+				if sw.Path != "webrtc" || sw.NextSeq > nextSeq {
+					continue
 				}
+				replayOffset := sw.BytesReceived
+				if acked := window.ackedOffset(); acked > replayOffset {
+					replayOffset = acked
+				}
+				replay := window.replayFrom(replayOffset)
 				cb.trace(fmt.Sprintf("send-path-switch bytes=%d next_seq=%d replay_frames=%d", sw.BytesReceived, sw.NextSeq, len(replay)))
 				for _, replayFrame := range replay {
 					if err := sendDirectFrame(ctx, direct, webproto.FrameData, replayFrame.Seq, replayFrame.Payload); err != nil {
@@ -842,7 +891,9 @@ func trySwitchDirectWithReplay(ctx context.Context, client derpClient, peerDERP 
 				}
 			}
 		case <-timer.C:
-			return false, nil
+			if err := sendReady(); err != nil {
+				return false, err
+			}
 		case err := <-direct.Failed():
 			if err == nil {
 				err = errors.New("direct path failed")

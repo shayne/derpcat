@@ -9,7 +9,12 @@ const (
 	// Keep browser DERP/WebSocket packets close to real WireGuard packet
 	// sizing. Public DERP accepts larger theoretical packets, but browser
 	// WebSocket connections have been observed to close on near-64KiB frames.
-	MaxPayloadBytes = 16 << 10
+	MaxRelayPayloadBytes = 16 << 10
+
+	// WebRTC direct payloads can be larger than relay payloads. Keeping this
+	// below common SCTP message-size limits reduces WASM/JS crossings without
+	// relying on jumbo DataChannel messages.
+	MaxPayloadBytes = 128 << 10
 
 	magic     = "DHPW"
 	version   = 1
@@ -60,6 +65,7 @@ type Abort struct {
 }
 
 type WebRTCSignal struct {
+	Lane             int    `json:"lane,omitempty"`
 	Kind             string `json:"kind"`
 	Type             string `json:"type"`
 	SDP              string `json:"sdp,omitempty"`

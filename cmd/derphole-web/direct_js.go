@@ -207,6 +207,7 @@ func (d *jsDirectTransport) forwardRemoteSignals(ctx context.Context, peer webre
 func marshalJSWebRTCSignal(v js.Value) ([]byte, webproto.FrameKind, error) {
 	kind := jsString(v, "kind")
 	signal := webproto.WebRTCSignal{
+		Lane:             jsInt(v, "lane"),
 		Kind:             kind,
 		Type:             jsString(v, "type"),
 		SDP:              jsString(v, "sdp"),

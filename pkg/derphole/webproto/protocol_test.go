@@ -36,10 +36,13 @@ func TestFrameRejectsOversizedPayload(t *testing.T) {
 	}
 }
 
-func TestMaxPayloadBytesStaysBrowserDERPFriendly(t *testing.T) {
+func TestPayloadLimitsKeepRelaySmallAndAllowLargerDirectFrames(t *testing.T) {
 	const want = 16 << 10
-	if MaxPayloadBytes != want {
-		t.Fatalf("MaxPayloadBytes = %d, want %d", MaxPayloadBytes, want)
+	if MaxRelayPayloadBytes != want {
+		t.Fatalf("MaxRelayPayloadBytes = %d, want %d", MaxRelayPayloadBytes, want)
+	}
+	if MaxPayloadBytes <= MaxRelayPayloadBytes {
+		t.Fatalf("MaxPayloadBytes = %d, want larger than relay limit %d", MaxPayloadBytes, MaxRelayPayloadBytes)
 	}
 }
 

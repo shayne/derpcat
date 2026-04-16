@@ -1,4 +1,5 @@
 (function () {
+  const dataChannelCount = 2;
   const bufferHighWater = 8 * 1024 * 1024;
   const bufferLowWater = 2 * 1024 * 1024;
 
@@ -8,19 +9,21 @@
       return null;
     }
 
-    const pc = new PeerConnection({
-      iceServers: [
-        { urls: "stun:stun.l.google.com:19302" },
-        { urls: "stun:stun.cloudflare.com:3478" },
-      ],
-    });
-
-    let channel = null;
+    let nextSendLane = 0;
     let frameHandler = null;
     let signalSink = null;
-    let pendingCandidates = [];
     let readySettled = false;
     let failedSettled = false;
+    const stats = {
+      sendFrames: 0,
+      sendBytes: 0,
+      sendCallMs: 0,
+      waitCount: 0,
+      waitMs: 0,
+      queueFullErrors: 0,
+      maxBufferedAmount: 0,
+      lanes: [],
+    };
 
     let readyResolve;
     let readyReject;
@@ -34,15 +37,78 @@
       failedReject = reject;
     });
 
+    const lanes = Array.from({ length: dataChannelCount }, (_, index) => createLane(index));
+
+    function createLane(index) {
+      const pc = new PeerConnection({
+        iceServers: [
+          { urls: "stun:stun.l.google.com:19302" },
+          { urls: "stun:stun.cloudflare.com:3478" },
+        ],
+      });
+      const lane = {
+        index,
+        pc,
+        channel: null,
+        open: false,
+        lowWaiters: [],
+        pendingCandidates: [],
+        sendFrames: 0,
+        sendBytes: 0,
+        maxBufferedAmount: 0,
+      };
+
+      pc.onicecandidate = (event) => {
+        if (event.candidate) {
+          status(`webrtc-ice-candidate-${index}`);
+          emitSignal(lane, {
+            kind: "candidate",
+            candidate: event.candidate.candidate,
+            sdpMid: event.candidate.sdpMid || "",
+            sdpMLineIndex: event.candidate.sdpMLineIndex || 0,
+            usernameFragment: event.candidate.usernameFragment || "",
+          });
+          return;
+        }
+        status(`webrtc-ice-complete-${index}`);
+        emitSignal(lane, { kind: "ice-complete" });
+      };
+
+      pc.onconnectionstatechange = () => {
+        const state = pc.connectionState;
+        status(`webrtc-${index}-${state}`);
+        if (state === "failed") {
+          fail(`webrtc lane ${index} ${state}`);
+        }
+      };
+
+      pc.oniceconnectionstatechange = () => {
+        const state = pc.iceConnectionState;
+        if (state === "failed") {
+          fail(`webrtc lane ${index} ice ${state}`);
+        }
+      };
+
+      pc.ondatachannel = (event) => {
+        attachChannel(lane, event.channel);
+      };
+
+      return lane;
+    }
+
     function status(value) {
       callbacks.status?.(value);
     }
 
-    function resolveReady() {
+    function resolveReadyIfEnoughOpenChannels() {
       if (readySettled) {
         return;
       }
+      if (openLanes().length < dataChannelCount) {
+        return;
+      }
       readySettled = true;
+      status("connected-direct");
       readyResolve();
     }
 
@@ -58,62 +124,36 @@
       }
     }
 
-    function emitSignal(signal) {
+    function emitSignal(lane, signal) {
       if (signalSink) {
-        signalSink(signal);
+        signalSink({ lane: lane.index, ...signal });
       }
     }
 
-    pc.onicecandidate = (event) => {
-      if (event.candidate) {
-        status("webrtc-ice-candidate");
-        emitSignal({
-          kind: "candidate",
-          candidate: event.candidate.candidate,
-          sdpMid: event.candidate.sdpMid || "",
-          sdpMLineIndex: event.candidate.sdpMLineIndex || 0,
-          usernameFragment: event.candidate.usernameFragment || "",
-        });
-        return;
-      }
-      status("webrtc-ice-complete");
-      emitSignal({ kind: "ice-complete" });
-    };
-
-    pc.onconnectionstatechange = () => {
-      const state = pc.connectionState;
-      status(`webrtc-${state}`);
-      if (state === "failed") {
-        fail(`webrtc ${state}`);
-      }
-    };
-
-    pc.oniceconnectionstatechange = () => {
-      const state = pc.iceConnectionState;
-      if (state === "failed") {
-        fail(`webrtc ice ${state}`);
-      }
-    };
-
-    pc.ondatachannel = (event) => {
-      attachChannel(event.channel);
-    };
-
-    function attachChannel(dc) {
-      channel = dc;
-      channel.binaryType = "arraybuffer";
-      channel.bufferedAmountLowThreshold = bufferLowWater;
-      channel.onopen = () => {
-        status("connected-direct");
-        resolveReady();
+    function attachChannel(lane, dc) {
+      lane.channel = dc;
+      lane.open = false;
+      dc.binaryType = "arraybuffer";
+      dc.bufferedAmountLowThreshold = bufferLowWater;
+      dc.onopen = () => {
+        lane.open = true;
+        status(`webrtc-datachannel-open-${openLanes().length}/${dataChannelCount}`);
+        resolveReadyIfEnoughOpenChannels();
       };
-      channel.onerror = () => fail("webrtc datachannel error");
-      channel.onclose = () => {
+      dc.onerror = () => fail("webrtc datachannel error");
+      dc.onclose = () => {
+        lane.open = false;
+        resolveLaneWaiters(lane);
         if (!readySettled) {
           fail("webrtc datachannel closed before open");
+          return;
+        }
+        if (openLanes().length === 0) {
+          fail("webrtc datachannels closed");
         }
       };
-      channel.onmessage = (event) => {
+      dc.onbufferedamountlow = () => resolveLaneWaiters(lane);
+      dc.onmessage = (event) => {
         if (!frameHandler) {
           return;
         }
@@ -131,12 +171,15 @@
       signalSink = nextSignalSink;
       status("probing-direct");
       status(`webrtc-role-${role}`);
-      if (role === "sender") {
-        attachChannel(pc.createDataChannel("derphole", { ordered: true }));
-        const offer = await pc.createOffer();
-        await pc.setLocalDescription(offer);
-        status("webrtc-offer");
-        emitSignal({ kind: "offer", type: offer.type, sdp: offer.sdp || "" });
+      if (role !== "sender") {
+        return;
+      }
+      for (const lane of lanes) {
+        attachChannel(lane, lane.pc.createDataChannel(`derphole-${lane.index}`, { ordered: false }));
+        const offer = await lane.pc.createOffer();
+        await lane.pc.setLocalDescription(offer);
+        status(`webrtc-offer-${lane.index}`);
+        emitSignal(lane, { kind: "offer", type: offer.type, sdp: offer.sdp || "" });
       }
     }
 
@@ -144,20 +187,22 @@
       if (typeof signal === "string") {
         signal = JSON.parse(signal);
       }
+      const lane = laneForSignal(signal);
+      const pc = lane.pc;
       if (signal.kind === "offer") {
-        status("webrtc-offer-received");
+        status(`webrtc-offer-received-${lane.index}`);
         await pc.setRemoteDescription({ type: signal.type, sdp: signal.sdp });
-        await flushPendingCandidates();
+        await flushPendingCandidates(lane);
         const answer = await pc.createAnswer();
         await pc.setLocalDescription(answer);
-        status("webrtc-answer");
-        emitSignal({ kind: "answer", type: answer.type, sdp: answer.sdp || "" });
+        status(`webrtc-answer-${lane.index}`);
+        emitSignal(lane, { kind: "answer", type: answer.type, sdp: answer.sdp || "" });
         return;
       }
       if (signal.kind === "answer") {
-        status("webrtc-answer-received");
+        status(`webrtc-answer-received-${lane.index}`);
         await pc.setRemoteDescription({ type: signal.type, sdp: signal.sdp });
-        await flushPendingCandidates();
+        await flushPendingCandidates(lane);
         return;
       }
       if (signal.kind === "candidate") {
@@ -168,7 +213,7 @@
           usernameFragment: signal.usernameFragment || undefined,
         };
         if (!pc.remoteDescription) {
-          pendingCandidates.push(candidate);
+          lane.pendingCandidates.push(candidate);
           return;
         }
         await pc.addIceCandidate(candidate);
@@ -179,43 +224,110 @@
       }
     }
 
-    async function flushPendingCandidates() {
-      const candidates = pendingCandidates;
-      pendingCandidates = [];
+    function laneForSignal(signal) {
+      const index = Number.isInteger(signal.lane) ? signal.lane : 0;
+      if (index < 0 || index >= lanes.length) {
+        throw new Error("invalid webrtc signal lane");
+      }
+      return lanes[index];
+    }
+
+    async function flushPendingCandidates(lane) {
+      const candidates = lane.pendingCandidates;
+      lane.pendingCandidates = [];
       for (const candidate of candidates) {
-        await pc.addIceCandidate(candidate);
+        await lane.pc.addIceCandidate(candidate);
       }
     }
 
     async function send(bytes) {
       await readyPromise;
       for (;;) {
-        assertChannelOpen();
-        await waitForSendCapacity(bytes);
-        assertChannelOpen();
+        const lane = pickSendLane(byteLength(bytes));
+        if (!lane) {
+          const started = performance.now();
+          stats.waitCount++;
+          await Promise.race([waitForAnyLaneCapacity(byteLength(bytes)), failedPromise]);
+          stats.waitMs += performance.now() - started;
+          continue;
+        }
         try {
-          channel.send(bytes);
+          const started = performance.now();
+          lane.channel.send(bytes);
+          stats.sendCallMs += performance.now() - started;
+          stats.sendFrames++;
+          stats.sendBytes += byteLength(bytes);
+          lane.sendFrames++;
+          lane.sendBytes += byteLength(bytes);
+          if (lane.channel.bufferedAmount > lane.maxBufferedAmount) {
+            lane.maxBufferedAmount = lane.channel.bufferedAmount;
+          }
+          if (lane.channel.bufferedAmount > stats.maxBufferedAmount) {
+            stats.maxBufferedAmount = lane.channel.bufferedAmount;
+          }
           return;
         } catch (err) {
           if (!isSendQueueFullError(err)) {
             throw err;
           }
-          await Promise.race([waitForBufferedAmountLow(), failedPromise]);
+          stats.queueFullErrors++;
+          await Promise.race([waitForLaneLow(lane), failedPromise]);
         }
       }
     }
 
-    async function waitForSendCapacity(bytes) {
-      const size = byteLength(bytes);
-      while (channel && channel.bufferedAmount + size > bufferHighWater) {
-        await Promise.race([waitForBufferedAmountLow(), failedPromise]);
-        assertChannelOpen();
+    function pickSendLane(size) {
+      for (let i = 0; i < lanes.length; i++) {
+        const idx = (nextSendLane + i) % lanes.length;
+        const lane = lanes[idx];
+        if (laneHasCapacity(lane, size)) {
+          nextSendLane = (idx + 1) % lanes.length;
+          return lane;
+        }
       }
+      return null;
     }
 
-    function assertChannelOpen() {
-      if (!channel || channel.readyState !== "open") {
-        throw new Error("webrtc datachannel is not open");
+    function laneHasCapacity(lane, size) {
+      return lane && lane.open && lane.channel && lane.channel.readyState === "open" && lane.channel.bufferedAmount + size <= bufferHighWater;
+    }
+
+    function openLanes() {
+      return lanes.filter((lane) => lane.open && lane.channel && lane.channel.readyState === "open");
+    }
+
+    function waitForAnyLaneCapacity(size) {
+      if (lanes.some((lane) => laneHasCapacity(lane, size))) {
+        return Promise.resolve();
+      }
+      return new Promise((resolve) => {
+        let done = false;
+        const waiter = () => {
+          if (done || !lanes.some((lane) => laneHasCapacity(lane, size))) {
+            return;
+          }
+          done = true;
+          resolve();
+        };
+        for (const lane of lanes) {
+          lane.lowWaiters.push(waiter);
+        }
+      });
+    }
+
+    function waitForLaneLow(lane) {
+      if (!lane || !lane.channel || lane.channel.bufferedAmount <= bufferLowWater) {
+        return Promise.resolve();
+      }
+      return new Promise((resolve) => {
+        lane.lowWaiters.push(resolve);
+      });
+    }
+
+    function resolveLaneWaiters(lane) {
+      const waiters = lane.lowWaiters.splice(0);
+      for (const resolve of waiters) {
+        resolve();
       }
     }
 
@@ -239,26 +351,14 @@
       return String(err?.message || err).includes("send queue is full");
     }
 
-    function waitForBufferedAmountLow() {
-      if (!channel || channel.bufferedAmount <= bufferLowWater) {
-        return Promise.resolve();
-      }
-      return new Promise((resolve) => {
-        const previous = channel.onbufferedamountlow;
-        channel.onbufferedamountlow = (event) => {
-          channel.onbufferedamountlow = previous || null;
-          previous?.(event);
-          resolve();
-        };
-      });
-    }
-
     function close() {
       fail("webrtc closed");
-      if (channel && channel.readyState !== "closed") {
-        channel.close();
+      for (const lane of lanes) {
+        if (lane.channel && lane.channel.readyState !== "closed") {
+          lane.channel.close();
+        }
+        lane.pc.close();
       }
-      pc.close();
     }
 
     return {
@@ -267,6 +367,21 @@
       ready: () => readyPromise,
       failed: () => failedPromise,
       send,
+      stats() {
+        return {
+          ...stats,
+          bufferedAmount: lanes.reduce((sum, lane) => sum + (lane.channel ? lane.channel.bufferedAmount : 0), 0),
+          lanes: lanes.map((lane) => ({
+            index: lane.index,
+            label: lane.channel?.label || "",
+            open: lane.open,
+            bufferedAmount: lane.channel ? lane.channel.bufferedAmount : 0,
+            maxBufferedAmount: lane.maxBufferedAmount,
+            sendFrames: lane.sendFrames,
+            sendBytes: lane.sendBytes,
+          })),
+        };
+      },
       onFrame(callback) {
         frameHandler = callback;
       },

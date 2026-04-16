@@ -15,9 +15,14 @@ const vm = require("vm");
 
 const source = fs.readFileSync(process.argv[1], "utf8");
 let dataChannel;
+const createdPeerConnections = [];
+const createdChannels = [];
+const emittedSignals = [];
 
 class FakeDataChannel {
-  constructor() {
+  constructor(label, options) {
+    this.label = label;
+    this.options = options || {};
     this.binaryType = "";
     this.bufferedAmount = 0;
     this.bufferedAmountLowThreshold = 0;
@@ -46,11 +51,14 @@ class FakeRTCPeerConnection {
   constructor() {
     this.connectionState = "new";
     this.iceConnectionState = "new";
+    createdPeerConnections.push(this);
   }
-  createDataChannel() {
-    dataChannel = new FakeDataChannel();
-    queueMicrotask(() => dataChannel.onopen?.({}));
-    return dataChannel;
+  createDataChannel(label, options) {
+    const channel = new FakeDataChannel(label, options);
+    dataChannel = channel;
+    createdChannels.push(channel);
+    queueMicrotask(() => channel.onopen?.({}));
+    return channel;
   }
   async createOffer() {
     return { type: "offer", sdp: "fake-offer" };
@@ -62,9 +70,10 @@ class FakeRTCPeerConnection {
 const context = {
   window: { RTCPeerConnection: FakeRTCPeerConnection },
   ArrayBuffer,
-  Error,
-  Promise,
-  Uint8Array,
+	Error,
+	performance: { now: () => Date.now() },
+	Promise,
+	Uint8Array,
   clearTimeout,
   queueMicrotask,
   setTimeout,
@@ -74,10 +83,41 @@ vm.runInContext(source, context);
 
 (async () => {
   const transport = context.window.createDerpholeWebRTCTransport();
-  await transport.start("sender", () => {});
-  await transport.ready();
+  await transport.start("sender", (signal) => emittedSignals.push(signal));
+  await Promise.race([
+    transport.ready(),
+    new Promise((_, reject) => setTimeout(() => reject(new Error("timed out waiting for WebRTC ready")), 100)),
+  ]);
 
-  dataChannel.bufferedAmount = 16 * 1024 * 1024 - 1;
+  if (createdPeerConnections.length !== 2) {
+    throw new Error("expected 2 independent PeerConnections, got " + createdPeerConnections.length);
+  }
+  const offerLanes = emittedSignals.filter((signal) => signal.kind === "offer").map((signal) => signal.lane).sort();
+  if (offerLanes.join(",") !== "0,1") {
+    throw new Error("expected lane-tagged offers for lanes 0..1, got " + offerLanes.join(","));
+  }
+  if (createdChannels.length !== 2) {
+    throw new Error("expected 2 striped DataChannels, got " + createdChannels.length);
+  }
+  for (const channel of createdChannels) {
+    if (channel.options.ordered !== false) {
+      throw new Error("striped DataChannel should be unordered");
+    }
+  }
+
+  for (let i = 0; i < 4; i++) {
+    await transport.send(new Uint8Array(1024));
+  }
+  for (const channel of createdChannels) {
+    if (channel.sent !== 2) {
+      throw new Error("expected round-robin striping across channels, got sent=" + createdChannels.map((ch) => ch.sent).join(","));
+    }
+    channel.sent = 0;
+  }
+
+  for (const channel of createdChannels) {
+    channel.bufferedAmount = 8 * 1024 * 1024 - 1;
+  }
   let rejected;
   let resolved = false;
   const sendPromise = transport.send(new Uint8Array(16 * 1024)).then(
@@ -93,21 +133,24 @@ vm.runInContext(source, context);
     throw new Error("send should wait while the next frame would exceed queue capacity");
   }
 
-  dataChannel.bufferedAmount = 0;
-  dataChannel.onbufferedamountlow?.({});
+  createdChannels[1].bufferedAmount = 0;
+  createdChannels[1].onbufferedamountlow?.({});
   await sendPromise;
 
   if (rejected) {
     throw rejected;
   }
-  if (!resolved || dataChannel.sent !== 1) {
+  if (!resolved || createdChannels[1].sent !== 1) {
     throw new Error("send did not resume after bufferedamountlow");
   }
 
-  dataChannel.bufferedAmount = 0;
-  dataChannel.failNextSend = true;
+  for (const channel of createdChannels) {
+    channel.bufferedAmount = 0;
+    channel.failNextSend = true;
+  }
   await transport.send(new Uint8Array(16 * 1024));
-  if (dataChannel.sent !== 2) {
+  const sentAfterRetry = createdChannels.reduce((sum, channel) => sum + channel.sent, 0);
+  if (sentAfterRetry !== 2) {
     throw new Error("send did not retry a transient queue-full exception");
   }
 })().catch((err) => {

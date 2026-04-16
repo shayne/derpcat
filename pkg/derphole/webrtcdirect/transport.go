@@ -4,25 +4,34 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strconv"
 	"sync"
+	"sync/atomic"
 
 	"github.com/pion/webrtc/v4"
 	"github.com/shayne/derpcat/pkg/derphole/webproto"
 	"github.com/shayne/derpcat/pkg/derphole/webrelay"
 )
 
-const receiveQueueFrames = 512
+const (
+	dataChannelCount      = 2
+	receiveQueueFrames    = 512
+	sctpReceiveBufferSize = 128 << 20
+)
 
 type Transport struct {
 	mu       sync.Mutex
-	pc       *webrtc.PeerConnection
-	dc       *webrtc.DataChannel
+	pcs      []*webrtc.PeerConnection
+	dcs      []*webrtc.DataChannel
+	open     map[*webrtc.DataChannel]bool
+	pending  map[int][]webrtc.ICECandidateInit
 	readyCh  chan struct{}
 	failCh   chan error
 	recvCh   chan []byte
 	ready    bool
 	closed   bool
 	failOnce sync.Once
+	nextSend uint64
 }
 
 func New() *Transport {
@@ -30,6 +39,8 @@ func New() *Transport {
 		readyCh: make(chan struct{}),
 		failCh:  make(chan error, 1),
 		recvCh:  make(chan []byte, receiveQueueFrames),
+		open:    make(map[*webrtc.DataChannel]bool),
+		pending: make(map[int][]webrtc.ICECandidateInit),
 	}
 }
 
@@ -38,21 +49,56 @@ func (t *Transport) Start(ctx context.Context, role webrelay.DirectRole, peer we
 		{URLs: []string{"stun:stun.l.google.com:19302"}},
 		{URLs: []string{"stun:stun.cloudflare.com:3478"}},
 	}}
-	pc, err := webrtc.NewPeerConnection(config)
-	if err != nil {
-		return err
+	pcs := make([]*webrtc.PeerConnection, 0, dataChannelCount)
+	for lane := 0; lane < dataChannelCount; lane++ {
+		pc, err := newPeerConnection(config)
+		if err != nil {
+			return err
+		}
+		t.configurePeerConnection(ctx, peer, lane, pc)
+		pcs = append(pcs, pc)
 	}
 	t.mu.Lock()
-	t.pc = pc
+	t.pcs = append(t.pcs, pcs...)
 	t.mu.Unlock()
 
+	go t.forwardSignals(ctx, peer)
+
+	if role == webrelay.DirectRoleSender {
+		for lane, pc := range pcs {
+			dc, err := pc.CreateDataChannel("derphole-"+strconv.Itoa(lane), &webrtc.DataChannelInit{Ordered: boolPtr(false)})
+			if err != nil {
+				t.fail(err)
+				return err
+			}
+			t.attachDataChannel(dc)
+			offer, err := pc.CreateOffer(nil)
+			if err != nil {
+				t.fail(err)
+				return err
+			}
+			if err := pc.SetLocalDescription(offer); err != nil {
+				t.fail(err)
+				return err
+			}
+			if err := sendSignal(ctx, peer, webproto.FrameWebRTCOffer, webproto.WebRTCSignal{Lane: lane, Kind: "offer", Type: offer.Type.String(), SDP: offer.SDP}); err != nil {
+				t.fail(err)
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func (t *Transport) configurePeerConnection(ctx context.Context, peer webrelay.DirectSignalPeer, lane int, pc *webrtc.PeerConnection) {
 	pc.OnICECandidate(func(candidate *webrtc.ICECandidate) {
 		if candidate == nil {
-			_ = sendSignal(ctx, peer, webproto.FrameWebRTCIceComplete, webproto.WebRTCSignal{Kind: "ice-complete"})
+			_ = sendSignal(ctx, peer, webproto.FrameWebRTCIceComplete, webproto.WebRTCSignal{Lane: lane, Kind: "ice-complete"})
 			return
 		}
 		init := candidate.ToJSON()
 		_ = sendSignal(ctx, peer, webproto.FrameWebRTCIceCandidate, webproto.WebRTCSignal{
+			Lane:             lane,
 			Kind:             "candidate",
 			Candidate:        init.Candidate,
 			SDPMid:           stringValue(init.SDPMid),
@@ -62,38 +108,19 @@ func (t *Transport) Start(ctx context.Context, role webrelay.DirectRole, peer we
 	})
 	pc.OnConnectionStateChange(func(state webrtc.PeerConnectionState) {
 		switch state {
-		case webrtc.PeerConnectionStateFailed, webrtc.PeerConnectionStateClosed, webrtc.PeerConnectionStateDisconnected:
-			t.fail(errors.New("webrtc " + state.String()))
+		case webrtc.PeerConnectionStateFailed, webrtc.PeerConnectionStateDisconnected:
+			t.fail(errors.New("webrtc lane " + strconv.Itoa(lane) + " " + state.String()))
 		}
 	})
 	pc.OnDataChannel(func(dc *webrtc.DataChannel) {
 		t.attachDataChannel(dc)
 	})
+}
 
-	go t.forwardSignals(ctx, peer)
-
-	if role == webrelay.DirectRoleSender {
-		dc, err := pc.CreateDataChannel("derphole", &webrtc.DataChannelInit{Ordered: boolPtr(true)})
-		if err != nil {
-			t.fail(err)
-			return err
-		}
-		t.attachDataChannel(dc)
-		offer, err := pc.CreateOffer(nil)
-		if err != nil {
-			t.fail(err)
-			return err
-		}
-		if err := pc.SetLocalDescription(offer); err != nil {
-			t.fail(err)
-			return err
-		}
-		if err := sendSignal(ctx, peer, webproto.FrameWebRTCOffer, webproto.WebRTCSignal{Kind: "offer", Type: offer.Type.String(), SDP: offer.SDP}); err != nil {
-			t.fail(err)
-			return err
-		}
-	}
-	return nil
+func newPeerConnection(config webrtc.Configuration) (*webrtc.PeerConnection, error) {
+	var settings webrtc.SettingEngine
+	settings.SetSCTPMaxReceiveBufferSize(sctpReceiveBufferSize)
+	return webrtc.NewAPI(webrtc.WithSettingEngine(settings)).NewPeerConnection(config)
 }
 
 func (t *Transport) Ready() <-chan struct{} { return t.readyCh }
@@ -116,12 +143,11 @@ func (t *Transport) SendFrame(ctx context.Context, frame []byte) error {
 	case <-ctx.Done():
 		return ctx.Err()
 	}
-	t.mu.Lock()
-	dc := t.dc
-	t.mu.Unlock()
-	if dc == nil {
+	dcs := t.openDataChannels()
+	if len(dcs) == 0 {
 		return errors.New("webrtc datachannel is not open")
 	}
+	dc := dcs[int(atomic.AddUint64(&t.nextSend, 1)-1)%len(dcs)]
 	return dc.Send(frame)
 }
 
@@ -132,30 +158,36 @@ func (t *Transport) Close() error {
 		return nil
 	}
 	t.closed = true
-	dc := t.dc
-	pc := t.pc
+	dcs := append([]*webrtc.DataChannel(nil), t.dcs...)
+	pcs := append([]*webrtc.PeerConnection(nil), t.pcs...)
 	t.mu.Unlock()
-	if dc != nil {
+	for _, dc := range dcs {
 		_ = dc.Close()
 	}
-	if pc != nil {
-		return pc.Close()
+	var err error
+	for _, pc := range pcs {
+		if closeErr := pc.Close(); closeErr != nil && err == nil {
+			err = closeErr
+		}
 	}
-	return nil
+	return err
 }
 
 func (t *Transport) attachDataChannel(dc *webrtc.DataChannel) {
 	t.mu.Lock()
-	t.dc = dc
+	t.dcs = append(t.dcs, dc)
 	t.mu.Unlock()
 	dc.OnOpen(func() {
 		t.mu.Lock()
 		defer t.mu.Unlock()
-		if t.ready || t.closed {
+		if t.closed {
 			return
 		}
-		t.ready = true
-		close(t.readyCh)
+		t.open[dc] = true
+		if !t.ready && len(t.open) >= dataChannelCount {
+			t.ready = true
+			close(t.readyCh)
+		}
 	})
 	dc.OnMessage(func(msg webrtc.DataChannelMessage) {
 		raw := append([]byte(nil), msg.Data...)
@@ -171,11 +203,41 @@ func (t *Transport) attachDataChannel(dc *webrtc.DataChannel) {
 	dc.OnClose(func() {
 		t.mu.Lock()
 		ready := t.ready
+		delete(t.open, dc)
+		remaining := len(t.open)
 		t.mu.Unlock()
 		if !ready {
 			t.fail(errors.New("webrtc datachannel closed before open"))
+			return
+		}
+		if remaining == 0 {
+			t.fail(errors.New("webrtc datachannels closed"))
 		}
 	})
+}
+
+func (t *Transport) openDataChannels() []*webrtc.DataChannel {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	out := make([]*webrtc.DataChannel, 0, len(t.open))
+	for _, dc := range t.dcs {
+		if t.open[dc] && dc.ReadyState() == webrtc.DataChannelStateOpen {
+			out = append(out, dc)
+		}
+	}
+	return out
+}
+
+func (t *Transport) openChannelCount() int {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return len(t.open)
+}
+
+func (t *Transport) peerConnectionCount() int {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return len(t.pcs)
 }
 
 func (t *Transport) forwardSignals(ctx context.Context, peer webrelay.DirectSignalPeer) {
@@ -196,19 +258,26 @@ func (t *Transport) forwardSignals(ctx context.Context, peer webrelay.DirectSign
 }
 
 func (t *Transport) applySignal(ctx context.Context, peer webrelay.DirectSignalPeer, frame webproto.Frame) error {
-	t.mu.Lock()
-	pc := t.pc
-	t.mu.Unlock()
-	if pc == nil {
-		return errors.New("webrtc peer connection is not started")
-	}
 	var signal webproto.WebRTCSignal
 	if err := json.Unmarshal(frame.Payload, &signal); err != nil {
 		return err
 	}
+	if signal.Lane < 0 || signal.Lane >= dataChannelCount {
+		return errors.New("invalid webrtc signal lane")
+	}
+	t.mu.Lock()
+	if signal.Lane >= len(t.pcs) {
+		t.mu.Unlock()
+		return errors.New("webrtc peer connection is not started")
+	}
+	pc := t.pcs[signal.Lane]
+	t.mu.Unlock()
 	switch frame.Kind {
 	case webproto.FrameWebRTCOffer:
 		if err := pc.SetRemoteDescription(webrtc.SessionDescription{Type: webrtc.SDPTypeOffer, SDP: signal.SDP}); err != nil {
+			return err
+		}
+		if err := t.flushPendingCandidates(pc, signal.Lane); err != nil {
 			return err
 		}
 		answer, err := pc.CreateAnswer(nil)
@@ -218,21 +287,44 @@ func (t *Transport) applySignal(ctx context.Context, peer webrelay.DirectSignalP
 		if err := pc.SetLocalDescription(answer); err != nil {
 			return err
 		}
-		return sendSignal(ctx, peer, webproto.FrameWebRTCAnswer, webproto.WebRTCSignal{Kind: "answer", Type: answer.Type.String(), SDP: answer.SDP})
+		return sendSignal(ctx, peer, webproto.FrameWebRTCAnswer, webproto.WebRTCSignal{Lane: signal.Lane, Kind: "answer", Type: answer.Type.String(), SDP: answer.SDP})
 	case webproto.FrameWebRTCAnswer:
-		return pc.SetRemoteDescription(webrtc.SessionDescription{Type: webrtc.SDPTypeAnswer, SDP: signal.SDP})
+		if err := pc.SetRemoteDescription(webrtc.SessionDescription{Type: webrtc.SDPTypeAnswer, SDP: signal.SDP}); err != nil {
+			return err
+		}
+		return t.flushPendingCandidates(pc, signal.Lane)
 	case webproto.FrameWebRTCIceCandidate:
-		return pc.AddICECandidate(webrtc.ICECandidateInit{
+		candidate := webrtc.ICECandidateInit{
 			Candidate:        signal.Candidate,
 			SDPMid:           &signal.SDPMid,
 			SDPMLineIndex:    uint16Ptr(uint16(signal.SDPMLineIndex)),
 			UsernameFragment: &signal.UsernameFragment,
-		})
+		}
+		if pc.RemoteDescription() == nil {
+			t.mu.Lock()
+			t.pending[signal.Lane] = append(t.pending[signal.Lane], candidate)
+			t.mu.Unlock()
+			return nil
+		}
+		return pc.AddICECandidate(candidate)
 	case webproto.FrameWebRTCIceComplete:
 		return nil
 	default:
 		return nil
 	}
+}
+
+func (t *Transport) flushPendingCandidates(pc *webrtc.PeerConnection, lane int) error {
+	t.mu.Lock()
+	candidates := append([]webrtc.ICECandidateInit(nil), t.pending[lane]...)
+	delete(t.pending, lane)
+	t.mu.Unlock()
+	for _, candidate := range candidates {
+		if err := pc.AddICECandidate(candidate); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func sendSignal(ctx context.Context, peer webrelay.DirectSignalPeer, kind webproto.FrameKind, signal webproto.WebRTCSignal) error {

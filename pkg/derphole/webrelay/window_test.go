@@ -26,8 +26,8 @@ func TestDefaultRelayWindowStaysDERPFriendly(t *testing.T) {
 	if relayWindowBytes > maxBrowserRelayBurst {
 		t.Fatalf("relayWindowBytes = %d, want <= %d", relayWindowBytes, maxBrowserRelayBurst)
 	}
-	if relayWindowFrames != relayWindowBytes/chunkBytes {
-		t.Fatalf("relayWindowFrames = %d, want %d", relayWindowFrames, relayWindowBytes/chunkBytes)
+	if relayWindowFrames != relayWindowBytes/relayChunkBytes {
+		t.Fatalf("relayWindowFrames = %d, want %d", relayWindowFrames, relayWindowBytes/relayChunkBytes)
 	}
 }
 
