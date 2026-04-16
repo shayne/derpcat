@@ -1004,6 +1004,7 @@ func TestManagerFallbackWaitsForInFlightDiscovery(t *testing.T) {
 	if !waitForDiscoveryIdle(t, mgr, 200*time.Millisecond) {
 		t.Fatal("manager did not finish startup discovery before stale rediscovery")
 	}
+	waitForManagerTimers(t, clock, 0, 2)
 
 	callMeMaybeCount := controls.sentCount(ControlCallMeMaybe)
 	probeCount := direct.writeCountTo(peerCandidate)
