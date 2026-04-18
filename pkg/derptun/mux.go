@@ -1,0 +1,523 @@
+package derptun
+
+import (
+	"context"
+	"encoding/binary"
+	"encoding/json"
+	"errors"
+	"io"
+	"net"
+	"sync"
+	"time"
+)
+
+type MuxRole string
+
+const (
+	MuxRoleClient MuxRole = "client"
+	MuxRoleServer MuxRole = "server"
+
+	frameTypeOpen  = "open"
+	frameTypeData  = "data"
+	frameTypeClose = "close"
+	frameTypeAck   = "ack"
+)
+
+type MuxConfig struct {
+	Role             MuxRole
+	ReconnectTimeout time.Duration
+}
+
+type Mux struct {
+	cfg MuxConfig
+
+	mu            sync.Mutex
+	carrier       io.ReadWriteCloser
+	carrierGen    uint64
+	carrierChange chan struct{}
+	streams       map[uint64]*muxStream
+	nextStreamID  uint64
+	closed        bool
+
+	writeMu  sync.Mutex
+	acceptCh chan net.Conn
+	closeCh  chan struct{}
+}
+
+type muxStream struct {
+	id       uint64
+	mux      *Mux
+	conn     net.Conn
+	sendLock sync.Mutex
+
+	stateMu sync.Mutex
+	sendSeq uint64
+	recvSeq uint64
+	pending *pendingWrite
+}
+
+type pendingWrite struct {
+	endSeq uint64
+	acked  chan struct{}
+	once   sync.Once
+}
+
+type frameHeader struct {
+	Type     string `json:"type"`
+	StreamID uint64 `json:"stream_id,omitempty"`
+	Seq      uint64 `json:"seq,omitempty"`
+	Length   int    `json:"length,omitempty"`
+}
+
+func NewMux(cfg MuxConfig) *Mux {
+	nextID := uint64(1)
+	if cfg.Role == MuxRoleServer {
+		nextID = 2
+	}
+
+	return &Mux{
+		cfg:           cfg,
+		carrierChange: make(chan struct{}),
+		streams:       make(map[uint64]*muxStream),
+		nextStreamID:  nextID,
+		acceptCh:      make(chan net.Conn, 16),
+		closeCh:       make(chan struct{}),
+	}
+}
+
+func (m *Mux) ReplaceCarrier(carrier io.ReadWriteCloser) {
+	var old io.ReadWriteCloser
+	var generation uint64
+
+	m.mu.Lock()
+	if m.closed {
+		m.mu.Unlock()
+		if carrier != nil {
+			_ = carrier.Close()
+		}
+		return
+	}
+
+	old = m.carrier
+	m.carrier = carrier
+	m.carrierGen++
+	generation = m.carrierGen
+	m.signalCarrierChangeLocked()
+	m.mu.Unlock()
+
+	if old != nil {
+		_ = old.Close()
+	}
+
+	if carrier != nil {
+		go m.readLoop(generation, carrier)
+	}
+}
+
+func (m *Mux) OpenStream(ctx context.Context) (net.Conn, error) {
+	stream, appConn := m.newStream()
+
+	m.mu.Lock()
+	if m.closed {
+		m.mu.Unlock()
+		_ = appConn.Close()
+		_ = stream.conn.Close()
+		return nil, net.ErrClosed
+	}
+	stream.id = m.nextStreamID
+	m.nextStreamID += 2
+	m.streams[stream.id] = stream
+	m.mu.Unlock()
+
+	if err := m.writeFrameUntil(frameHeader{Type: frameTypeOpen, StreamID: stream.id}, nil, m.deadline()); err != nil {
+		m.mu.Lock()
+		delete(m.streams, stream.id)
+		m.mu.Unlock()
+		_ = appConn.Close()
+		_ = stream.conn.Close()
+		return nil, err
+	}
+
+	go stream.outboundPump()
+	return appConn, nil
+}
+
+func (m *Mux) Accept(ctx context.Context) (net.Conn, error) {
+	select {
+	case conn := <-m.acceptCh:
+		return conn, nil
+	case <-m.closeCh:
+		return nil, net.ErrClosed
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
+func (m *Mux) Close() error {
+	m.mu.Lock()
+	if m.closed {
+		m.mu.Unlock()
+		return nil
+	}
+	m.closed = true
+	carrier := m.carrier
+	m.carrier = nil
+	streams := make([]*muxStream, 0, len(m.streams))
+	for _, stream := range m.streams {
+		streams = append(streams, stream)
+	}
+	m.signalCarrierChangeLocked()
+	close(m.closeCh)
+	m.mu.Unlock()
+
+	if carrier != nil {
+		_ = carrier.Close()
+	}
+	for _, stream := range streams {
+		_ = stream.conn.Close()
+	}
+	return nil
+}
+
+func (m *Mux) newStream() (*muxStream, net.Conn) {
+	appConn, muxConn := net.Pipe()
+	return &muxStream{
+		mux:  m,
+		conn: muxConn,
+	}, appConn
+}
+
+func (m *Mux) getOrCreateRemoteStream(id uint64) (*muxStream, net.Conn) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if existing := m.streams[id]; existing != nil {
+		return existing, nil
+	}
+
+	stream, appConn := m.newStream()
+	stream.id = id
+	m.streams[id] = stream
+	go stream.outboundPump()
+	return stream, appConn
+}
+
+func (m *Mux) getStream(id uint64) *muxStream {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.streams[id]
+}
+
+func (m *Mux) signalCarrierChangeLocked() {
+	close(m.carrierChange)
+	m.carrierChange = make(chan struct{})
+}
+
+func (m *Mux) deadline() time.Time {
+	if m.cfg.ReconnectTimeout <= 0 {
+		return time.Now()
+	}
+	return time.Now().Add(m.cfg.ReconnectTimeout)
+}
+
+func (m *Mux) writeFrameUntil(header frameHeader, payload []byte, deadline time.Time) error {
+	for {
+		carrier, generation, changed, closed := m.carrierSnapshot()
+		if closed {
+			return net.ErrClosed
+		}
+		if carrier == nil {
+			if err := m.waitForCarrier(changed, deadline); err != nil {
+				return err
+			}
+			continue
+		}
+
+		err := m.writeOnCarrier(carrier, generation, header, payload)
+		if err == nil {
+			return nil
+		}
+		if !errors.Is(err, io.EOF) && !errors.Is(err, net.ErrClosed) {
+			if time.Now().After(deadline) {
+				return err
+			}
+		}
+	}
+}
+
+func (m *Mux) carrierSnapshot() (io.ReadWriteCloser, uint64, chan struct{}, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.carrier, m.carrierGen, m.carrierChange, m.closed
+}
+
+func (m *Mux) waitForCarrier(changed <-chan struct{}, deadline time.Time) error {
+	wait := time.Until(deadline)
+	if wait <= 0 {
+		return context.DeadlineExceeded
+	}
+
+	timer := time.NewTimer(wait)
+	defer timer.Stop()
+
+	select {
+	case <-changed:
+		return nil
+	case <-m.closeCh:
+		return net.ErrClosed
+	case <-timer.C:
+		return context.DeadlineExceeded
+	}
+}
+
+func (m *Mux) writeOnCarrier(carrier io.ReadWriteCloser, generation uint64, header frameHeader, payload []byte) error {
+	headerBytes, err := json.Marshal(header)
+	if err != nil {
+		return err
+	}
+
+	var prefix [4]byte
+	binary.BigEndian.PutUint32(prefix[:], uint32(len(headerBytes)))
+
+	m.writeMu.Lock()
+	defer m.writeMu.Unlock()
+
+	currentCarrier, currentGeneration, _, closed := m.carrierSnapshot()
+	if closed {
+		return net.ErrClosed
+	}
+	if currentCarrier != carrier || currentGeneration != generation {
+		return io.EOF
+	}
+
+	if _, err := carrier.Write(prefix[:]); err != nil {
+		m.markCarrierDead(generation, carrier)
+		return err
+	}
+	if _, err := carrier.Write(headerBytes); err != nil {
+		m.markCarrierDead(generation, carrier)
+		return err
+	}
+	if len(payload) == 0 {
+		return nil
+	}
+	if _, err := carrier.Write(payload); err != nil {
+		m.markCarrierDead(generation, carrier)
+		return err
+	}
+	return nil
+}
+
+func (m *Mux) markCarrierDead(generation uint64, carrier io.ReadWriteCloser) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.closed || m.carrierGen != generation || m.carrier != carrier {
+		return
+	}
+	m.carrier = nil
+	m.signalCarrierChangeLocked()
+}
+
+func (m *Mux) readLoop(generation uint64, carrier io.ReadWriteCloser) {
+	for {
+		header, payload, err := readFrame(carrier)
+		if err != nil {
+			m.markCarrierDead(generation, carrier)
+			return
+		}
+		if err := m.handleFrame(header, payload); err != nil {
+			m.markCarrierDead(generation, carrier)
+			return
+		}
+	}
+}
+
+func (m *Mux) handleFrame(header frameHeader, payload []byte) error {
+	switch header.Type {
+	case frameTypeOpen:
+		_, appConn := m.getOrCreateRemoteStream(header.StreamID)
+		if appConn == nil {
+			return nil
+		}
+
+		select {
+		case m.acceptCh <- appConn:
+			return nil
+		case <-m.closeCh:
+			_ = appConn.Close()
+			return net.ErrClosed
+		}
+
+	case frameTypeData:
+		stream := m.getStream(header.StreamID)
+		if stream == nil {
+			return nil
+		}
+		ackSeq, err := stream.deliver(header.Seq, payload)
+		if err != nil {
+			return err
+		}
+		return m.writeFrameUntil(frameHeader{
+			Type:     frameTypeAck,
+			StreamID: header.StreamID,
+			Seq:      ackSeq,
+		}, nil, m.deadline())
+
+	case frameTypeAck:
+		stream := m.getStream(header.StreamID)
+		if stream != nil {
+			stream.handleAck(header.Seq)
+		}
+		return nil
+
+	case frameTypeClose:
+		stream := m.getStream(header.StreamID)
+		if stream != nil {
+			_ = stream.conn.Close()
+		}
+		return nil
+	}
+
+	return nil
+}
+
+func readFrame(r io.Reader) (frameHeader, []byte, error) {
+	var prefix [4]byte
+	if _, err := io.ReadFull(r, prefix[:]); err != nil {
+		return frameHeader{}, nil, err
+	}
+
+	headerLen := binary.BigEndian.Uint32(prefix[:])
+	headerBytes := make([]byte, headerLen)
+	if _, err := io.ReadFull(r, headerBytes); err != nil {
+		return frameHeader{}, nil, err
+	}
+
+	var header frameHeader
+	if err := json.Unmarshal(headerBytes, &header); err != nil {
+		return frameHeader{}, nil, err
+	}
+
+	payload := make([]byte, header.Length)
+	if _, err := io.ReadFull(r, payload); err != nil {
+		return frameHeader{}, nil, err
+	}
+	return header, payload, nil
+}
+
+func (s *muxStream) outboundPump() {
+	buf := make([]byte, 32*1024)
+	for {
+		n, err := s.conn.Read(buf)
+		if n > 0 {
+			payload := append([]byte(nil), buf[:n]...)
+			if sendErr := s.sendChunk(payload); sendErr != nil {
+				return
+			}
+		}
+		if err != nil {
+			return
+		}
+	}
+}
+
+func (s *muxStream) sendChunk(payload []byte) error {
+	s.sendLock.Lock()
+	defer s.sendLock.Unlock()
+
+	s.stateMu.Lock()
+	startSeq := s.sendSeq
+	s.sendSeq += uint64(len(payload))
+	pending := &pendingWrite{
+		endSeq: startSeq + uint64(len(payload)),
+		acked:  make(chan struct{}),
+	}
+	s.pending = pending
+	s.stateMu.Unlock()
+
+	defer func() {
+		s.stateMu.Lock()
+		if s.pending == pending {
+			s.pending = nil
+		}
+		s.stateMu.Unlock()
+	}()
+
+	header := frameHeader{
+		Type:     frameTypeData,
+		StreamID: s.id,
+		Seq:      startSeq,
+		Length:   len(payload),
+	}
+	deadline := s.mux.deadline()
+
+	for {
+		if err := s.mux.writeFrameUntil(header, payload, deadline); err != nil {
+			return err
+		}
+
+		carrierChanged := s.mux.currentCarrierChange()
+		wait := time.Until(deadline)
+		if wait <= 0 {
+			return context.DeadlineExceeded
+		}
+
+		timer := time.NewTimer(wait)
+		select {
+		case <-pending.acked:
+			timer.Stop()
+			return nil
+		case <-carrierChanged:
+			timer.Stop()
+		case <-s.mux.closeCh:
+			timer.Stop()
+			return net.ErrClosed
+		case <-timer.C:
+			return context.DeadlineExceeded
+		}
+	}
+}
+
+func (s *muxStream) deliver(seq uint64, payload []byte) (uint64, error) {
+	s.stateMu.Lock()
+	switch {
+	case seq < s.recvSeq:
+		ack := s.recvSeq
+		s.stateMu.Unlock()
+		return ack, nil
+	case seq > s.recvSeq:
+		ack := s.recvSeq
+		s.stateMu.Unlock()
+		return ack, nil
+	default:
+	}
+	s.stateMu.Unlock()
+
+	if _, err := s.conn.Write(payload); err != nil {
+		return 0, err
+	}
+
+	s.stateMu.Lock()
+	s.recvSeq += uint64(len(payload))
+	ack := s.recvSeq
+	s.stateMu.Unlock()
+	return ack, nil
+}
+
+func (s *muxStream) handleAck(ack uint64) {
+	s.stateMu.Lock()
+	defer s.stateMu.Unlock()
+
+	if s.pending == nil || ack < s.pending.endSeq {
+		return
+	}
+	s.pending.once.Do(func() {
+		close(s.pending.acked)
+	})
+}
+
+func (m *Mux) currentCarrierChange() <-chan struct{} {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.carrierChange
+}
