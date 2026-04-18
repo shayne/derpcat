@@ -256,6 +256,51 @@ func TestClaimAndDecisionSerializationRoundTrip(t *testing.T) {
 	}
 }
 
+func TestClaimSerializesClientProof(t *testing.T) {
+	claim := Claim{
+		Version:      token.SupportedVersion,
+		SessionID:    [16]byte{1, 2, 3, 4},
+		BearerMAC:    "mac",
+		DERPPublic:   [32]byte{5, 6, 7, 8},
+		QUICPublic:   [32]byte{9, 10, 11, 12},
+		Candidates:   []string{"udp4:127.0.0.1:1"},
+		Capabilities: token.CapabilityDerptunTCP,
+		Client: &ClientProof{
+			ClientID:    [16]byte{7, 7, 7, 7},
+			TokenID:     [16]byte{8, 8, 8, 8},
+			ClientName:  "clienthost",
+			ExpiresUnix: 1_700_000_600,
+			ProofMAC:    "proof",
+		},
+	}
+	encodedClaim, err := EncodeClaim(claim)
+	if err != nil {
+		t.Fatalf("EncodeClaim() error = %v", err)
+	}
+	decodedClaim, err := DecodeClaim(encodedClaim)
+	if err != nil {
+		t.Fatalf("DecodeClaim() error = %v", err)
+	}
+	if decodedClaim.Client == nil {
+		t.Fatalf("Client = nil, want proof")
+	}
+	if decodedClaim.Client.ClientID != claim.Client.ClientID {
+		t.Fatalf("ClientID = %x, want %x", decodedClaim.Client.ClientID, claim.Client.ClientID)
+	}
+	if decodedClaim.Client.TokenID != claim.Client.TokenID {
+		t.Fatalf("TokenID = %x, want %x", decodedClaim.Client.TokenID, claim.Client.TokenID)
+	}
+	if decodedClaim.Client.ClientName != claim.Client.ClientName {
+		t.Fatalf("ClientName = %q, want %q", decodedClaim.Client.ClientName, claim.Client.ClientName)
+	}
+	if decodedClaim.Client.ExpiresUnix != claim.Client.ExpiresUnix {
+		t.Fatalf("ExpiresUnix = %d, want %d", decodedClaim.Client.ExpiresUnix, claim.Client.ExpiresUnix)
+	}
+	if decodedClaim.Client.ProofMAC != claim.Client.ProofMAC {
+		t.Fatalf("ProofMAC = %q, want %q", decodedClaim.Client.ProofMAC, claim.Client.ProofMAC)
+	}
+}
+
 func TestGateRejectsCapabilityMismatch(t *testing.T) {
 	now := time.Unix(1_700_000_000, 0).UTC()
 	tok := testToken(now)

@@ -7,15 +7,24 @@ import (
 	"encoding/json"
 )
 
+type ClientProof struct {
+	ClientID    [16]byte `json:"client_id"`
+	TokenID     [16]byte `json:"token_id"`
+	ClientName  string   `json:"client_name"`
+	ExpiresUnix int64    `json:"expires_unix"`
+	ProofMAC    string   `json:"proof_mac"`
+}
+
 type Claim struct {
-	Version      uint8    `json:"version"`
-	SessionID    [16]byte `json:"session_id"`
-	BearerMAC    string   `json:"bearer_mac"`
-	DERPPublic   [32]byte `json:"derp_public"`
-	QUICPublic   [32]byte `json:"quic_public"`
-	Parallel     int      `json:"parallel,omitempty"`
-	Candidates   []string `json:"candidates,omitempty"`
-	Capabilities uint32   `json:"capabilities"`
+	Version      uint8        `json:"version"`
+	SessionID    [16]byte     `json:"session_id"`
+	BearerMAC    string       `json:"bearer_mac"`
+	DERPPublic   [32]byte     `json:"derp_public"`
+	QUICPublic   [32]byte     `json:"quic_public"`
+	Parallel     int          `json:"parallel,omitempty"`
+	Candidates   []string     `json:"candidates,omitempty"`
+	Capabilities uint32       `json:"capabilities,omitempty"`
+	Client       *ClientProof `json:"client,omitempty"`
 }
 
 type AcceptInfo struct {
