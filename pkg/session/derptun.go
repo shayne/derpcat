@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"net"
+	"strconv"
 	"time"
 
 	quic "github.com/quic-go/quic-go"
@@ -55,6 +56,11 @@ func derptunQUICConfig() *quic.Config {
 	cfg.MaxIdleTimeout = 10 * time.Second
 	return cfg
 }
+
+var (
+	derptunActiveProbeTimeout = 2 * time.Second
+	derptunActiveStopTimeout  = 500 * time.Millisecond
+)
 
 func DerptunServe(ctx context.Context, cfg DerptunServeConfig) error {
 	cred, err := decodeDerptunCredential(cfg.Token)
@@ -110,9 +116,12 @@ func DerptunServe(ctx context.Context, cfg DerptunServeConfig) error {
 }
 
 type derptunServeActive struct {
-	claim  rendezvous.Claim
-	cancel context.CancelFunc
-	done   chan error
+	claim    rendezvous.Claim
+	decision rendezvous.Decision
+	mux      *derptun.Mux
+	quicDone <-chan struct{}
+	cancel   context.CancelFunc
+	done     chan error
 }
 
 func (a *derptunServeActive) sameClaim(claim rendezvous.Claim) bool {
@@ -133,6 +142,103 @@ func (a *derptunServeActive) stop(ctx context.Context) error {
 	case <-ctx.Done():
 		return ctx.Err()
 	}
+}
+
+func (a *derptunServeActive) probe(ctx context.Context, timeout time.Duration) error {
+	if a == nil || a.mux == nil {
+		return net.ErrClosed
+	}
+	return a.mux.Ping(ctx, timeout)
+}
+
+func (a *derptunServeActive) transportDone() bool {
+	if a == nil || a.quicDone == nil {
+		return false
+	}
+	select {
+	case <-a.quicDone:
+		return true
+	default:
+		return false
+	}
+}
+
+func (a *derptunServeActive) lastPeerActivity() time.Time {
+	if a != nil && a.mux != nil {
+		return a.mux.LastPeerActivity()
+	}
+	return time.Time{}
+}
+
+func recoverStaleDerptunActive(ctx context.Context, emitter *telemetry.Emitter, gate *rendezvous.DurableGate, active *derptunServeActive, probeTimeout, stopTimeout time.Duration) (bool, error) {
+	if active == nil {
+		return false, nil
+	}
+	if active.transportDone() {
+		if emitter != nil {
+			emitter.Debug("derptun-active-probe=transport-done")
+		}
+		releaseDerptunActive(emitter, gate, active, stopTimeout)
+		return true, nil
+	}
+	if active.mux != nil {
+		lastPeerActivity := active.lastPeerActivity()
+		activeStreams := active.mux.ActiveStreamCount()
+		if emitter != nil && !lastPeerActivity.IsZero() {
+			emitter.Debug("derptun-active-last-peer-ms=" + strconv.FormatInt(time.Since(lastPeerActivity).Milliseconds(), 10))
+			emitter.Debug("derptun-active-streams=" + strconv.Itoa(activeStreams))
+		}
+	}
+	probeCtx, probeCancel := context.WithTimeout(ctx, probeTimeout)
+	probeErr := active.probe(probeCtx, probeTimeout)
+	probeCancel()
+	if probeErr == nil {
+		if emitter != nil {
+			emitter.Debug("derptun-active-probe=alive")
+		}
+		return false, nil
+	}
+	if ctx.Err() != nil {
+		return false, ctx.Err()
+	}
+	if emitter != nil {
+		emitter.Debug("derptun-active-probe=stale err=" + probeErr.Error())
+	}
+
+	releaseDerptunActive(emitter, gate, active, stopTimeout)
+	return true, nil
+}
+
+func releaseDerptunActive(emitter *telemetry.Emitter, gate *rendezvous.DurableGate, active *derptunServeActive, stopTimeout time.Duration) {
+	stopCtx, stopCancel := context.WithTimeout(context.Background(), stopTimeout)
+	stopErr := active.stop(stopCtx)
+	stopCancel()
+	gate.Release(active.claim.DERPPublic)
+	if stopErr != nil && emitter != nil {
+		emitter.Debug("derptun-active-stop=" + stopErr.Error())
+	}
+}
+
+func startDerptunDecisionResender(ctx context.Context, client *derpbind.Client, peerDERP key.NodePublic, decision rendezvous.Decision, emitter *telemetry.Emitter) context.CancelFunc {
+	resendCtx, cancel := context.WithCancel(ctx)
+	go func() {
+		ticker := time.NewTicker(externalClaimRetryInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				sendCtx, sendCancel := context.WithTimeout(resendCtx, externalClaimRetryInterval)
+				err := sendEnvelope(sendCtx, client, peerDERP, envelope{Type: envelopeDecision, Decision: &decision})
+				sendCancel()
+				if err != nil && resendCtx.Err() == nil && emitter != nil {
+					emitter.Debug("derptun-decision-resend=" + err.Error())
+				}
+			case <-resendCtx.Done():
+				return
+			}
+		}
+	}()
+	return cancel
 }
 
 func derptunServeTunnelErr(err error) error {
@@ -225,16 +331,29 @@ func handleDerptunServeClaim(
 	peerDERP := key.NodePublicFromRaw32(mem.B(claim.DERPPublic[:]))
 	decision, _ := gate.Accept(time.Now(), claim)
 	if !decision.Accepted {
+		if decision.Reject != nil && decision.Reject.Code == rendezvous.RejectClaimed && active != nil && !active.sameClaim(claim) {
+			recovered, err := recoverStaleDerptunActive(ctx, cfg.Emitter, gate, active, derptunActiveProbeTimeout, derptunActiveStopTimeout)
+			if err != nil {
+				return active, err
+			}
+			if recovered {
+				active = nil
+				decision, _ = gate.Accept(time.Now(), claim)
+			}
+		}
+	}
+	if !decision.Accepted {
 		if err := sendEnvelope(ctx, derpClient, peerDERP, envelope{Type: envelopeDecision, Decision: &decision}); err != nil {
 			return active, err
 		}
 		return active, nil
 	}
 	if active != nil && active.sameClaim(claim) {
-		if decision.Accept != nil && !cfg.ForceRelay {
-			decision.Accept.Candidates = publicProbeCandidates(ctx, probeConn, dm, pm)
+		retryDecision := active.decision
+		if retryDecision.Accept == nil && retryDecision.Reject == nil {
+			retryDecision = decision
 		}
-		if err := sendEnvelope(ctx, derpClient, peerDERP, envelope{Type: envelopeDecision, Decision: &decision}); err != nil {
+		if err := sendEnvelope(ctx, derpClient, peerDERP, envelope{Type: envelopeDecision, Decision: &retryDecision}); err != nil {
 			return active, err
 		}
 		return active, nil
@@ -283,31 +402,35 @@ func handleDerptunServeClaim(
 		gate.Release(claim.DERPPublic)
 		return active, err
 	}
-	quicConn, err := quicListener.Accept(ctx)
-	if err != nil {
-		_ = quicListener.Close()
-		_ = adapter.Close()
-		transportCleanup()
-		transportCancel()
-		gate.Release(claim.DERPPublic)
-		return active, err
-	}
-	carrier, err := quicConn.AcceptStream(ctx)
-	if err != nil {
-		_ = quicConn.CloseWithError(1, "accept derptun carrier failed")
-		_ = quicListener.Close()
-		_ = adapter.Close()
-		transportCleanup()
-		transportCancel()
-		gate.Release(claim.DERPPublic)
-		return active, err
-	}
 
 	mux := derptun.NewMux(derptun.MuxConfig{Role: derptun.MuxRoleServer, ReconnectTimeout: 30 * time.Second})
-	mux.ReplaceCarrier(quicpath.WrapStream(quicConn, carrier))
 	tunnelCtx, tunnelCancel := context.WithCancel(ctx)
-	next := &derptunServeActive{claim: claim, cancel: tunnelCancel, done: make(chan error, 1)}
+	transportDone := make(chan struct{})
+	next := &derptunServeActive{claim: claim, decision: decision, mux: mux, quicDone: transportDone, cancel: tunnelCancel, done: make(chan error, 1)}
+	cancelDecisionResends := startDerptunDecisionResender(ctx, derpClient, peerDERP, decision, cfg.Emitter)
 	go func() {
+		var quicConn *quic.Conn
+		var err error
+		defer func() {
+			cancelDecisionResends()
+			tunnelCancel()
+			_ = mux.Close()
+			if quicConn != nil {
+				_ = quicConn.CloseWithError(0, "")
+			}
+			_ = quicListener.Close()
+			_ = adapter.Close()
+			pathEmitter.Complete(transportManager)
+			transportCleanup()
+			transportCancel()
+			close(transportDone)
+			next.done <- err
+		}()
+
+		quicConn, err = quicListener.Accept(tunnelCtx)
+		if err != nil {
+			return
+		}
 		go func() {
 			select {
 			case <-quicConn.Context().Done():
@@ -315,16 +438,15 @@ func handleDerptunServeClaim(
 			case <-tunnelCtx.Done():
 			}
 		}()
-		err := serveDerptunMuxTarget(tunnelCtx, mux, cfg.TargetAddr, cfg.Emitter)
-		tunnelCancel()
-		_ = mux.Close()
-		_ = quicConn.CloseWithError(0, "")
-		_ = quicListener.Close()
-		_ = adapter.Close()
-		pathEmitter.Complete(transportManager)
-		transportCleanup()
-		transportCancel()
-		next.done <- err
+		carrier, acceptErr := quicConn.AcceptStream(tunnelCtx)
+		cancelDecisionResends()
+		if acceptErr != nil {
+			err = acceptErr
+			_ = quicConn.CloseWithError(1, "accept derptun carrier failed")
+			return
+		}
+		mux.ReplaceCarrier(quicpath.WrapStream(quicConn, carrier))
+		err = serveDerptunMuxTarget(tunnelCtx, mux, cfg.TargetAddr, cfg.Emitter)
 	}()
 	return next, nil
 }

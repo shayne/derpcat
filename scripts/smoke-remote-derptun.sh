@@ -30,7 +30,7 @@ remote() {
 
 cleanup() {
   set +e
-  exec 9>&- 2>/dev/null
+  { exec 9>&-; } 2>/dev/null || true
   set -e
   if [[ -n "${active_connect_pid}" ]]; then
     kill "${active_connect_pid}" 2>/dev/null || true
@@ -118,12 +118,15 @@ PY
     echo "derptun connect ${label} payload mismatch" >&2
     printf 'want pong lines=%q\n' "80" >&2
     printf ' got pong lines=%q\n' "${got_count}" >&2
+    fetch_remote_serve_log
     sed -n '1,120p' "${out_file}" >&2 || true
     sed -n '1,200p' "${log_file}" >&2 || true
+    echo "serve log:" >&2
+    sed -n '1,260p' "${serve_log}" >&2 || true
     exit 1
   fi
   require_direct_evidence "local derptun connect ${label}" "${log_file}"
-  for _ in $(seq 1 8); do
+  for _ in $(seq 1 40); do
     if ! kill -0 "${connect_pid}" 2>/dev/null; then
       wait "${connect_pid}" 2>/dev/null || true
       return 0
@@ -132,7 +135,6 @@ PY
   done
   kill "${connect_pid}" 2>/dev/null || true
   wait "${connect_pid}" 2>/dev/null || true
-  sleep 12
 }
 
 start_holding_connect() {
@@ -148,24 +150,72 @@ start_holding_connect() {
     fi
     if ! kill -0 "${active_connect_pid}" 2>/dev/null; then
       echo "active derptun connect exited before becoming direct" >&2
+      fetch_remote_serve_log
       sed -n '1,120p' "${active_out}" >&2 || true
       sed -n '1,200p' "${active_log}" >&2 || true
+      echo "serve log:" >&2
+      sed -n '1,240p' "${serve_log}" >&2 || true
       exit 1
     fi
     sleep 0.25
   done
 
   echo "active derptun connect did not become direct" >&2
+  fetch_remote_serve_log
+  sed -n '1,120p' "${active_out}" >&2 || true
+  sed -n '1,200p' "${active_log}" >&2 || true
+  echo "serve log:" >&2
+  sed -n '1,240p' "${serve_log}" >&2 || true
+  exit 1
+}
+
+require_active_pong_count() {
+  local want_count="$1"
+  for _ in $(seq 1 40); do
+    got_count="$(grep -c '^pong$' "${active_out}" 2>/dev/null || true)"
+    if [[ "${got_count}" == "${want_count}" ]]; then
+      return 0
+    fi
+    if ! kill -0 "${active_connect_pid}" 2>/dev/null; then
+      break
+    fi
+    sleep 0.25
+  done
+  echo "active derptun connect did not return ${want_count} pong lines" >&2
   sed -n '1,120p' "${active_out}" >&2 || true
   sed -n '1,200p' "${active_log}" >&2 || true
   exit 1
 }
 
+refresh_active_connect() {
+  printf 'ping\n' >&9
+  require_active_pong_count 2
+}
+
 expect_claimed_contender() {
+  if ! kill -0 "${active_connect_pid}" 2>/dev/null; then
+    echo "active derptun connect exited before contender started" >&2
+    sed -n '1,120p' "${active_out}" >&2 || true
+    sed -n '1,200p' "${active_log}" >&2 || true
+    exit 1
+  fi
   (printf 'ping\n' | DERPHOLE_TEST_DISABLE_TAILSCALE_CANDIDATES=1 "${root_dir}/dist/derptun" --verbose connect --token "$(cat "${token_file}")" --stdio >"${contender_out}" 2>"${contender_log}") &
   contender_pid=$!
 
   for _ in $(seq 1 40); do
+    if grep -q 'session already claimed' "${contender_log}" "${contender_out}" 2>/dev/null; then
+      set +e
+      wait "${contender_pid}"
+      contender_status=$?
+      set -e
+      if [[ "${contender_status}" == "0" ]]; then
+        echo "contending derptun connect reported claimed rejection but exited successfully" >&2
+        sed -n '1,120p' "${contender_out}" >&2 || true
+        sed -n '1,200p' "${contender_log}" >&2 || true
+        exit 1
+      fi
+      return 0
+    fi
     if ! kill -0 "${contender_pid}" 2>/dev/null; then
       break
     fi
@@ -175,8 +225,15 @@ expect_claimed_contender() {
     kill "${contender_pid}" 2>/dev/null || true
     wait "${contender_pid}" 2>/dev/null || true
     echo "contending derptun connect timed out instead of receiving claimed rejection" >&2
+    fetch_remote_serve_log
     sed -n '1,120p' "${contender_out}" >&2 || true
     sed -n '1,200p' "${contender_log}" >&2 || true
+    echo "active connect output:" >&2
+    sed -n '1,120p' "${active_out}" >&2 || true
+    echo "active connect log:" >&2
+    sed -n '1,200p' "${active_log}" >&2 || true
+    echo "serve log:" >&2
+    sed -n '1,240p' "${serve_log}" >&2 || true
     exit 1
   fi
 
@@ -186,14 +243,28 @@ expect_claimed_contender() {
   set -e
   if [[ "${contender_status}" == "0" ]]; then
     echo "contending derptun connect succeeded while active client was connected" >&2
+    fetch_remote_serve_log
     sed -n '1,120p' "${contender_out}" >&2 || true
     sed -n '1,200p' "${contender_log}" >&2 || true
+    echo "active connect output:" >&2
+    sed -n '1,120p' "${active_out}" >&2 || true
+    echo "active connect log:" >&2
+    sed -n '1,200p' "${active_log}" >&2 || true
+    echo "serve log:" >&2
+    sed -n '1,240p' "${serve_log}" >&2 || true
     exit 1
   fi
   if ! grep -q 'session already claimed' "${contender_log}" "${contender_out}" 2>/dev/null; then
     echo "contending derptun connect did not report claimed rejection" >&2
+    fetch_remote_serve_log
     sed -n '1,120p' "${contender_out}" >&2 || true
     sed -n '1,200p' "${contender_log}" >&2 || true
+    echo "active connect output:" >&2
+    sed -n '1,120p' "${active_out}" >&2 || true
+    echo "active connect log:" >&2
+    sed -n '1,200p' "${active_log}" >&2 || true
+    echo "serve log:" >&2
+    sed -n '1,240p' "${serve_log}" >&2 || true
     exit 1
   fi
 }
@@ -242,17 +313,18 @@ remote "DERPHOLE_TEST_DISABLE_TAILSCALE_CANDIDATES=1 nohup '${remote_base}/derpt
 connect_request_pongs "first" "${connect_first_out}" "${connect_first_log}"
 fetch_remote_serve_log
 require_direct_evidence "remote derptun serve after first connect" "${serve_log}"
+remote "kill \$(cat '${remote_base}/serve.pid') 2>/dev/null || true; DERPHOLE_TEST_DISABLE_TAILSCALE_CANDIDATES=1 nohup '${remote_base}/derptun' --verbose serve --token \"\$(cat '${remote_base}/token')\" --tcp 127.0.0.1:22345 >'${remote_base}/serve.out' 2>'${remote_base}/serve.err' </dev/null & echo \$! >'${remote_base}/serve.pid'"
 
 start_holding_connect
+refresh_active_connect
 expect_claimed_contender
 require_direct_evidence "active derptun connect" "${active_log}"
 kill "${active_connect_pid}" 2>/dev/null || true
 wait "${active_connect_pid}" 2>/dev/null || true
 active_connect_pid=""
 set +e
-exec 9>&- 2>/dev/null
+{ exec 9>&-; } 2>/dev/null || true
 set -e
-sleep 12
 
 connect_request_pongs "after dead client" "${connect_after_dead_out}" "${connect_after_dead_log}"
 fetch_remote_serve_log

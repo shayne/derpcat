@@ -8,11 +8,14 @@ import (
 	"io"
 	"net"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/shayne/derphole/pkg/derptun"
+	"github.com/shayne/derphole/pkg/rendezvous"
 	"github.com/shayne/derphole/pkg/telemetry"
+	"github.com/shayne/derphole/pkg/token"
 )
 
 func TestDerptunOpenForwardsTCPToServedTarget(t *testing.T) {
@@ -166,7 +169,7 @@ func TestDerptunServeRejectsConcurrentConnector(t *testing.T) {
 		t.Fatal("first connector did not reach backend")
 	}
 
-	secondCtx, secondCancel := context.WithTimeout(ctx, time.Second)
+	secondCtx, secondCancel := context.WithTimeout(ctx, 5*time.Second)
 	defer secondCancel()
 	err = DerptunConnect(secondCtx, DerptunConnectConfig{
 		Token:      tokenValue,
@@ -188,6 +191,132 @@ func TestDerptunServeRejectsConcurrentConnector(t *testing.T) {
 	_ = firstInputWriter.Close()
 	<-firstErr
 	<-serveErr
+}
+
+func TestRecoverStaleDerptunActiveReleasesUnresponsiveClaim(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+
+	now := time.Now()
+	tok := derptunTestToken(now.Add(time.Minute))
+	gate := rendezvous.NewDurableGate(tok)
+	first := derptunTestClaim(tok, 11)
+	if _, err := gate.Accept(now, first); err != nil {
+		t.Fatalf("first Accept() error = %v", err)
+	}
+
+	mux := derptun.NewMux(derptun.MuxConfig{Role: derptun.MuxRoleServer, ReconnectTimeout: time.Second})
+	defer mux.Close()
+	mux.ReplaceCarrier(newSessionNoReplyCarrier())
+
+	activeCtx, activeCancel := context.WithCancel(ctx)
+	active := &derptunServeActive{
+		claim:  first,
+		mux:    mux,
+		cancel: activeCancel,
+		done:   make(chan error, 1),
+	}
+	go func() {
+		<-activeCtx.Done()
+		active.done <- activeCtx.Err()
+	}()
+
+	second := derptunTestClaim(tok, 22)
+	if _, err := gate.Accept(now, second); !errors.Is(err, rendezvous.ErrClaimed) {
+		t.Fatalf("second Accept() error = %v, want %v", err, rendezvous.ErrClaimed)
+	}
+
+	recovered, err := recoverStaleDerptunActive(ctx, nil, gate, active, 50*time.Millisecond, 50*time.Millisecond)
+	if err != nil {
+		t.Fatalf("recoverStaleDerptunActive() error = %v", err)
+	}
+	if !recovered {
+		t.Fatal("recoverStaleDerptunActive() recovered = false, want true")
+	}
+
+	decision, err := gate.Accept(now, second)
+	if err != nil {
+		t.Fatalf("second Accept() after recovery error = %v", err)
+	}
+	if !decision.Accepted {
+		t.Fatal("second Accept() after recovery rejected, want accepted")
+	}
+}
+
+func TestRecoverStaleDerptunActiveKeepsResponsiveClaim(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+
+	now := time.Now()
+	tok := derptunTestToken(now.Add(time.Minute))
+	gate := rendezvous.NewDurableGate(tok)
+	first := derptunTestClaim(tok, 33)
+	if _, err := gate.Accept(now, first); err != nil {
+		t.Fatalf("first Accept() error = %v", err)
+	}
+
+	clientMux, serverMux := newSessionMuxPair(t, time.Second)
+	defer clientMux.Close()
+	defer serverMux.Close()
+	active := &derptunServeActive{
+		claim:  first,
+		mux:    serverMux,
+		cancel: func() {},
+		done:   make(chan error, 1),
+	}
+
+	recovered, err := recoverStaleDerptunActive(ctx, nil, gate, active, 200*time.Millisecond, 50*time.Millisecond)
+	if err != nil {
+		t.Fatalf("recoverStaleDerptunActive() error = %v", err)
+	}
+	if recovered {
+		t.Fatal("recoverStaleDerptunActive() recovered = true, want false")
+	}
+
+	second := derptunTestClaim(tok, 44)
+	if _, err := gate.Accept(now, second); !errors.Is(err, rendezvous.ErrClaimed) {
+		t.Fatalf("second Accept() error = %v, want %v", err, rendezvous.ErrClaimed)
+	}
+}
+
+func TestRecoverStaleDerptunActiveReleasesClosedTransport(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+
+	now := time.Now()
+	tok := derptunTestToken(now.Add(time.Minute))
+	gate := rendezvous.NewDurableGate(tok)
+	first := derptunTestClaim(tok, 77)
+	if _, err := gate.Accept(now, first); err != nil {
+		t.Fatalf("first Accept() error = %v", err)
+	}
+
+	quicDone := make(chan struct{})
+	close(quicDone)
+	active := &derptunServeActive{
+		claim:    first,
+		quicDone: quicDone,
+		cancel:   func() {},
+		done:     make(chan error, 1),
+	}
+	active.done <- context.Canceled
+
+	recovered, err := recoverStaleDerptunActive(ctx, nil, gate, active, 200*time.Millisecond, 50*time.Millisecond)
+	if err != nil {
+		t.Fatalf("recoverStaleDerptunActive() error = %v", err)
+	}
+	if !recovered {
+		t.Fatal("recoverStaleDerptunActive() recovered = false, want true")
+	}
+
+	second := derptunTestClaim(tok, 88)
+	decision, err := gate.Accept(now, second)
+	if err != nil {
+		t.Fatalf("second Accept() error = %v", err)
+	}
+	if !decision.Accepted {
+		t.Fatal("second Accept() rejected after closed transport recovery")
+	}
 }
 
 func TestServeDerptunMuxTargetAllowsOneActiveStream(t *testing.T) {
@@ -237,6 +366,55 @@ func TestServeDerptunMuxTargetAllowsOneActiveStream(t *testing.T) {
 	}
 	thirdConn := openStreamUntilBackendAccepted(t, ctx, clientMux, accepted)
 	defer thirdConn.Close()
+
+	cancel()
+	if err := <-errCh; err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, net.ErrClosed) {
+		t.Fatalf("serveDerptunMuxTarget() error = %v", err)
+	}
+}
+
+func TestServeDerptunMuxTargetRemovesStreamWhenBackendCloses(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	backend := startCountingEchoServer(t, 3)
+	clientCarrier, serverCarrier := net.Pipe()
+	clientMux := derptun.NewMux(derptun.MuxConfig{Role: derptun.MuxRoleClient, ReconnectTimeout: time.Second})
+	serverMux := derptun.NewMux(derptun.MuxConfig{Role: derptun.MuxRoleServer, ReconnectTimeout: time.Second})
+	defer clientMux.Close()
+	defer serverMux.Close()
+	clientMux.ReplaceCarrier(clientCarrier)
+	serverMux.ReplaceCarrier(serverCarrier)
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- serveDerptunMuxTarget(ctx, serverMux, backend, nil)
+	}()
+
+	conn, err := clientMux.OpenStream(ctx)
+	if err != nil {
+		t.Fatalf("OpenStream() error = %v", err)
+	}
+	reader := bufio.NewReader(conn)
+	for i := 0; i < 3; i++ {
+		if _, err := io.WriteString(conn, "ping\n"); err != nil {
+			t.Fatalf("WriteString(%d) error = %v", i, err)
+		}
+		line, err := reader.ReadString('\n')
+		if err != nil {
+			t.Fatalf("ReadString(%d) error = %v", i, err)
+		}
+		if line != "pong\n" {
+			t.Fatalf("line(%d) = %q, want pong", i, line)
+		}
+	}
+	if err := conn.SetReadDeadline(time.Now().Add(time.Second)); err != nil {
+		t.Fatalf("SetReadDeadline() error = %v", err)
+	}
+	if _, err := conn.Read(make([]byte, 1)); err == nil {
+		t.Fatal("Read() error = nil, want backend close")
+	}
+	waitForMuxStreamCount(t, serverMux, 0)
 
 	cancel()
 	if err := <-errCh; err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, net.ErrClosed) {
@@ -336,6 +514,34 @@ func startHoldingTCPServer(t *testing.T) (string, <-chan struct{}) {
 	return ln.Addr().String(), accepted
 }
 
+func startCountingEchoServer(t *testing.T, closeAfter int) string {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("Listen() error = %v", err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func() {
+				defer conn.Close()
+				scanner := bufio.NewScanner(conn)
+				for count := 1; scanner.Scan(); count++ {
+					_, _ = io.WriteString(conn, "pong\n")
+					if count >= closeAfter {
+						return
+					}
+				}
+			}()
+		}
+	}()
+	return ln.Addr().String()
+}
+
 func waitForBufferContains(t *testing.T, buf *bytes.Buffer, want string) {
 	t.Helper()
 	deadline := time.Now().Add(time.Second)
@@ -346,6 +552,18 @@ func waitForBufferContains(t *testing.T, buf *bytes.Buffer, want string) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	t.Fatalf("debug output = %q, want %q", buf.String(), want)
+}
+
+func waitForMuxStreamCount(t *testing.T, mux *derptun.Mux, want int) {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		if got := mux.ActiveStreamCount(); got == want {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("ActiveStreamCount() = %d, want %d", mux.ActiveStreamCount(), want)
 }
 
 func openStreamUntilBackendAccepted(t *testing.T, ctx context.Context, mux *derptun.Mux, accepted <-chan struct{}) net.Conn {
@@ -366,5 +584,69 @@ func openStreamUntilBackendAccepted(t *testing.T, ctx context.Context, mux *derp
 		}
 	}
 	t.Fatal("stream did not reach backend after previous stream closed")
+	return nil
+}
+
+func derptunTestToken(expires time.Time) token.Token {
+	return token.Token{
+		Version:      token.SupportedVersion,
+		SessionID:    [16]byte{1, 2, 3, 4, 5, 6, 7, 8},
+		ExpiresUnix:  expires.Unix(),
+		BearerSecret: [32]byte{9, 8, 7, 6, 5, 4, 3, 2},
+		Capabilities: token.CapabilityDerptunTCP,
+	}
+}
+
+func derptunTestClaim(tok token.Token, marker byte) rendezvous.Claim {
+	claim := rendezvous.Claim{
+		Version:      tok.Version,
+		SessionID:    tok.SessionID,
+		DERPPublic:   [32]byte{marker},
+		QUICPublic:   [32]byte{marker + 1},
+		Candidates:   []string{"udp4:203.0.113.10:12345"},
+		Capabilities: tok.Capabilities,
+	}
+	claim.BearerMAC = rendezvous.ComputeBearerMAC(tok.BearerSecret, claim)
+	return claim
+}
+
+func newSessionMuxPair(t *testing.T, reconnectTimeout time.Duration) (*derptun.Mux, *derptun.Mux) {
+	t.Helper()
+
+	clientCarrier, serverCarrier := net.Pipe()
+	clientMux := derptun.NewMux(derptun.MuxConfig{Role: derptun.MuxRoleClient, ReconnectTimeout: reconnectTimeout})
+	serverMux := derptun.NewMux(derptun.MuxConfig{Role: derptun.MuxRoleServer, ReconnectTimeout: reconnectTimeout})
+	clientMux.ReplaceCarrier(clientCarrier)
+	serverMux.ReplaceCarrier(serverCarrier)
+	return clientMux, serverMux
+}
+
+type sessionNoReplyCarrier struct {
+	closed chan struct{}
+	once   sync.Once
+}
+
+func newSessionNoReplyCarrier() *sessionNoReplyCarrier {
+	return &sessionNoReplyCarrier{closed: make(chan struct{})}
+}
+
+func (c *sessionNoReplyCarrier) Read([]byte) (int, error) {
+	<-c.closed
+	return 0, io.ErrClosedPipe
+}
+
+func (c *sessionNoReplyCarrier) Write(p []byte) (int, error) {
+	select {
+	case <-c.closed:
+		return 0, net.ErrClosed
+	default:
+		return len(p), nil
+	}
+}
+
+func (c *sessionNoReplyCarrier) Close() error {
+	c.once.Do(func() {
+		close(c.closed)
+	})
 	return nil
 }

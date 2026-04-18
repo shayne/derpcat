@@ -5,9 +5,11 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -21,6 +23,8 @@ const (
 	frameTypeData  = "data"
 	frameTypeClose = "close"
 	frameTypeAck   = "ack"
+	frameTypePing  = "ping"
+	frameTypePong  = "pong"
 )
 
 const (
@@ -49,6 +53,12 @@ type Mux struct {
 	writeMu  sync.Mutex
 	acceptCh chan net.Conn
 	closeCh  chan struct{}
+
+	pingMu      sync.Mutex
+	nextPingID  uint64
+	pongWaiters map[uint64]chan struct{}
+
+	lastPeerActivityUnixNano atomic.Int64
 }
 
 type muxStream struct {
@@ -94,6 +104,7 @@ func NewMux(cfg MuxConfig) *Mux {
 		nextStreamID:  nextID,
 		acceptCh:      make(chan net.Conn, 16),
 		closeCh:       make(chan struct{}),
+		pongWaiters:   make(map[uint64]chan struct{}),
 	}
 }
 
@@ -206,6 +217,59 @@ func (m *Mux) Close() error {
 	return nil
 }
 
+func (m *Mux) LastPeerActivity() time.Time {
+	nano := m.lastPeerActivityUnixNano.Load()
+	if nano == 0 {
+		return time.Time{}
+	}
+	return time.Unix(0, nano)
+}
+
+func (m *Mux) ActiveStreamCount() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return len(m.streams)
+}
+
+func (m *Mux) Ping(ctx context.Context, timeout time.Duration) error {
+	if timeout <= 0 {
+		timeout = m.cfg.ReconnectTimeout
+	}
+	if timeout <= 0 {
+		timeout = time.Second
+	}
+	deadline := time.Now().Add(timeout)
+	if ctxDeadline, ok := ctx.Deadline(); ok && ctxDeadline.Before(deadline) {
+		deadline = ctxDeadline
+	}
+
+	id := m.nextPing()
+	pong := m.registerPongWaiter(id)
+	defer m.removePongWaiter(id)
+
+	if err := m.writeFrameUntilContext(ctx, frameHeader{Type: frameTypePing, Seq: id}, nil, deadline); err != nil {
+		return fmt.Errorf("send ping: %w", err)
+	}
+
+	wait := time.Until(deadline)
+	if wait <= 0 {
+		return context.DeadlineExceeded
+	}
+	timer := time.NewTimer(wait)
+	defer timer.Stop()
+
+	select {
+	case <-pong:
+		return nil
+	case <-m.closeCh:
+		return net.ErrClosed
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return fmt.Errorf("wait pong: %w", context.DeadlineExceeded)
+	}
+}
+
 func (m *Mux) newStream() (*muxStream, net.Conn) {
 	appConn, muxConn := net.Pipe()
 	return &muxStream{
@@ -213,6 +277,40 @@ func (m *Mux) newStream() (*muxStream, net.Conn) {
 		conn:    muxConn,
 		openAck: make(chan struct{}),
 	}, appConn
+}
+
+func (m *Mux) nextPing() uint64 {
+	m.pingMu.Lock()
+	defer m.pingMu.Unlock()
+	m.nextPingID++
+	if m.nextPingID == 0 {
+		m.nextPingID++
+	}
+	return m.nextPingID
+}
+
+func (m *Mux) registerPongWaiter(id uint64) <-chan struct{} {
+	ch := make(chan struct{})
+	m.pingMu.Lock()
+	m.pongWaiters[id] = ch
+	m.pingMu.Unlock()
+	return ch
+}
+
+func (m *Mux) removePongWaiter(id uint64) {
+	m.pingMu.Lock()
+	delete(m.pongWaiters, id)
+	m.pingMu.Unlock()
+}
+
+func (m *Mux) handlePong(id uint64) {
+	m.pingMu.Lock()
+	ch := m.pongWaiters[id]
+	delete(m.pongWaiters, id)
+	m.pingMu.Unlock()
+	if ch != nil {
+		close(ch)
+	}
 }
 
 func (m *Mux) getOrCreateRemoteStream(id uint64) (*muxStream, net.Conn) {
@@ -273,7 +371,7 @@ func (m *Mux) writeFrameUntilContext(ctx context.Context, header frameHeader, pa
 			continue
 		}
 
-		err := m.writeOnCarrier(carrier, generation, header, payload)
+		err := m.writeOnCarrier(carrier, generation, header, payload, deadline)
 		if err == nil {
 			return nil
 		}
@@ -312,7 +410,7 @@ func (m *Mux) waitForCarrier(ctx context.Context, changed <-chan struct{}, deadl
 	}
 }
 
-func (m *Mux) writeOnCarrier(carrier io.ReadWriteCloser, generation uint64, header frameHeader, payload []byte) error {
+func (m *Mux) writeOnCarrier(carrier io.ReadWriteCloser, generation uint64, header frameHeader, payload []byte, deadline time.Time) error {
 	headerBytes, err := json.Marshal(header)
 	if err != nil {
 		return err
@@ -330,6 +428,10 @@ func (m *Mux) writeOnCarrier(carrier io.ReadWriteCloser, generation uint64, head
 	}
 	if currentCarrier != carrier || currentGeneration != generation {
 		return io.EOF
+	}
+	if deadlineSetter, ok := carrier.(interface{ SetWriteDeadline(time.Time) error }); ok {
+		_ = deadlineSetter.SetWriteDeadline(deadline)
+		defer deadlineSetter.SetWriteDeadline(time.Time{})
 	}
 
 	if _, err := carrier.Write(prefix[:]); err != nil {
@@ -367,6 +469,7 @@ func (m *Mux) readLoop(generation uint64, carrier io.ReadWriteCloser) {
 			m.markCarrierDead(generation, carrier)
 			return
 		}
+		m.lastPeerActivityUnixNano.Store(time.Now().UnixNano())
 		if err := m.handleFrame(header, payload); err != nil {
 			m.markCarrierDead(generation, carrier)
 			return
@@ -402,15 +505,20 @@ func (m *Mux) handleFrame(header frameHeader, payload []byte) error {
 		if stream == nil {
 			return nil
 		}
-		ackSeq, err := stream.deliver(header.Seq, payload)
-		if err != nil {
-			return err
-		}
-		return m.writeFrameUntil(frameHeader{
-			Type:     frameTypeAck,
-			StreamID: header.StreamID,
-			Seq:      ackSeq,
-		}, nil, m.deadline())
+		go func() {
+			ackSeq, err := stream.deliver(header.Seq, payload)
+			if err != nil {
+				m.removeStream(header.StreamID, stream)
+				_ = stream.conn.Close()
+				return
+			}
+			_ = m.writeFrameUntil(frameHeader{
+				Type:     frameTypeAck,
+				StreamID: header.StreamID,
+				Seq:      ackSeq,
+			}, nil, m.deadline())
+		}()
+		return nil
 
 	case frameTypeAck:
 		stream := m.getStream(header.StreamID)
@@ -420,6 +528,13 @@ func (m *Mux) handleFrame(header frameHeader, payload []byte) error {
 			}
 			stream.handleAck(header.Seq)
 		}
+		return nil
+
+	case frameTypePing:
+		return m.writeFrameUntil(frameHeader{Type: frameTypePong, Seq: header.Seq}, nil, m.deadline())
+
+	case frameTypePong:
+		m.handlePong(header.Seq)
 		return nil
 
 	case frameTypeClose:

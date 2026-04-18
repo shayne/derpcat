@@ -196,6 +196,102 @@ func TestMuxCloseFramePropagatesEOF(t *testing.T) {
 	}
 }
 
+func TestMuxPingPongReportsAlive(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+
+	clientMux, serverMux := newMuxPair(t, time.Second)
+	defer clientMux.Close()
+	defer serverMux.Close()
+
+	if err := serverMux.Ping(ctx, 200*time.Millisecond); err != nil {
+		t.Fatalf("Ping() error = %v", err)
+	}
+	if err := clientMux.Ping(ctx, 200*time.Millisecond); err != nil {
+		t.Fatalf("client Ping() error = %v", err)
+	}
+}
+
+func TestMuxPingPongWhileStreamIsActive(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+
+	clientMux, serverMux := newMuxPair(t, time.Second)
+	defer clientMux.Close()
+	defer serverMux.Close()
+
+	serverConnCh := make(chan net.Conn, 1)
+	go func() {
+		conn, _ := serverMux.Accept(ctx)
+		serverConnCh <- conn
+	}()
+
+	clientConn, err := clientMux.OpenStream(ctx)
+	if err != nil {
+		t.Fatalf("OpenStream() error = %v", err)
+	}
+	defer clientConn.Close()
+	serverConn := <-serverConnCh
+	defer serverConn.Close()
+
+	if _, err := clientConn.Write([]byte("ping\n")); err != nil {
+		t.Fatalf("client Write() error = %v", err)
+	}
+	got := make([]byte, len("ping\n"))
+	if _, err := io.ReadFull(serverConn, got); err != nil {
+		t.Fatalf("server ReadFull() error = %v", err)
+	}
+	if _, err := serverConn.Write([]byte("pong\n")); err != nil {
+		t.Fatalf("server Write() error = %v", err)
+	}
+	reply := make([]byte, len("pong\n"))
+	if _, err := io.ReadFull(clientConn, reply); err != nil {
+		t.Fatalf("client ReadFull() error = %v", err)
+	}
+
+	if err := serverMux.Ping(ctx, 200*time.Millisecond); err != nil {
+		t.Fatalf("server Ping() error = %v", err)
+	}
+}
+
+func TestMuxPingTimesOutWhenPeerDoesNotReply(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+
+	mux := NewMux(MuxConfig{Role: MuxRoleServer, ReconnectTimeout: time.Second})
+	defer mux.Close()
+	mux.ReplaceCarrier(newNoReplyCarrier())
+
+	start := time.Now()
+	err := mux.Ping(ctx, 50*time.Millisecond)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Ping() error = %v, want %v", err, context.DeadlineExceeded)
+	}
+	if elapsed := time.Since(start); elapsed > 500*time.Millisecond {
+		t.Fatalf("Ping() took %v, want prompt timeout", elapsed)
+	}
+}
+
+func TestMuxPingTimesOutWhenPeerStopsReading(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+
+	clientCarrier, serverCarrier := net.Pipe()
+	defer clientCarrier.Close()
+
+	mux := NewMux(MuxConfig{Role: MuxRoleServer, ReconnectTimeout: time.Second})
+	defer mux.Close()
+	mux.ReplaceCarrier(serverCarrier)
+
+	start := time.Now()
+	if err := mux.Ping(ctx, 50*time.Millisecond); err == nil {
+		t.Fatal("Ping() error = nil, want write timeout")
+	}
+	if elapsed := time.Since(start); elapsed > 500*time.Millisecond {
+		t.Fatalf("Ping() took %v, want prompt write timeout", elapsed)
+	}
+}
+
 func TestMuxAcceptReturnsWhenCarrierCloses(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
@@ -500,4 +596,34 @@ func closeBoth(t *testing.T, replaceClient func(io.ReadWriteCloser), replaceServ
 		replaceServer(nextServer)
 	}()
 	wg.Wait()
+}
+
+type noReplyCarrier struct {
+	closed chan struct{}
+	once   sync.Once
+}
+
+func newNoReplyCarrier() *noReplyCarrier {
+	return &noReplyCarrier{closed: make(chan struct{})}
+}
+
+func (c *noReplyCarrier) Read([]byte) (int, error) {
+	<-c.closed
+	return 0, io.ErrClosedPipe
+}
+
+func (c *noReplyCarrier) Write(p []byte) (int, error) {
+	select {
+	case <-c.closed:
+		return 0, net.ErrClosed
+	default:
+		return len(p), nil
+	}
+}
+
+func (c *noReplyCarrier) Close() error {
+	c.once.Do(func() {
+		close(c.closed)
+	})
+	return nil
 }
