@@ -3,6 +3,7 @@ package derptun
 import (
 	"bytes"
 	"context"
+	"encoding/binary"
 	"io"
 	"net"
 	"sync"
@@ -273,6 +274,23 @@ func TestMuxOpenStreamTimesOutWithoutCarrier(t *testing.T) {
 	}
 }
 
+func TestMuxOpenStreamHonorsContextWithoutCarrier(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	mux := NewMux(MuxConfig{Role: MuxRoleClient, ReconnectTimeout: time.Hour})
+	defer mux.Close()
+
+	conn, err := mux.OpenStream(ctx)
+	if err == nil {
+		_ = conn.Close()
+		t.Fatal("OpenStream() error = nil, want context canceled")
+	}
+	if err != context.Canceled {
+		t.Fatalf("OpenStream() error = %v, want %v", err, context.Canceled)
+	}
+}
+
 func TestMuxSuppressesDuplicateDeliveryWhileFirstWriteBlocks(t *testing.T) {
 	serverMux := NewMux(MuxConfig{Role: MuxRoleServer, ReconnectTimeout: time.Second})
 	defer serverMux.Close()
@@ -323,6 +341,62 @@ func TestMuxSuppressesDuplicateDeliveryWhileFirstWriteBlocks(t *testing.T) {
 	}
 	if netErr, ok := err.(net.Error); !ok || !netErr.Timeout() {
 		t.Fatalf("duplicate Read() error = %v, want timeout after no duplicate bytes", err)
+	}
+}
+
+func TestMuxFailedDeliveryDoesNotAdvanceRecvSeq(t *testing.T) {
+	serverMux := NewMux(MuxConfig{Role: MuxRoleServer, ReconnectTimeout: time.Second})
+	defer serverMux.Close()
+
+	stream, appConn := serverMux.getOrCreateRemoteStream(2)
+	payload := []byte("lost")
+	done := make(chan error, 1)
+	go func() {
+		_, err := stream.deliver(0, payload)
+		done <- err
+	}()
+	time.Sleep(20 * time.Millisecond)
+	_ = appConn.Close()
+
+	if err := <-done; err == nil {
+		t.Fatal("deliver() error = nil, want local close error")
+	}
+	stream.stateMu.Lock()
+	recvSeq := stream.recvSeq
+	stream.stateMu.Unlock()
+	if recvSeq != 0 {
+		t.Fatalf("recvSeq = %d, want 0 after failed delivery", recvSeq)
+	}
+}
+
+func TestMuxRemovesStreamOnCloseFrame(t *testing.T) {
+	serverMux := NewMux(MuxConfig{Role: MuxRoleServer, ReconnectTimeout: time.Second})
+	defer serverMux.Close()
+
+	_, appConn := serverMux.getOrCreateRemoteStream(2)
+	defer appConn.Close()
+	if stream := serverMux.getStream(2); stream == nil {
+		t.Fatal("stream missing before close")
+	}
+	if err := serverMux.handleFrame(frameHeader{Type: frameTypeClose, StreamID: 2}, nil); err != nil {
+		t.Fatalf("handleFrame(close) error = %v", err)
+	}
+	if stream := serverMux.getStream(2); stream != nil {
+		t.Fatal("stream still present after close frame")
+	}
+}
+
+func TestReadFrameRejectsInvalidPayloadLength(t *testing.T) {
+	header := []byte(`{"type":"data","stream_id":1,"length":-1}`)
+	var raw bytes.Buffer
+	var prefix [4]byte
+	binary.BigEndian.PutUint32(prefix[:], uint32(len(header)))
+	raw.Write(prefix[:])
+	raw.Write(header)
+
+	_, _, err := readFrame(&raw)
+	if err == nil {
+		t.Fatal("readFrame() error = nil, want invalid frame length error")
 	}
 }
 

@@ -23,6 +23,13 @@ const (
 	frameTypeAck   = "ack"
 )
 
+const (
+	maxFrameHeaderBytes  = 64 << 10
+	maxFramePayloadBytes = 1 << 20
+)
+
+var errInvalidFrame = errors.New("invalid derptun mux frame")
+
 type MuxConfig struct {
 	Role             MuxRole
 	ReconnectTimeout time.Duration
@@ -214,6 +221,14 @@ func (m *Mux) getStream(id uint64) *muxStream {
 	return m.streams[id]
 }
 
+func (m *Mux) removeStream(id uint64, stream *muxStream) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if stream == nil || m.streams[id] == stream {
+		delete(m.streams, id)
+	}
+}
+
 func (m *Mux) signalCarrierChangeLocked() {
 	close(m.carrierChange)
 	m.carrierChange = make(chan struct{})
@@ -227,13 +242,17 @@ func (m *Mux) deadline() time.Time {
 }
 
 func (m *Mux) writeFrameUntil(header frameHeader, payload []byte, deadline time.Time) error {
+	return m.writeFrameUntilContext(context.Background(), header, payload, deadline)
+}
+
+func (m *Mux) writeFrameUntilContext(ctx context.Context, header frameHeader, payload []byte, deadline time.Time) error {
 	for {
 		carrier, generation, changed, closed := m.carrierSnapshot()
 		if closed {
 			return net.ErrClosed
 		}
 		if carrier == nil {
-			if err := m.waitForCarrier(changed, deadline); err != nil {
+			if err := m.waitForCarrier(ctx, changed, deadline); err != nil {
 				return err
 			}
 			continue
@@ -257,7 +276,7 @@ func (m *Mux) carrierSnapshot() (io.ReadWriteCloser, uint64, chan struct{}, bool
 	return m.carrier, m.carrierGen, m.carrierChange, m.closed
 }
 
-func (m *Mux) waitForCarrier(changed <-chan struct{}, deadline time.Time) error {
+func (m *Mux) waitForCarrier(ctx context.Context, changed <-chan struct{}, deadline time.Time) error {
 	wait := time.Until(deadline)
 	if wait <= 0 {
 		return context.DeadlineExceeded
@@ -271,6 +290,8 @@ func (m *Mux) waitForCarrier(changed <-chan struct{}, deadline time.Time) error 
 		return nil
 	case <-m.closeCh:
 		return net.ErrClosed
+	case <-ctx.Done():
+		return ctx.Err()
 	case <-timer.C:
 		return context.DeadlineExceeded
 	}
@@ -389,6 +410,7 @@ func (m *Mux) handleFrame(header frameHeader, payload []byte) error {
 	case frameTypeClose:
 		stream := m.getStream(header.StreamID)
 		if stream != nil {
+			m.removeStream(header.StreamID, stream)
 			_ = stream.conn.Close()
 		}
 		return nil
@@ -404,6 +426,9 @@ func readFrame(r io.Reader) (frameHeader, []byte, error) {
 	}
 
 	headerLen := binary.BigEndian.Uint32(prefix[:])
+	if headerLen == 0 || headerLen > maxFrameHeaderBytes {
+		return frameHeader{}, nil, errInvalidFrame
+	}
 	headerBytes := make([]byte, headerLen)
 	if _, err := io.ReadFull(r, headerBytes); err != nil {
 		return frameHeader{}, nil, err
@@ -412,6 +437,9 @@ func readFrame(r io.Reader) (frameHeader, []byte, error) {
 	var header frameHeader
 	if err := json.Unmarshal(headerBytes, &header); err != nil {
 		return frameHeader{}, nil, err
+	}
+	if header.Length < 0 || header.Length > maxFramePayloadBytes {
+		return frameHeader{}, nil, errInvalidFrame
 	}
 
 	payload := make([]byte, header.Length)
@@ -422,7 +450,10 @@ func readFrame(r io.Reader) (frameHeader, []byte, error) {
 }
 
 func (s *muxStream) outboundPump() {
-	defer s.sendClose()
+	defer func() {
+		s.sendClose()
+		s.mux.removeStream(s.id, s)
+	}()
 	buf := make([]byte, 32*1024)
 	for {
 		n, err := s.conn.Read(buf)
@@ -443,7 +474,7 @@ func (s *muxStream) sendOpen(ctx context.Context) error {
 	deadline := s.mux.deadline()
 	for {
 		carrierChanged := s.mux.currentCarrierChange()
-		if err := s.mux.writeFrameUntil(header, nil, deadline); err != nil {
+		if err := s.mux.writeFrameUntilContext(ctx, header, nil, deadline); err != nil {
 			return err
 		}
 
@@ -549,14 +580,16 @@ func (s *muxStream) deliver(seq uint64, payload []byte) (uint64, error) {
 		return ack, nil
 	default:
 	}
-	s.recvSeq += uint64(len(payload))
-	ack := s.recvSeq
 	s.stateMu.Unlock()
 
 	if _, err := s.conn.Write(payload); err != nil {
 		return 0, err
 	}
 
+	s.stateMu.Lock()
+	s.recvSeq += uint64(len(payload))
+	ack := s.recvSeq
+	s.stateMu.Unlock()
 	return ack, nil
 }
 
