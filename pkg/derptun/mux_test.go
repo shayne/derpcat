@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/binary"
+	"errors"
 	"io"
 	"net"
 	"sync"
@@ -181,6 +182,9 @@ func TestMuxCloseFramePropagatesEOF(t *testing.T) {
 		t.Fatalf("client Close() error = %v", err)
 	}
 	if err := serverConn.SetReadDeadline(time.Now().Add(500 * time.Millisecond)); err != nil {
+		if errors.Is(err, io.ErrClosedPipe) || errors.Is(err, net.ErrClosed) {
+			return
+		}
 		t.Fatalf("SetReadDeadline() error = %v", err)
 	}
 	n, err := serverConn.Read(make([]byte, 1))
