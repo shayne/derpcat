@@ -400,6 +400,32 @@ func TestReadFrameRejectsInvalidPayloadLength(t *testing.T) {
 	}
 }
 
+func TestReadFrameRejectsOversizedHeaderLength(t *testing.T) {
+	var raw bytes.Buffer
+	var prefix [4]byte
+	binary.BigEndian.PutUint32(prefix[:], uint32(maxFrameHeaderBytes+1))
+	raw.Write(prefix[:])
+
+	_, _, err := readFrame(&raw)
+	if err == nil {
+		t.Fatal("readFrame() error = nil, want invalid frame length error")
+	}
+}
+
+func TestReadFrameRejectsOversizedPayloadLength(t *testing.T) {
+	header := []byte(`{"type":"data","stream_id":1,"length":1048577}`)
+	var raw bytes.Buffer
+	var prefix [4]byte
+	binary.BigEndian.PutUint32(prefix[:], uint32(len(header)))
+	raw.Write(prefix[:])
+	raw.Write(header)
+
+	_, _, err := readFrame(&raw)
+	if err == nil {
+		t.Fatal("readFrame() error = nil, want invalid frame length error")
+	}
+}
+
 func newMuxPair(t *testing.T, reconnectTimeout time.Duration) (*Mux, *Mux) {
 	t.Helper()
 
