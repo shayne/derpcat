@@ -16,6 +16,7 @@ const (
 	CapabilityAttach
 	CapabilityStdioOffer
 	CapabilityWebFile
+	CapabilityDerptunTCP
 )
 
 type Token struct {
