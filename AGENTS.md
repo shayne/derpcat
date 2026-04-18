@@ -10,6 +10,7 @@
 
 Use `mise` for toolchain consistency.
 
+- Run `mise trust` only when setting up a workspace for the first time or when `mise` reports the workspace is untrusted.
 - `mise run build` builds `dist/derphole`
 - `mise run test` runs `go test ./...`
 - `mise run vet` runs `go vet ./...`
