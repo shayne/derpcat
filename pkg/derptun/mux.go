@@ -54,6 +54,11 @@ type muxStream struct {
 	sendSeq uint64
 	recvSeq uint64
 	pending *pendingWrite
+
+	openAck     chan struct{}
+	openAckOnce sync.Once
+	closeOnce   sync.Once
+	deliverMu   sync.Mutex
 }
 
 type pendingWrite struct {
@@ -129,7 +134,7 @@ func (m *Mux) OpenStream(ctx context.Context) (net.Conn, error) {
 	m.streams[stream.id] = stream
 	m.mu.Unlock()
 
-	if err := m.writeFrameUntil(frameHeader{Type: frameTypeOpen, StreamID: stream.id}, nil, m.deadline()); err != nil {
+	if err := stream.sendOpen(ctx); err != nil {
 		m.mu.Lock()
 		delete(m.streams, stream.id)
 		m.mu.Unlock()
@@ -182,8 +187,9 @@ func (m *Mux) Close() error {
 func (m *Mux) newStream() (*muxStream, net.Conn) {
 	appConn, muxConn := net.Pipe()
 	return &muxStream{
-		mux:  m,
-		conn: muxConn,
+		mux:     m,
+		conn:    muxConn,
+		openAck: make(chan struct{}),
 	}, appConn
 }
 
@@ -336,6 +342,13 @@ func (m *Mux) handleFrame(header frameHeader, payload []byte) error {
 	switch header.Type {
 	case frameTypeOpen:
 		_, appConn := m.getOrCreateRemoteStream(header.StreamID)
+		if err := m.writeFrameUntil(frameHeader{
+			Type:     frameTypeAck,
+			StreamID: header.StreamID,
+			Seq:      0,
+		}, nil, m.deadline()); err != nil {
+			return err
+		}
 		if appConn == nil {
 			return nil
 		}
@@ -366,6 +379,9 @@ func (m *Mux) handleFrame(header frameHeader, payload []byte) error {
 	case frameTypeAck:
 		stream := m.getStream(header.StreamID)
 		if stream != nil {
+			if header.Seq == 0 {
+				stream.handleOpenAck()
+			}
 			stream.handleAck(header.Seq)
 		}
 		return nil
@@ -406,6 +422,7 @@ func readFrame(r io.Reader) (frameHeader, []byte, error) {
 }
 
 func (s *muxStream) outboundPump() {
+	defer s.sendClose()
 	buf := make([]byte, 32*1024)
 	for {
 		n, err := s.conn.Read(buf)
@@ -417,6 +434,38 @@ func (s *muxStream) outboundPump() {
 		}
 		if err != nil {
 			return
+		}
+	}
+}
+
+func (s *muxStream) sendOpen(ctx context.Context) error {
+	header := frameHeader{Type: frameTypeOpen, StreamID: s.id}
+	deadline := s.mux.deadline()
+	for {
+		if err := s.mux.writeFrameUntil(header, nil, deadline); err != nil {
+			return err
+		}
+
+		carrierChanged := s.mux.currentCarrierChange()
+		wait := time.Until(deadline)
+		if wait <= 0 {
+			return context.DeadlineExceeded
+		}
+		timer := time.NewTimer(wait)
+		select {
+		case <-s.openAck:
+			timer.Stop()
+			return nil
+		case <-carrierChanged:
+			timer.Stop()
+		case <-s.mux.closeCh:
+			timer.Stop()
+			return net.ErrClosed
+		case <-ctx.Done():
+			timer.Stop()
+			return ctx.Err()
+		case <-timer.C:
+			return context.DeadlineExceeded
 		}
 	}
 }
@@ -478,7 +527,16 @@ func (s *muxStream) sendChunk(payload []byte) error {
 	}
 }
 
+func (s *muxStream) sendClose() {
+	s.closeOnce.Do(func() {
+		_ = s.mux.writeFrameUntil(frameHeader{Type: frameTypeClose, StreamID: s.id}, nil, s.mux.deadline())
+	})
+}
+
 func (s *muxStream) deliver(seq uint64, payload []byte) (uint64, error) {
+	s.deliverMu.Lock()
+	defer s.deliverMu.Unlock()
+
 	s.stateMu.Lock()
 	switch {
 	case seq < s.recvSeq:
@@ -491,17 +549,21 @@ func (s *muxStream) deliver(seq uint64, payload []byte) (uint64, error) {
 		return ack, nil
 	default:
 	}
+	s.recvSeq += uint64(len(payload))
+	ack := s.recvSeq
 	s.stateMu.Unlock()
 
 	if _, err := s.conn.Write(payload); err != nil {
 		return 0, err
 	}
 
-	s.stateMu.Lock()
-	s.recvSeq += uint64(len(payload))
-	ack := s.recvSeq
-	s.stateMu.Unlock()
 	return ack, nil
+}
+
+func (s *muxStream) handleOpenAck() {
+	s.openAckOnce.Do(func() {
+		close(s.openAck)
+	})
 }
 
 func (s *muxStream) handleAck(ack uint64) {

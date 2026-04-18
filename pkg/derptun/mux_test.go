@@ -143,6 +143,153 @@ func TestMuxResendsUnackedDataAfterCarrierReplacement(t *testing.T) {
 	}
 }
 
+func TestMuxCloseFramePropagatesEOF(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	clientMux, serverMux := newMuxPair(t, time.Second)
+	defer clientMux.Close()
+	defer serverMux.Close()
+
+	serverConnCh := make(chan net.Conn, 1)
+	go func() {
+		conn, _ := serverMux.Accept(ctx)
+		serverConnCh <- conn
+	}()
+
+	clientConn, err := clientMux.OpenStream(ctx)
+	if err != nil {
+		t.Fatalf("OpenStream() error = %v", err)
+	}
+	serverConn := <-serverConnCh
+	defer serverConn.Close()
+
+	if err := clientConn.Close(); err != nil {
+		t.Fatalf("client Close() error = %v", err)
+	}
+	if err := serverConn.SetReadDeadline(time.Now().Add(500 * time.Millisecond)); err != nil {
+		t.Fatalf("SetReadDeadline() error = %v", err)
+	}
+	n, err := serverConn.Read(make([]byte, 1))
+	if err == nil {
+		t.Fatalf("server Read() = %d, nil; want EOF/closed error", n)
+	}
+	if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+		t.Fatal("server Read() timed out waiting for close frame")
+	}
+}
+
+func TestMuxReplaysOpenAfterCarrierReplacement(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	clientMux := NewMux(MuxConfig{Role: MuxRoleClient, ReconnectTimeout: time.Second})
+	serverMux := NewMux(MuxConfig{Role: MuxRoleServer, ReconnectTimeout: time.Second})
+	defer clientMux.Close()
+	defer serverMux.Close()
+
+	clientA, serverA := net.Pipe()
+	clientMux.ReplaceCarrier(clientA)
+
+	type openResult struct {
+		conn net.Conn
+		err  error
+	}
+	openCh := make(chan openResult, 1)
+	go func() {
+		conn, err := clientMux.OpenStream(ctx)
+		openCh <- openResult{conn: conn, err: err}
+	}()
+
+	time.Sleep(20 * time.Millisecond)
+	_ = serverA.Close()
+	clientB, serverB := net.Pipe()
+	clientMux.ReplaceCarrier(clientB)
+	serverMux.ReplaceCarrier(serverB)
+
+	var clientConn net.Conn
+	select {
+	case result := <-openCh:
+		if result.err != nil {
+			t.Fatalf("OpenStream() error = %v", result.err)
+		}
+		clientConn = result.conn
+	case <-ctx.Done():
+		t.Fatal("OpenStream() did not replay open on replacement carrier")
+	}
+	defer clientConn.Close()
+
+	serverConn, err := serverMux.Accept(ctx)
+	if err != nil {
+		t.Fatalf("Accept() error = %v", err)
+	}
+	defer serverConn.Close()
+
+	if _, err := clientConn.Write([]byte("open replay")); err != nil {
+		t.Fatalf("client Write() error = %v", err)
+	}
+	got := make([]byte, len("open replay"))
+	if _, err := io.ReadFull(serverConn, got); err != nil {
+		t.Fatalf("server ReadFull() error = %v", err)
+	}
+	if string(got) != "open replay" {
+		t.Fatalf("server got %q, want open replay", got)
+	}
+}
+
+func TestMuxSuppressesDuplicateDeliveryWhileFirstWriteBlocks(t *testing.T) {
+	serverMux := NewMux(MuxConfig{Role: MuxRoleServer, ReconnectTimeout: time.Second})
+	defer serverMux.Close()
+
+	stream, appConn := serverMux.getOrCreateRemoteStream(2)
+	defer appConn.Close()
+
+	payload := []byte("duplicate")
+	firstDone := make(chan error, 1)
+	go func() {
+		_, err := stream.deliver(0, payload)
+		firstDone <- err
+	}()
+	time.Sleep(20 * time.Millisecond)
+
+	secondDone := make(chan error, 1)
+	go func() {
+		_, err := stream.deliver(0, payload)
+		secondDone <- err
+	}()
+	time.Sleep(20 * time.Millisecond)
+
+	got := make([]byte, len(payload))
+	if _, err := io.ReadFull(appConn, got); err != nil {
+		t.Fatalf("first ReadFull() error = %v", err)
+	}
+	if !bytes.Equal(got, payload) {
+		t.Fatalf("first payload = %q, want %q", got, payload)
+	}
+	if err := <-firstDone; err != nil {
+		t.Fatalf("first deliver() error = %v", err)
+	}
+	select {
+	case err := <-secondDone:
+		if err != nil {
+			t.Fatalf("second deliver() error = %v", err)
+		}
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("second duplicate deliver() did not return")
+	}
+
+	if err := appConn.SetReadDeadline(time.Now().Add(100 * time.Millisecond)); err != nil {
+		t.Fatalf("SetReadDeadline() error = %v", err)
+	}
+	n, err := appConn.Read(make([]byte, 1))
+	if err == nil || n != 0 {
+		t.Fatalf("duplicate Read() = (%d, %v), want no duplicate bytes", n, err)
+	}
+	if netErr, ok := err.(net.Error); !ok || !netErr.Timeout() {
+		t.Fatalf("duplicate Read() error = %v, want timeout after no duplicate bytes", err)
+	}
+}
+
 func newMuxPair(t *testing.T, reconnectTimeout time.Duration) (*Mux, *Mux) {
 	t.Helper()
 
