@@ -1,0 +1,115 @@
+package session
+
+import (
+	"bufio"
+	"context"
+	"io"
+	"net"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/shayne/derphole/pkg/derptun"
+)
+
+func TestDerptunOpenForwardsTCPToServedTarget(t *testing.T) {
+	srv := newSessionTestDERPServer(t)
+	t.Setenv("DERPHOLE_TEST_DERP_MAP_URL", srv.MapURL)
+	t.Setenv("DERPHOLE_TEST_DERP_SERVER_URL", srv.DERPURL)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	backend := startLineEchoServer(t)
+	tokenValue, err := derptun.GenerateToken(derptun.TokenOptions{Now: time.Now()})
+	if err != nil {
+		t.Fatalf("GenerateToken() error = %v", err)
+	}
+	serveErr := make(chan error, 1)
+	go func() {
+		serveErr <- DerptunServe(ctx, DerptunServeConfig{Token: tokenValue, TargetAddr: backend})
+	}()
+
+	bindCh := make(chan string, 1)
+	openErr := make(chan error, 1)
+	go func() {
+		openErr <- DerptunOpen(ctx, DerptunOpenConfig{Token: tokenValue, ListenAddr: "127.0.0.1:0", BindAddrSink: bindCh})
+	}()
+	bindAddr := <-bindCh
+	conn, err := net.Dial("tcp", bindAddr)
+	if err != nil {
+		t.Fatalf("Dial(open listener) error = %v", err)
+	}
+	defer conn.Close()
+	if _, err := io.WriteString(conn, "ping\n"); err != nil {
+		t.Fatalf("WriteString() error = %v", err)
+	}
+	line, err := bufio.NewReader(conn).ReadString('\n')
+	if err != nil {
+		t.Fatalf("ReadString() error = %v", err)
+	}
+	if line != "echo: ping\n" {
+		t.Fatalf("line = %q, want echo: ping", line)
+	}
+	cancel()
+	<-serveErr
+	<-openErr
+}
+
+func TestDerptunConnectBridgesStdio(t *testing.T) {
+	srv := newSessionTestDERPServer(t)
+	t.Setenv("DERPHOLE_TEST_DERP_MAP_URL", srv.MapURL)
+	t.Setenv("DERPHOLE_TEST_DERP_SERVER_URL", srv.DERPURL)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	backend := startLineEchoServer(t)
+	tokenValue, err := derptun.GenerateToken(derptun.TokenOptions{Now: time.Now()})
+	if err != nil {
+		t.Fatalf("GenerateToken() error = %v", err)
+	}
+	serveErr := make(chan error, 1)
+	go func() {
+		serveErr <- DerptunServe(ctx, DerptunServeConfig{Token: tokenValue, TargetAddr: backend})
+	}()
+	var out strings.Builder
+	err = DerptunConnect(ctx, DerptunConnectConfig{
+		Token:    tokenValue,
+		StdioIn:  strings.NewReader("hello\n"),
+		StdioOut: &out,
+	})
+	if err != nil {
+		t.Fatalf("DerptunConnect() error = %v", err)
+	}
+	if out.String() != "echo: hello\n" {
+		t.Fatalf("stdout = %q, want echo: hello", out.String())
+	}
+	cancel()
+	<-serveErr
+}
+
+func startLineEchoServer(t *testing.T) string {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("Listen() error = %v", err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func() {
+				defer conn.Close()
+				line, err := bufio.NewReader(conn).ReadString('\n')
+				if err == nil {
+					_, _ = io.WriteString(conn, "echo: "+line)
+				}
+			}()
+		}
+	}()
+	return ln.Addr().String()
+}
