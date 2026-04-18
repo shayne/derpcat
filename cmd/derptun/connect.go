@@ -12,7 +12,7 @@ import (
 )
 
 type connectFlags struct {
-	Token      string `flag:"token" help:"Durable derptun token"`
+	Token      string `flag:"token" help:"Client token for tunnel access"`
 	Stdio      bool   `flag:"stdio" help:"Bridge one tunnel stream over stdin/stdout"`
 	ForceRelay bool   `flag:"force-relay" help:"Disable direct probing"`
 }
@@ -20,10 +20,10 @@ type connectFlags struct {
 var connectHelpConfig = yargs.HelpConfig{
 	Command: yargs.CommandInfo{
 		Name:        "derptun",
-		Description: "Connect a single TCP stream through a durable derptun token.",
+		Description: "Connect a single TCP stream through a derptun client token.",
 		Examples: []string{
-			"ssh -o ProxyCommand='derptun connect --token <token> --stdio' foo@host1",
-			"derptun connect --token <token> --stdio",
+			"ssh -o ProxyCommand='derptun connect --token ~/.config/derptun/client.dtc --stdio' foo@serverhost",
+			"derptun connect --token \"$(cat client.dtc)\" --stdio",
 		},
 	},
 	SubCommands: map[string]yargs.SubCommandInfo{
@@ -32,8 +32,8 @@ var connectHelpConfig = yargs.HelpConfig{
 			Description: "Bridge one tunnel stream over stdin/stdout.",
 			Usage:       "--token TOKEN --stdio [--force-relay]",
 			Examples: []string{
-				"ssh -o ProxyCommand='derptun connect --token <token> --stdio' foo@host1",
-				"derptun connect --token <token> --stdio",
+				"ssh -o ProxyCommand='derptun connect --token ~/.config/derptun/client.dtc --stdio' foo@serverhost",
+				"derptun connect --token \"$(cat client.dtc)\" --stdio",
 			},
 		},
 	},
@@ -66,7 +66,7 @@ func runConnect(args []string, level telemetry.Level, stdin io.Reader, stdout, s
 	ctx, stop := commandContext()
 	defer stop()
 	if err := derptunConnect(ctx, session.DerptunConnectConfig{
-		Token:         parsed.SubCommandFlags.Token,
+		ClientToken:   parsed.SubCommandFlags.Token,
 		StdioIn:       stdin,
 		StdioOut:      stdout,
 		Emitter:       telemetry.New(stderr, commandSessionTelemetryLevel(level)),

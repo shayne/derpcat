@@ -12,7 +12,7 @@ import (
 )
 
 type serveFlags struct {
-	Token      string `flag:"token" help:"Durable derptun token"`
+	Token      string `flag:"token" help:"Server token for serving a local target"`
 	TCP        string `flag:"tcp" help:"Local TCP target to expose, for example 127.0.0.1:22"`
 	ForceRelay bool   `flag:"force-relay" help:"Disable direct probing"`
 }
@@ -20,11 +20,10 @@ type serveFlags struct {
 var serveHelpConfig = yargs.HelpConfig{
 	Command: yargs.CommandInfo{
 		Name:        "derptun",
-		Description: "Serve a local TCP service through a durable derptun token.",
+		Description: "Serve a local TCP service through a derptun server token.",
 		Examples: []string{
-			"derptun token --days 7",
-			"derptun serve --token <token> --tcp 127.0.0.1:22",
-			"derptun open --token <token> --listen 127.0.0.1:2222",
+			"derptun token server --days 365 > server.dts",
+			"derptun serve --token \"$(cat server.dts)\" --tcp 127.0.0.1:22",
 		},
 	},
 	SubCommands: map[string]yargs.SubCommandInfo{
@@ -33,7 +32,7 @@ var serveHelpConfig = yargs.HelpConfig{
 			Description: "Expose a local TCP target until Ctrl-C.",
 			Usage:       "--token TOKEN --tcp HOST:PORT [--force-relay]",
 			Examples: []string{
-				"derptun serve --token <token> --tcp 127.0.0.1:22",
+				"derptun serve --token \"$(cat server.dts)\" --tcp 127.0.0.1:22",
 			},
 		},
 	},
@@ -66,7 +65,7 @@ func runServe(args []string, level telemetry.Level, stderr io.Writer) int {
 	ctx, stop := commandContext()
 	defer stop()
 	if err := derptunServe(ctx, session.DerptunServeConfig{
-		Token:         parsed.SubCommandFlags.Token,
+		ServerToken:   parsed.SubCommandFlags.Token,
 		TargetAddr:    parsed.SubCommandFlags.TCP,
 		Emitter:       telemetry.New(stderr, commandSessionTelemetryLevel(level)),
 		ForceRelay:    parsed.SubCommandFlags.ForceRelay,

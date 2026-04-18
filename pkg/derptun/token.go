@@ -36,8 +36,6 @@ type ServerTokenOptions struct {
 	Expires time.Time
 }
 
-type TokenOptions = ServerTokenOptions
-
 type ClientTokenOptions struct {
 	Now         time.Time
 	ServerToken string
@@ -62,8 +60,6 @@ type ServerCredential struct {
 	Forwards      []ForwardSpec `json:"forwards,omitempty"`
 }
 
-type Credential = ServerCredential
-
 type ClientCredential struct {
 	Version      int      `json:"version"`
 	SessionID    [16]byte `json:"session_id"`
@@ -75,10 +71,6 @@ type ClientCredential struct {
 	QUICPublic   [32]byte `json:"quic_public"`
 	BearerSecret [32]byte `json:"bearer_secret"`
 	ProofMAC     string   `json:"proof_mac"`
-}
-
-func GenerateToken(opts TokenOptions) (string, error) {
-	return GenerateServerToken(ServerTokenOptions(opts))
 }
 
 func GenerateServerToken(opts ServerTokenOptions) (string, error) {
@@ -166,14 +158,6 @@ func DecodeServerToken(encoded string, now time.Time) (ServerCredential, error) 
 		return ServerCredential{}, ErrExpired
 	}
 	return cred, nil
-}
-
-func EncodeCredential(cred Credential) (string, error) {
-	return encodeJSONToken(ServerTokenPrefix, cred)
-}
-
-func DecodeToken(encoded string, now time.Time) (Credential, error) {
-	return DecodeServerToken(encoded, now)
 }
 
 func DecodeClientToken(encoded string, now time.Time) (ClientCredential, error) {

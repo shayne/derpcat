@@ -23,7 +23,6 @@ import (
 
 type DerptunServeConfig struct {
 	ServerToken   string
-	Token         string
 	TargetAddr    string
 	Emitter       *telemetry.Emitter
 	ForceRelay    bool
@@ -32,7 +31,6 @@ type DerptunServeConfig struct {
 
 type DerptunOpenConfig struct {
 	ClientToken   string
-	Token         string
 	ListenAddr    string
 	BindAddrSink  chan<- string
 	Emitter       *telemetry.Emitter
@@ -42,7 +40,6 @@ type DerptunOpenConfig struct {
 
 type DerptunConnectConfig struct {
 	ClientToken   string
-	Token         string
 	StdioIn       io.Reader
 	StdioOut      io.Writer
 	Emitter       *telemetry.Emitter
@@ -71,11 +68,7 @@ var (
 )
 
 func DerptunServe(ctx context.Context, cfg DerptunServeConfig) error {
-	serverToken := cfg.ServerToken
-	if serverToken == "" {
-		serverToken = cfg.Token
-	}
-	cred, err := decodeDerptunServer(serverToken)
+	cred, err := decodeDerptunServer(cfg.ServerToken)
 	if err != nil {
 		return err
 	}
@@ -579,11 +572,7 @@ func serveDerptunMuxTarget(ctx context.Context, mux *derptun.Mux, targetAddr str
 }
 
 func DerptunOpen(ctx context.Context, cfg DerptunOpenConfig) error {
-	clientToken := cfg.ClientToken
-	if clientToken == "" {
-		clientToken = cfg.Token
-	}
-	mux, cleanup, err := dialDerptunMux(ctx, clientToken, cfg.Emitter, cfg.ForceRelay)
+	mux, cleanup, err := dialDerptunMux(ctx, cfg.ClientToken, cfg.Emitter, cfg.ForceRelay)
 	if err != nil {
 		return err
 	}
@@ -607,11 +596,7 @@ func DerptunOpen(ctx context.Context, cfg DerptunOpenConfig) error {
 }
 
 func DerptunConnect(ctx context.Context, cfg DerptunConnectConfig) error {
-	clientToken := cfg.ClientToken
-	if clientToken == "" {
-		clientToken = cfg.Token
-	}
-	conn, cleanup, err := dialDerptunMuxStream(ctx, clientToken, cfg.Emitter, cfg.ForceRelay)
+	conn, cleanup, err := dialDerptunMuxStream(ctx, cfg.ClientToken, cfg.Emitter, cfg.ForceRelay)
 	if err != nil {
 		return err
 	}

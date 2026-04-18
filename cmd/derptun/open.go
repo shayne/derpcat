@@ -12,7 +12,7 @@ import (
 )
 
 type openFlags struct {
-	Token      string `flag:"token" help:"Durable derptun token"`
+	Token      string `flag:"token" help:"Client token for tunnel access"`
 	Listen     string `flag:"listen" help:"Local TCP bind address, for example 127.0.0.1:2222"`
 	ForceRelay bool   `flag:"force-relay" help:"Disable direct probing"`
 }
@@ -20,9 +20,9 @@ type openFlags struct {
 var openHelpConfig = yargs.HelpConfig{
 	Command: yargs.CommandInfo{
 		Name:        "derptun",
-		Description: "Open a local TCP listener that forwards through a durable derptun token.",
+		Description: "Open a local TCP listener that forwards through a derptun client token.",
 		Examples: []string{
-			"derptun open --token <token> --listen 127.0.0.1:2222",
+			"derptun open --token \"$(cat client.dtc)\" --listen 127.0.0.1:2222",
 			"ssh -p 2222 foo@127.0.0.1",
 		},
 	},
@@ -32,8 +32,8 @@ var openHelpConfig = yargs.HelpConfig{
 			Description: "Listen locally and forward each TCP connection through the tunnel.",
 			Usage:       "--token TOKEN [--listen HOST:PORT] [--force-relay]",
 			Examples: []string{
-				"derptun open --token <token>",
-				"derptun open --token <token> --listen 127.0.0.1:2222",
+				"derptun open --token \"$(cat client.dtc)\"",
+				"derptun open --token \"$(cat client.dtc)\" --listen 127.0.0.1:2222",
 			},
 		},
 	},
@@ -69,7 +69,7 @@ func runOpen(args []string, level telemetry.Level, stderr io.Writer) int {
 	done := make(chan error, 1)
 	go func() {
 		done <- derptunOpen(ctx, session.DerptunOpenConfig{
-			Token:         parsed.SubCommandFlags.Token,
+			ClientToken:   parsed.SubCommandFlags.Token,
 			ListenAddr:    parsed.SubCommandFlags.Listen,
 			BindAddrSink:  bindSink,
 			Emitter:       telemetry.New(stderr, commandSessionTelemetryLevel(level)),

@@ -10,7 +10,13 @@ import (
 	"github.com/shayne/yargs"
 )
 
-type tokenFlags struct {
+type tokenCommonFlags struct {
+	Days    int    `flag:"days" help:"Token lifetime in days"`
+	Expires string `flag:"expires" help:"Absolute expiry as RFC3339 or YYYY-MM-DD"`
+}
+
+type tokenClientFlags struct {
+	Token   string `flag:"token" help:"Server token used to mint a client token"`
 	Days    int    `flag:"days" help:"Token lifetime in days"`
 	Expires string `flag:"expires" help:"Absolute expiry as RFC3339 or YYYY-MM-DD"`
 }
@@ -18,66 +24,118 @@ type tokenFlags struct {
 var tokenHelpConfig = yargs.HelpConfig{
 	Command: yargs.CommandInfo{
 		Name:        "derptun",
-		Description: "Generate durable derptun tokens.",
+		Description: "Generate derptun server and client tokens.",
 		Examples: []string{
-			"derptun token --days 7",
-			"derptun token --expires 2026-05-01T00:00:00Z",
-			"derptun serve --token <token> --tcp 127.0.0.1:22",
+			"derptun token server --days 365",
+			"derptun token client --token <dts1_token> --days 7",
 		},
 	},
 	SubCommands: map[string]yargs.SubCommandInfo{
 		"token": {
 			Name:        "token",
-			Description: "Generate a durable token for a derptun tunnel.",
-			Usage:       "[--days N] [--expires RFC3339|YYYY-MM-DD]",
+			Description: "Generate a server credential or client access token.",
+			Usage:       "server [--days N|--expires DATE] | client --token TOKEN [--days N|--expires DATE]",
 			Examples: []string{
-				"derptun token --days 7",
-				"derptun token --expires 2026-05-01T00:00:00Z",
+				"derptun token server --days 365",
+				"derptun token client --token <dts1_token> --days 7",
 			},
 		},
 	},
 }
 
 func runToken(args []string, stdout, stderr io.Writer) int {
-	parsed, err := yargs.ParseWithCommandAndHelp[struct{}, tokenFlags, struct{}](append([]string{"token"}, args...), tokenHelpConfig)
-	if err != nil {
-		switch {
-		case errors.Is(err, yargs.ErrHelp), errors.Is(err, yargs.ErrSubCommandHelp), errors.Is(err, yargs.ErrHelpLLM):
-			if parsed != nil && parsed.HelpText != "" {
-				fmt.Fprint(stderr, parsed.HelpText)
-			} else {
-				fmt.Fprint(stderr, tokenHelpText())
-			}
-			return 0
-		default:
-			fmt.Fprintln(stderr, err)
-			fmt.Fprint(stderr, tokenHelpText())
+	if len(args) == 0 || args[0] == "-h" || args[0] == "--help" || args[0] == "help" {
+		fmt.Fprint(stderr, tokenHelpText())
+		if len(args) == 0 {
 			return 2
 		}
+		return 0
+	}
+	switch args[0] {
+	case "server":
+		return runTokenServer(args[1:], stdout, stderr)
+	case "client":
+		return runTokenClient(args[1:], stdout, stderr)
+	default:
+		fmt.Fprint(stderr, tokenHelpText())
+		return 2
+	}
+}
+
+func runTokenServer(args []string, stdout, stderr io.Writer) int {
+	parsed, err := yargs.ParseWithCommandAndHelp[struct{}, tokenCommonFlags, struct{}](append([]string{"server"}, args...), tokenHelpConfig)
+	if err != nil {
+		return handleTokenParseError(parsed, err, stderr)
 	}
 	if len(parsed.Parser.Args) != 0 || len(parsed.RemainingArgs) != 0 {
 		fmt.Fprint(stderr, tokenHelpText())
 		return 2
 	}
-
-	opts := derptun.TokenOptions{Days: parsed.SubCommandFlags.Days}
-	if parsed.SubCommandFlags.Expires != "" {
-		expires, err := parseTokenExpires(parsed.SubCommandFlags.Expires)
-		if err != nil {
-			fmt.Fprintln(stderr, err)
-			fmt.Fprint(stderr, tokenHelpText())
-			return 2
-		}
-		opts.Expires = expires
+	expires, ok := parseOptionalTokenExpires(parsed.SubCommandFlags.Expires, stderr)
+	if !ok {
+		fmt.Fprint(stderr, tokenHelpText())
+		return 2
 	}
-
-	tokenValue, err := derptun.GenerateToken(opts)
+	tokenValue, err := derptun.GenerateServerToken(derptun.ServerTokenOptions{Days: parsed.SubCommandFlags.Days, Expires: expires})
 	if err != nil {
 		fmt.Fprintln(stderr, err)
 		return 1
 	}
 	fmt.Fprintln(stdout, tokenValue)
 	return 0
+}
+
+func runTokenClient(args []string, stdout, stderr io.Writer) int {
+	parsed, err := yargs.ParseWithCommandAndHelp[struct{}, tokenClientFlags, struct{}](append([]string{"client"}, args...), tokenHelpConfig)
+	if err != nil {
+		return handleTokenParseError(parsed, err, stderr)
+	}
+	if parsed.SubCommandFlags.Token == "" || len(parsed.Parser.Args) != 0 || len(parsed.RemainingArgs) != 0 {
+		fmt.Fprint(stderr, tokenHelpText())
+		return 2
+	}
+	expires, ok := parseOptionalTokenExpires(parsed.SubCommandFlags.Expires, stderr)
+	if !ok {
+		fmt.Fprint(stderr, tokenHelpText())
+		return 2
+	}
+	tokenValue, err := derptun.GenerateClientToken(derptun.ClientTokenOptions{
+		ServerToken: parsed.SubCommandFlags.Token,
+		Days:        parsed.SubCommandFlags.Days,
+		Expires:     expires,
+	})
+	if err != nil {
+		fmt.Fprintln(stderr, err)
+		return 1
+	}
+	fmt.Fprintln(stdout, tokenValue)
+	return 0
+}
+
+func handleTokenParseError[S any](parsed *yargs.TypedParseResult[struct{}, S, struct{}], err error, stderr io.Writer) int {
+	if errors.Is(err, yargs.ErrHelp) || errors.Is(err, yargs.ErrSubCommandHelp) || errors.Is(err, yargs.ErrHelpLLM) {
+		if parsed != nil && parsed.HelpText != "" {
+			fmt.Fprint(stderr, parsed.HelpText)
+		} else {
+			fmt.Fprint(stderr, tokenHelpText())
+		}
+		return 0
+	}
+	fmt.Fprintln(stderr, err)
+	fmt.Fprint(stderr, tokenHelpText())
+	return 2
+}
+
+func parseOptionalTokenExpires(value string, stderr io.Writer) (time.Time, bool) {
+	if value == "" {
+		return time.Time{}, true
+	}
+	expires, err := parseTokenExpires(value)
+	if err != nil {
+		fmt.Fprintln(stderr, err)
+		return time.Time{}, false
+	}
+	return expires, true
 }
 
 func parseTokenExpires(value string) (time.Time, error) {
@@ -92,5 +150,5 @@ func parseTokenExpires(value string) (time.Time, error) {
 }
 
 func tokenHelpText() string {
-	return yargs.GenerateSubCommandHelp(tokenHelpConfig, "token", struct{}{}, tokenFlags{}, struct{}{})
+	return yargs.GenerateSubCommandHelp(tokenHelpConfig, "token", struct{}{}, tokenCommonFlags{}, struct{}{})
 }
