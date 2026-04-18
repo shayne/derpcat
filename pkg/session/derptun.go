@@ -222,20 +222,32 @@ func serveDerptunOnce(
 }
 
 func serveDerptunMuxTarget(ctx context.Context, mux *derptun.Mux, targetAddr string, emitter *telemetry.Emitter) error {
+	slots := make(chan struct{}, quicpath.MaxIncomingStreams)
 	for {
 		overlayConn, err := mux.Accept(ctx)
 		if err != nil {
 			return err
+		}
+		select {
+		case slots <- struct{}{}:
+		default:
+			if emitter != nil {
+				emitter.Debug("derptun-stream-limit-reached")
+			}
+			_ = overlayConn.Close()
+			continue
 		}
 		backendConn, err := (&net.Dialer{}).DialContext(ctx, "tcp", targetAddr)
 		if err != nil {
 			if emitter != nil {
 				emitter.Debug("derptun-backend-dial-failed")
 			}
+			<-slots
 			_ = overlayConn.Close()
 			continue
 		}
 		go func() {
+			defer func() { <-slots }()
 			defer overlayConn.Close()
 			defer backendConn.Close()
 			_ = stream.Bridge(ctx, overlayConn, backendConn)
@@ -284,6 +296,11 @@ func bridgeDerptunStdio(ctx context.Context, conn net.Conn, in io.Reader, out io
 	if out == nil {
 		out = io.Discard
 	}
+	closeInput := func() {
+		if closer, ok := in.(io.Closer); ok {
+			_ = closer.Close()
+		}
+	}
 	inErr := make(chan error, 1)
 	outErr := make(chan error, 1)
 	go func() {
@@ -304,11 +321,13 @@ func bridgeDerptunStdio(ctx context.Context, conn net.Conn, in io.Reader, out io
 			}
 			inErr = nil
 		case err := <-outErr:
+			closeInput()
 			if err != nil && !errors.Is(err, io.EOF) && !errors.Is(err, net.ErrClosed) && !errors.Is(err, io.ErrClosedPipe) {
 				return err
 			}
 			return nil
 		case <-ctx.Done():
+			closeInput()
 			_ = conn.Close()
 			return ctx.Err()
 		}

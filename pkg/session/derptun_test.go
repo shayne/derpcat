@@ -89,6 +89,35 @@ func TestDerptunConnectBridgesStdio(t *testing.T) {
 	<-serveErr
 }
 
+func TestBridgeDerptunStdioClosesInputWhenRemoteEnds(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+
+	local, remote := net.Pipe()
+	input, inputWriter := io.Pipe()
+	defer inputWriter.Close()
+
+	done := make(chan error, 1)
+	go func() {
+		done <- bridgeDerptunStdio(ctx, local, input, io.Discard)
+	}()
+
+	if err := remote.Close(); err != nil {
+		t.Fatalf("remote Close() error = %v", err)
+	}
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("bridgeDerptunStdio() error = %v", err)
+		}
+	case <-ctx.Done():
+		t.Fatal("bridgeDerptunStdio() did not return after remote close")
+	}
+	if _, err := inputWriter.Write([]byte("still-open")); err == nil {
+		t.Fatal("input writer remained open after bridge returned")
+	}
+}
+
 func startLineEchoServer(t *testing.T) string {
 	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
