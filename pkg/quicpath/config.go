@@ -127,7 +127,7 @@ func SessionIdentityFromEd25519PrivateKey(priv ed25519.PrivateKey, now time.Time
 			CommonName: ServerName,
 		},
 		NotBefore:             now.Add(-1 * time.Minute),
-		NotAfter:              now.Add(24 * time.Hour),
+		NotAfter:              now.Add(1 * time.Hour),
 		KeyUsage:              x509.KeyUsageDigitalSignature,
 		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth, x509.ExtKeyUsageClientAuth},
 		BasicConstraintsValid: true,
