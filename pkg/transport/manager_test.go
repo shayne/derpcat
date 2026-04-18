@@ -543,6 +543,10 @@ func TestManagerFallsBackToRelayAndRetriesDiscovery(t *testing.T) {
 	if !waitForPath(t, mgr, PathDirect, 200*time.Millisecond) {
 		t.Fatalf("PathState() = %v, want %v before fallback", mgr.PathState(), PathDirect)
 	}
+	if !waitForDiscoveryIdle(t, mgr, 200*time.Millisecond) {
+		t.Fatal("manager did not finish startup discovery before fallback")
+	}
+	waitForManagerTimers(t, clock, baseTimers, 2)
 
 	callMeMaybeCount := controls.sentCount(ControlCallMeMaybe)
 	probeCount := direct.writeCountTo(peerCandidate)
