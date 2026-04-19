@@ -1343,6 +1343,215 @@ func TestManagerIgnoresAckWithoutOutstandingProbe(t *testing.T) {
 	}
 }
 
+func TestManagerSendsMACBoundDirectProbeWhenDiscoveryKeyConfigured(t *testing.T) {
+	t.Helper()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	clock := newFakeClock(time.Unix(1700000030, 0))
+	direct := newFakePacketConn(&net.IPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	direct.useClock(clock)
+	controls := newFakeControlPipe()
+	peerCandidate := &net.UDPAddr{IP: net.IPv4(100, 64, 0, 26), Port: 56789}
+	key := DiscoveryKey{1, 2, 3}
+	direct.useDiscoveryKey(key)
+	baseTimers := clock.timerCount()
+
+	mgr := NewManager(ManagerConfig{
+		DirectConn:              direct,
+		SendControl:             controls.send,
+		ReceiveControl:          controls.receive,
+		Clock:                   clock,
+		DiscoveryInterval:       1 * time.Second,
+		EndpointRefreshInterval: 2 * time.Second,
+		DirectStaleTimeout:      4 * time.Second,
+		DiscoveryKey:            key,
+	})
+
+	if err := mgr.Start(ctx); err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+	waitForManagerTimers(t, clock, baseTimers, 2)
+	if !controls.deliver(ControlMessage{
+		Type:       ControlCandidates,
+		Candidates: []string{peerCandidate.String()},
+	}, 200*time.Millisecond) {
+		t.Fatal("failed to deliver peer candidates")
+	}
+
+	if !direct.waitForWritePayloadToMatching(peerCandidate, isDirectDiscoveryMACPayload, 200*time.Millisecond) {
+		t.Fatal("manager did not send MAC-bound direct probe")
+	}
+	if direct.hasWritePayloadTo(peerCandidate, discoProbePayload) {
+		t.Fatal("manager sent legacy direct probe with discovery key configured")
+	}
+}
+
+func TestManagerPromotesDirectWithMACBoundAck(t *testing.T) {
+	t.Helper()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	clock := newFakeClock(time.Unix(1700000030, 0))
+	direct := newFakePacketConn(&net.IPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	direct.useClock(clock)
+	controls := newFakeControlPipe()
+	peerCandidate := &net.UDPAddr{IP: net.IPv4(100, 64, 0, 27), Port: 56789}
+	key := DiscoveryKey{1, 2, 3}
+	baseTimers := clock.timerCount()
+
+	mgr := NewManager(ManagerConfig{
+		DirectConn:              direct,
+		SendControl:             controls.send,
+		ReceiveControl:          controls.receive,
+		Clock:                   clock,
+		DiscoveryInterval:       1 * time.Second,
+		EndpointRefreshInterval: 2 * time.Second,
+		DirectStaleTimeout:      4 * time.Second,
+		DiscoveryKey:            key,
+	})
+
+	if err := mgr.Start(ctx); err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+	waitForManagerTimers(t, clock, baseTimers, 2)
+	if !controls.deliver(ControlMessage{
+		Type:       ControlCandidates,
+		Candidates: []string{peerCandidate.String()},
+	}, 200*time.Millisecond) {
+		t.Fatal("failed to deliver peer candidates")
+	}
+	if !direct.waitForWritePayloadToMatching(peerCandidate, isDirectDiscoveryMACPayload, 200*time.Millisecond) {
+		t.Fatal("manager did not send MAC-bound direct probe")
+	}
+	probe := direct.firstWritePayloadToMatching(peerCandidate, isDirectDiscoveryMACPayload)
+	ack, ok := directAckPayloadForProbe(key, probe)
+	if !ok {
+		t.Fatal("directAckPayloadForProbe() ok = false, want true")
+	}
+
+	direct.enqueueRead(ack, peerCandidate)
+	if !waitForPath(t, mgr, PathDirect, 200*time.Millisecond) {
+		t.Fatalf("PathState() after MAC-bound ack = %v, want %v", mgr.PathState(), PathDirect)
+	}
+}
+
+func TestManagerRejectsStaticAckWhenDiscoveryKeyConfigured(t *testing.T) {
+	t.Helper()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	clock := newFakeClock(time.Unix(1700000030, 0))
+	direct := newFakePacketConn(&net.IPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	direct.useClock(clock)
+	controls := newFakeControlPipe()
+	peerCandidate := &net.UDPAddr{IP: net.IPv4(100, 64, 0, 28), Port: 56789}
+	baseTimers := clock.timerCount()
+
+	mgr := NewManager(ManagerConfig{
+		DirectConn:              direct,
+		SendControl:             controls.send,
+		ReceiveControl:          controls.receive,
+		Clock:                   clock,
+		DiscoveryInterval:       1 * time.Second,
+		EndpointRefreshInterval: 2 * time.Second,
+		DirectStaleTimeout:      4 * time.Second,
+		DiscoveryKey:            DiscoveryKey{1, 2, 3},
+	})
+
+	if err := mgr.Start(ctx); err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+	waitForManagerTimers(t, clock, baseTimers, 2)
+	if !controls.deliver(ControlMessage{
+		Type:       ControlCandidates,
+		Candidates: []string{peerCandidate.String()},
+	}, 200*time.Millisecond) {
+		t.Fatal("failed to deliver peer candidates")
+	}
+	if !direct.waitForWritePayloadToMatching(peerCandidate, isDirectDiscoveryMACPayload, 200*time.Millisecond) {
+		t.Fatal("manager did not send MAC-bound direct probe")
+	}
+
+	direct.enqueueRead(discoAckPayload, peerCandidate)
+	if !waitForPath(t, mgr, PathUnknown, 100*time.Millisecond) {
+		t.Fatalf("PathState() after static ack = %v, want %v", mgr.PathState(), PathUnknown)
+	}
+}
+
+func TestManagerRespondsToMACBoundInboundProbe(t *testing.T) {
+	t.Helper()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	clock := newFakeClock(time.Unix(1700000031, 0))
+	direct := newFakePacketConn(&net.IPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	direct.useClock(clock)
+	peerCandidate := &net.UDPAddr{IP: net.IPv4(100, 64, 0, 29), Port: 60000}
+	key := DiscoveryKey{1, 2, 3}
+	baseTimers := clock.timerCount()
+
+	mgr := NewManager(ManagerConfig{
+		DirectConn:              direct,
+		Clock:                   clock,
+		DiscoveryInterval:       1 * time.Second,
+		EndpointRefreshInterval: 2 * time.Second,
+		DirectStaleTimeout:      4 * time.Second,
+		DiscoveryKey:            key,
+	})
+
+	if err := mgr.Start(ctx); err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+	waitForManagerTimers(t, clock, baseTimers, 2)
+
+	probe, _, err := newDirectProbePayload(key)
+	if err != nil {
+		t.Fatalf("newDirectProbePayload() error = %v", err)
+	}
+	ack, ok := directAckPayloadForProbe(key, probe)
+	if !ok {
+		t.Fatal("directAckPayloadForProbe() ok = false, want true")
+	}
+	direct.enqueueRead(probe, peerCandidate)
+	if !direct.waitForWritePayloadTo(peerCandidate, ack, 200*time.Millisecond) {
+		t.Fatal("manager did not reply to inbound MAC probe with MAC ack")
+	}
+	if direct.hasWritePayloadTo(peerCandidate, discoAckPayload) {
+		t.Fatal("manager sent legacy ack for inbound MAC probe")
+	}
+}
+
+func TestManagerHandleDirectPacketRequiresMACWhenDiscoveryKeyConfigured(t *testing.T) {
+	t.Helper()
+
+	clock := newFakeClock(time.Unix(1700000031, 0))
+	peerCandidate := &net.UDPAddr{IP: net.IPv4(100, 64, 0, 30), Port: 60000}
+	mgr := NewManager(ManagerConfig{
+		DirectConn:              newFakePacketConn(&net.IPAddr{IP: net.IPv4(127, 0, 0, 1)}),
+		Clock:                   clock,
+		DiscoveryInterval:       1 * time.Second,
+		EndpointRefreshInterval: 2 * time.Second,
+		DirectStaleTimeout:      4 * time.Second,
+		DiscoveryKey:            DiscoveryKey{1, 2, 3},
+	})
+	mgr.mu.Lock()
+	mgr.state.noteCandidates(clock.Now(), []net.Addr{peerCandidate})
+	mgr.state.noteProbeSent(clock.Now(), peerCandidate, directProbeToken{})
+	mgr.mu.Unlock()
+
+	if handled := mgr.HandleDirectPacket(nil, peerCandidate, discoAckPayload); !handled {
+		t.Fatal("HandleDirectPacket(static ack) handled = false, want true")
+	}
+	if got := mgr.PathState(); got != PathUnknown {
+		t.Fatalf("PathState() after static ack = %v, want %v", got, PathUnknown)
+	}
+}
+
 func TestManagerRespondsToInboundProbeWithAck(t *testing.T) {
 	t.Helper()
 

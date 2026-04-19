@@ -32,6 +32,7 @@ type fakePacketConn struct {
 	deadline           time.Time
 	deadlineTimer      Timer
 	clock              Clock
+	discoveryKey       DiscoveryKey
 }
 
 func newFakePacketConn(local net.Addr) *fakePacketConn {
@@ -109,10 +110,10 @@ func (c *fakePacketConn) WriteTo(b []byte, addr net.Addr) (int, error) {
 		c.signalLocked()
 		return 0, err
 	}
-	if string(payload) == string(discoProbePayload) {
+	if ack, ok := directAckPayloadForProbe(c.discoveryKey, payload); ok {
 		if responder, ok := c.responderEndpoints[addr.String()]; ok {
 			c.reads = append(c.reads, packet{
-				payload: append([]byte(nil), discoAckPayload...),
+				payload: ack,
 				addr:    cloneAddr(responder),
 			})
 		}
@@ -161,6 +162,12 @@ func (c *fakePacketConn) useClock(clock Clock) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.clock = clock
+}
+
+func (c *fakePacketConn) useDiscoveryKey(key DiscoveryKey) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.discoveryKey = key
 }
 
 func (c *fakePacketConn) enableResponder(addr net.Addr) {
@@ -287,6 +294,36 @@ func (c *fakePacketConn) waitForWritePayloadTo(addr net.Addr, payload []byte, ti
 		c.mu.Unlock()
 		return false, waitCh
 	})
+}
+
+func (c *fakePacketConn) waitForWritePayloadToMatching(addr net.Addr, match func([]byte) bool, timeout time.Duration) bool {
+	return waitForNotify(timeout, func() (bool, <-chan struct{}) {
+		c.mu.Lock()
+		for _, pkt := range c.writes {
+			if pkt.addr.String() == addr.String() && match(pkt.payload) {
+				c.mu.Unlock()
+				return true, nil
+			}
+		}
+		if c.closed {
+			c.mu.Unlock()
+			return false, nil
+		}
+		waitCh := c.notify
+		c.mu.Unlock()
+		return false, waitCh
+	})
+}
+
+func (c *fakePacketConn) firstWritePayloadToMatching(addr net.Addr, match func([]byte) bool) []byte {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for _, pkt := range c.writes {
+		if pkt.addr.String() == addr.String() && match(pkt.payload) {
+			return append([]byte(nil), pkt.payload...)
+		}
+	}
+	return nil
 }
 
 func (c *fakePacketConn) hasWritePayloadTo(addr net.Addr, payload []byte) bool {

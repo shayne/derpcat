@@ -14,11 +14,11 @@ func TestPathStateKeepsPrivateEndpointWhenPublicProbeArrivesSlightlyLater(t *tes
 	publicCandidate := &net.UDPAddr{IP: net.IPv4(203, 0, 113, 20), Port: 12345}
 	state.noteCandidates(now, []net.Addr{publicCandidate, privateCandidate})
 
-	state.noteProbeSent(now, privateCandidate)
-	state.noteProbeSent(now, publicCandidate)
+	state.noteProbeSent(now, privateCandidate, directProbeToken{})
+	state.noteProbeSent(now, publicCandidate, directProbeToken{})
 
 	privateNow := now.Add(5 * time.Millisecond)
-	if !state.consumeProbe(privateCandidate, time.Second, privateNow) {
+	if !state.consumeProbe(privateCandidate, time.Second, privateNow, directProbeToken{}) {
 		t.Fatal("consumeProbe(privateCandidate) = false, want true")
 	}
 	if !state.noteDirect(privateNow, privateCandidate) {
@@ -26,7 +26,7 @@ func TestPathStateKeepsPrivateEndpointWhenPublicProbeArrivesSlightlyLater(t *tes
 	}
 
 	publicNow := now.Add(8 * time.Millisecond)
-	if !state.consumeProbe(publicCandidate, time.Second, publicNow) {
+	if !state.consumeProbe(publicCandidate, time.Second, publicNow, directProbeToken{}) {
 		t.Fatal("consumeProbe(publicCandidate) = false, want true")
 	}
 	if changed := state.noteDirect(publicNow, publicCandidate); changed {
@@ -47,11 +47,11 @@ func TestPathStatePrefersCGNATEndpointOverPublicEndpointWhenLatencyIsClose(t *te
 	cgnatCandidate := &net.UDPAddr{IP: net.IPv4(100, 100, 10, 20), Port: 12400}
 	state.noteCandidates(now, []net.Addr{publicCandidate, cgnatCandidate})
 
-	state.noteProbeSent(now, publicCandidate)
-	state.noteProbeSent(now, cgnatCandidate)
+	state.noteProbeSent(now, publicCandidate, directProbeToken{})
+	state.noteProbeSent(now, cgnatCandidate, directProbeToken{})
 
 	publicNow := now.Add(5 * time.Millisecond)
-	if !state.consumeProbe(publicCandidate, time.Second, publicNow) {
+	if !state.consumeProbe(publicCandidate, time.Second, publicNow, directProbeToken{}) {
 		t.Fatal("consumeProbe(publicCandidate) = false, want true")
 	}
 	if !state.noteDirect(publicNow, publicCandidate) {
@@ -59,7 +59,7 @@ func TestPathStatePrefersCGNATEndpointOverPublicEndpointWhenLatencyIsClose(t *te
 	}
 
 	cgnatNow := now.Add(6 * time.Millisecond)
-	if !state.consumeProbe(cgnatCandidate, time.Second, cgnatNow) {
+	if !state.consumeProbe(cgnatCandidate, time.Second, cgnatNow, directProbeToken{}) {
 		t.Fatal("consumeProbe(cgnatCandidate) = false, want true")
 	}
 	if changed := state.noteDirect(cgnatNow, cgnatCandidate); !changed {

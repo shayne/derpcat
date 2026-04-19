@@ -45,6 +45,7 @@ type ManagerConfig struct {
 	DiscoveryInterval       time.Duration
 	EndpointRefreshInterval time.Duration
 	DirectStaleTimeout      time.Duration
+	DiscoveryKey            DiscoveryKey
 }
 
 type Manager struct {
@@ -277,9 +278,9 @@ func (m *Manager) snapshotDiscoveryPlan() discoveryPlan {
 	return plan
 }
 
-func (m *Manager) tryPromoteDirect(now time.Time, addr net.Addr) bool {
+func (m *Manager) tryPromoteDirect(now time.Time, addr net.Addr, token directProbeToken) bool {
 	m.mu.Lock()
-	if !m.state.consumeProbe(addr, m.discoveryInterval(), now) {
+	if !m.state.consumeProbe(addr, m.discoveryInterval(), now, token) {
 		m.mu.Unlock()
 		return false
 	}
@@ -331,13 +332,13 @@ func (m *Manager) noteCallMeMaybeIfCurrent(generation uint64, now time.Time) {
 	m.state.noteCallMeMaybeSuccess(now)
 }
 
-func (m *Manager) noteProbeSentIfCurrent(generation uint64, now time.Time, addr net.Addr) {
+func (m *Manager) noteProbeSentIfCurrent(generation uint64, now time.Time, addr net.Addr, token directProbeToken) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.discoveryGen != generation {
 		return
 	}
-	m.state.noteProbeSent(now, addr)
+	m.state.noteProbeSent(now, addr, token)
 }
 
 func (m *Manager) stateChanged() <-chan struct{} {

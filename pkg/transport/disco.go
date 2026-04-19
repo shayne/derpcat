@@ -1,7 +1,6 @@
 package transport
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"io"
@@ -122,8 +121,12 @@ func (m *Manager) discoveryTick(ctx context.Context, forceCandidateRefresh bool)
 		if target == nil {
 			continue
 		}
-		if _, err := m.cfg.DirectConn.WriteTo(discoProbePayload, target); err == nil {
-			m.noteProbeSentIfCurrent(plan.generation, m.now(), target)
+		payload, token, err := newDirectProbePayload(m.cfg.DiscoveryKey)
+		if err != nil {
+			continue
+		}
+		if _, err := m.cfg.DirectConn.WriteTo(payload, target); err == nil {
+			m.noteProbeSentIfCurrent(plan.generation, m.now(), target, token)
 		}
 	}
 }
@@ -224,12 +227,16 @@ func (m *Manager) handleDirectPacket(addr net.Addr, payload []byte) {
 		m.handleSTUNPacket(addr, payload)
 		return
 	}
-	if len(payload) == len(discoProbePayload) && bytes.Equal(payload, discoProbePayload) {
-		_, _ = m.cfg.DirectConn.WriteTo(discoAckPayload, addr)
+	if ack, ok := directAckPayloadForProbe(m.cfg.DiscoveryKey, payload); ok {
+		_, _ = m.cfg.DirectConn.WriteTo(ack, addr)
 		return
 	}
-	if len(payload) == len(discoAckPayload) && bytes.Equal(payload, discoAckPayload) {
-		m.tryPromoteDirect(m.now(), addr)
+	if token, ok := directAckTokenForPayload(m.cfg.DiscoveryKey, payload); ok {
+		m.tryPromoteDirect(m.now(), addr, token)
+		return
+	}
+	if isDirectDiscoveryMACPayload(payload) || !m.cfg.DiscoveryKey.IsZero() && isLegacyDirectDiscoveryPayload(payload) {
+		m.directRecvRejects.Add(1)
 		return
 	}
 	if !m.shouldAcceptDirectPayload(addr) {
@@ -248,14 +255,18 @@ func (m *Manager) HandleDirectPacket(conn net.PacketConn, addr net.Addr, payload
 		m.handleSTUNPacket(addr, payload)
 		return true
 	}
-	if len(payload) == len(discoProbePayload) && bytes.Equal(payload, discoProbePayload) {
+	if ack, ok := directAckPayloadForProbe(m.cfg.DiscoveryKey, payload); ok {
 		if conn != nil {
-			_, _ = conn.WriteTo(discoAckPayload, addr)
+			_, _ = conn.WriteTo(ack, addr)
 		}
 		return true
 	}
-	if len(payload) == len(discoAckPayload) && bytes.Equal(payload, discoAckPayload) {
-		m.tryPromoteDirect(m.now(), addr)
+	if token, ok := directAckTokenForPayload(m.cfg.DiscoveryKey, payload); ok {
+		m.tryPromoteDirect(m.now(), addr, token)
+		return true
+	}
+	if isDirectDiscoveryMACPayload(payload) || !m.cfg.DiscoveryKey.IsZero() && isLegacyDirectDiscoveryPayload(payload) {
+		m.directRecvRejects.Add(1)
 		return true
 	}
 	return false

@@ -27,7 +27,7 @@ type pathState struct {
 	lastPeerEndpointsAt time.Time
 	lastRefreshAt       time.Time
 	lastCallMeMaybeAt   time.Time
-	pendingProbes       map[string]time.Time
+	pendingProbes       map[string]pendingDirectProbe
 	upgrades            int
 	fallbacks           int
 }
@@ -38,6 +38,11 @@ type discoveryPlan struct {
 	probeTargets  []net.Addr
 	shouldAttempt bool
 	generation    uint64
+}
+
+type pendingDirectProbe struct {
+	sentAt time.Time
+	token  directProbeToken
 }
 
 var cgnatPrefix = netip.MustParsePrefix("100.64.0.0/10")
@@ -56,7 +61,7 @@ func newPathState(now time.Time, hasRelay, hasDirect bool) pathState {
 		directConfigured: hasDirect,
 		endpoints:        make(map[string]net.Addr),
 		endpointLatency:  make(map[string]time.Duration),
-		pendingProbes:    make(map[string]time.Time),
+		pendingProbes:    make(map[string]pendingDirectProbe),
 		lastRelayAt:      lastRelayAt,
 	}
 }
@@ -234,27 +239,30 @@ func (s *pathState) noteRelay(now time.Time) bool {
 	return changed
 }
 
-func (s *pathState) noteProbeSent(now time.Time, addr net.Addr) {
+func (s *pathState) noteProbeSent(now time.Time, addr net.Addr, token directProbeToken) {
 	if addr == nil {
 		return
 	}
-	s.pendingProbes[addr.String()] = now
+	s.pendingProbes[addr.String()] = pendingDirectProbe{sentAt: now, token: token}
 }
 
-func (s *pathState) consumeProbe(addr net.Addr, maxAge time.Duration, now time.Time) bool {
+func (s *pathState) consumeProbe(addr net.Addr, maxAge time.Duration, now time.Time, token directProbeToken) bool {
 	if addr == nil {
 		return false
 	}
 	key := addr.String()
-	sentAt, ok := s.pendingProbes[key]
+	pending, ok := s.pendingProbes[key]
 	if !ok {
 		return false
 	}
 	delete(s.pendingProbes, key)
-	if sentAt.Add(maxAge).Before(now) {
+	if pending.token != token {
 		return false
 	}
-	s.endpointLatency[key] = now.Sub(sentAt)
+	if pending.sentAt.Add(maxAge).Before(now) {
+		return false
+	}
+	s.endpointLatency[key] = now.Sub(pending.sentAt)
 	return true
 }
 
