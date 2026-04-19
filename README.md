@@ -8,7 +8,7 @@ It supports:
 - text, file, and directory transfer with `send` and `receive`
 - local TCP service sharing with `share` and `open`
 - SSH access exchange with `ssh invite` and `ssh accept`
-- durable TCP tunnels with the companion [`derptun`](#long-lived-tcp-tunnels) package
+- long-lived TCP tunnels with the companion [`derptun`](#long-lived-tcp-tunnels) package
 
 `derphole` uses the public Tailscale [DERP](#what-is-derp) relay network for rendezvous and relay fallback. It is **not** affiliated with Tailscale, does **not** require a Tailscale account or tailnet, and does **not** use `tailscaled` for transport.
 
@@ -31,7 +31,7 @@ Session tokens carry authorization, and receive-code flows resolve into the same
 - Use `send` and `receive` for text, files, directories, progress, and receive-code UX.
 - Use `share` and `open` for temporary access to a local TCP service.
 - Use `ssh invite` and `ssh accept` for SSH public key exchange.
-- Use [`derptun`](#long-lived-tcp-tunnels) for durable TCP tunnels with reusable, longer-lived tokens.
+- Use [`derptun`](#long-lived-tcp-tunnels) for long-lived TCP tunnels with reusable tokens.
 
 ## Quick Start
 
