@@ -513,6 +513,96 @@ func TestOfferPrefersSessionErrorOverClosedPipe(t *testing.T) {
 	}
 }
 
+func TestOfferSendCancelsWhileWaitingForReceiver(t *testing.T) {
+	prev := derpholeSessionOffer
+	t.Cleanup(func() {
+		derpholeSessionOffer = prev
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	tokenSent := make(chan struct{})
+	derpholeSessionOffer = func(ctx context.Context, cfg session.OfferConfig) (string, error) {
+		if cfg.TokenSink != nil {
+			cfg.TokenSink <- "fake-token"
+		}
+		close(tokenSent)
+		<-ctx.Done()
+		return "", ctx.Err()
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		done <- Send(ctx, SendConfig{
+			Stdin:  bytes.NewReader(bytes.Repeat([]byte("y"), 1<<20)),
+			Stderr: io.Discard,
+		})
+	}()
+
+	select {
+	case <-tokenSent:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for offer token")
+	}
+	cancel()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("Send() error = %v, want %v", err, context.Canceled)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Send() did not return after context cancellation")
+	}
+}
+
+func TestTokenSendCancelsWhileSessionWaits(t *testing.T) {
+	prev := derpholeSessionSend
+	t.Cleanup(func() {
+		derpholeSessionSend = prev
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	sendStarted := make(chan struct{})
+	derpholeSessionSend = func(ctx context.Context, _ session.SendConfig) error {
+		close(sendStarted)
+		<-ctx.Done()
+		return ctx.Err()
+	}
+
+	tok, err := token.Encode(token.Token{
+		Version:      token.SupportedVersion,
+		ExpiresUnix:  time.Now().Add(time.Hour).Unix(),
+		Capabilities: token.CapabilityStdio,
+	})
+	if err != nil {
+		t.Fatalf("token.Encode() error = %v", err)
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		done <- Send(ctx, SendConfig{
+			Token: tok,
+			Stdin: bytes.NewReader(bytes.Repeat([]byte("z"), 1<<20)),
+		})
+	}()
+
+	select {
+	case <-sendStarted:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for session send")
+	}
+	cancel()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("Send() error = %v, want %v", err, context.Canceled)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Send() did not return after context cancellation")
+	}
+}
+
 func TestSendDoesNotFinishProgressWhenSessionFailsAfterDrainingInput(t *testing.T) {
 	prev := derpholeSessionSend
 	t.Cleanup(func() {

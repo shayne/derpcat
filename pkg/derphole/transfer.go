@@ -381,8 +381,24 @@ func writeTransfer(w io.Writer, tx sendTransfer, progressOut, stderr io.Writer) 
 	return err
 }
 
+func closePipeReaderOnContext(ctx context.Context, r *io.PipeReader) func() {
+	done := make(chan struct{})
+	go func() {
+		select {
+		case <-ctx.Done():
+			_ = r.CloseWithError(ctx.Err())
+		case <-done:
+		}
+	}()
+	return func() {
+		close(done)
+	}
+}
+
 func offerTransfer(ctx context.Context, cfg SendConfig, tx sendTransfer) error {
 	pipeReader, pipeWriter := io.Pipe()
+	stopPipeCancel := closePipeReaderOnContext(ctx, pipeReader)
+	defer stopPipeCancel()
 	tokenSink := make(chan string, 1)
 	offerErrCh := make(chan error, 1)
 	go func() {
@@ -420,6 +436,8 @@ func offerTransfer(ctx context.Context, cfg SendConfig, tx sendTransfer) error {
 
 func sendViaSession(ctx context.Context, cfg SendConfig, tx sendTransfer) error {
 	pipeReader, pipeWriter := io.Pipe()
+	stopPipeCancel := closePipeReaderOnContext(ctx, pipeReader)
+	defer stopPipeCancel()
 	sendErrCh := make(chan error, 1)
 	tx.header.Verify = VerificationString(cfg.Token)
 	go func() {
