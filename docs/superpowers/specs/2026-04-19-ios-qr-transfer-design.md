@@ -10,9 +10,9 @@ The important requirement is direct transfer. The iOS app must reuse the existin
 
 The repository already has a starter SwiftUI app under `apple/Derphole`. The app currently displays placeholder content and has no Derphole integration.
 
-The CLI's structured transfer path lives in `cmd/derphole/send.go`, `cmd/derphole/receive.go`, and `pkg/derphole/transfer.go`. `derphole send` creates an offer and prints receive instructions through `WriteSendInstruction`. `pkg/derphole.Receive` already supports `token.CapabilityWebFile` tokens through `receiveViaWebRelay`.
+The CLI's structured transfer path lives in `cmd/derphole/send.go`, `cmd/derphole/receive.go`, and `pkg/derphole/transfer.go`. `derphole send` creates a `token.CapabilityStdioOffer` through `session.Offer` and prints receive instructions through `WriteSendInstruction`. `pkg/derphole.Receive` accepts that token through `session.Receive`, then reads the structured Derphole transfer header and writes text, files, or directories.
 
-The web-file receive path already has a direct transport seam. `receiveViaWebRelay` calls `webrelay.ReceiveWithOptions` and, when `ForceRelay` is false, passes `webrtcdirect.New()` as the direct transport. This mirrors the direct-preferred, relay-fallback behavior needed by the iOS app.
+The session receive path is the correct mobile seam because it is the same path used by `npx -y derphole@latest receive <token>` today. With `ForceRelay` false, `session.Receive` uses the existing direct-preferred transport manager and falls back to DERP relay when direct cannot be established. The browser web-file path and its WebRTC transport are separate from this QR-to-iPhone CLI flow.
 
 The repository has `mise` tasks for Go build/test and Apple build/test. The mobile toolchain and generated Go framework should be added to that same task surface.
 
@@ -24,15 +24,15 @@ The terminal QR dependency should be `github.com/mdp/qrterminal/v3`. It renders 
 
 iOS QR scanning should use AVFoundation. The app must include a camera usage description.
 
-iOS local network access requires a clear `NSLocalNetworkUsageDescription` when an app uses the local network directly or indirectly. Direct unicast local-host communication is covered by this privacy model. If physical-device testing shows Pion ICE needs IP multicast or broadcast on iOS, the app must also add the multicast networking entitlement path because Apple requires that entitlement for IP multicast or broadcast on iOS.
+iOS local network access requires a clear `NSLocalNetworkUsageDescription` when an app uses the local network directly or indirectly. Direct unicast local-host communication is covered by this privacy model. If physical-device testing shows Derphole's session direct path needs IP multicast or broadcast on iOS, the app must also add the multicast networking entitlement path because Apple requires that entitlement for IP multicast or broadcast on iOS.
 
 ## Goals
 
 - Add `derphole send --qr <file>` for terminal-to-iPhone file transfer.
 - Encode a versioned app payload in the QR code: `derphole://receive?v=1&token=<token>`.
 - Keep normal `derphole send` output unchanged when `--qr` is not set.
-- Reuse existing Go receive and WebRTC direct transport code inside the iOS app through native gomobile bindings.
-- Prefer WebRTC direct and fall back to relay in the same way the CLI does.
+- Reuse the existing Go receive path and session direct transport code inside the iOS app through native gomobile bindings.
+- Prefer direct and fall back to relay in the same way the CLI does.
 - Surface transfer status, progress, and final path in the app so direct success is visible.
 - Let the user export the received file through the iOS document picker after transfer.
 - Add simulator-safe payload injection for tests without changing the QR-first user flow.
@@ -55,7 +55,7 @@ The QR payload is a versioned URL:
 derphole://receive?v=1&token=<url-escaped-token>
 ```
 
-The payload format is intentionally small and self-describing. The scheme tells the app this is a Derphole receive payload. The `v=1` parameter gives the scanner a compatibility gate. The `token` parameter carries the existing Derphole token without changing token encoding or transport semantics.
+The payload format is intentionally small and self-describing. The scheme tells the app this is a Derphole receive payload. The `v=1` parameter gives the scanner a compatibility gate. The `token` parameter carries the existing `CapabilityStdioOffer` token without changing token encoding or transport semantics.
 
 A shared Go helper should encode and parse this payload. It should accept the versioned URL and, for support/test convenience, raw Derphole tokens. Invalid schemes, unsupported versions, missing tokens, and malformed URLs should fail before transfer starts.
 
@@ -84,7 +84,7 @@ The bridge should provide:
 - cancellation
 - callback hooks for status, progress, trace, completion, and failure
 
-Internally, receive must call existing Go Derphole code. The bridge should call `pkg/derphole.Receive` with `ForceRelay` false and a temp output directory. It must not set a mobile-specific relay-only mode. That preserves the same direct transport decision as the CLI because `pkg/derphole.Receive` already wires `webrtcdirect.New()` for web-file tokens when relay is not forced.
+Internally, receive must call existing Go Derphole code. The bridge should call `pkg/derphole.Receive` with `ForceRelay` false and a temp output directory. It must not set a mobile-specific relay-only mode. That preserves the same direct transport decision as the CLI because `pkg/derphole.Receive` routes `CapabilityStdioOffer` tokens into `session.Receive`, which uses the direct-preferred session transport path when relay is not forced.
 
 The bridge should not add a mobile-specific throughput cap, chunk size cap, alternate transport, or relay-only mode. If gomobile or iOS forces a platform-specific workaround, the workaround must be documented and verified against the direct-performance requirement.
 
@@ -117,7 +117,7 @@ The app must include:
 
 The local-network prompt should be triggered in context, during receive startup rather than on cold launch. The app should explain the blocked state if the user denies access, because direct transfer cannot meet the POC goal without local network access.
 
-The initial design does not assume the multicast entitlement is required. Pion ICE may be able to use unicast STUN and host candidates without multicast or broadcast. Physical-device testing decides this. If direct fails because iOS blocks multicast or broadcast behavior, add an entitlements file and the multicast networking entitlement path, then retest on device.
+The initial design does not assume the multicast entitlement is required. The current session direct path should be tested first with the normal local-network usage description. If direct fails because iOS blocks multicast or broadcast behavior, add an entitlements file and the multicast networking entitlement path, then retest on device.
 
 ## Data Flow
 
@@ -127,8 +127,8 @@ The initial design does not assume the multicast entitlement is required. Pion I
 4. iPhone scans the QR with AVFoundation.
 5. Swift validates the payload and starts the Go mobile receive bridge.
 6. Go receive claims the offer over DERP.
-7. Transfer starts over relay while WebRTC direct negotiation runs in parallel.
-8. When direct is ready, the existing webrelay path switches to direct.
+7. Transfer starts over relay while the existing session direct negotiation runs in parallel.
+8. When direct is ready, the existing session transport path switches to direct.
 9. Swift receives status/progress callbacks and shows whether the final path was direct.
 10. On completion, Swift exports the temp file through the document picker.
 
@@ -191,7 +191,7 @@ The required manual verification is:
 1. Build and install the app on an iPhone.
 2. Run `derphole send --qr <large-file>` on the Mac.
 3. Scan the terminal QR code with the iPhone.
-4. Confirm the app reports WebRTC direct connection and final path direct.
+4. Confirm the app reports direct connection and final path direct.
 5. Save the received file through the document picker.
 6. Compare the sent and received bytes.
 7. Record elapsed time and throughput for a file large enough to make relay-vs-direct meaningful.
@@ -215,8 +215,8 @@ Implementation should land in small steps:
 - `derphole send --qr <file>` displays a scannable terminal QR containing a versioned Derphole receive payload.
 - Normal `derphole send` output is unchanged without `--qr`.
 - The iOS app scans the QR, receives the file through native Go code, and exports it through iOS document UI.
-- The iOS app uses the same direct-preferred Go WebRTC path as the CLI.
-- A physical iPhone reaches direct WebRTC transfer on a network where direct is available.
+- The iOS app uses the same direct-preferred Go session path as the CLI.
+- A physical iPhone reaches direct session transfer on a network where direct is available.
 - The app visibly reports whether transfer used direct or relay fallback.
 - The saved file matches the source bytes.
 - `mise` owns mobile tool setup, framework generation, build, and test commands.
