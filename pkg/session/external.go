@@ -1250,6 +1250,7 @@ func receiveExternalNativeTCPDirect(ctx context.Context, dst io.WriteCloser, con
 
 func startExternalTransportManager(
 	ctx context.Context,
+	tok token.Token,
 	conn net.PacketConn,
 	dm *tailcfg.DERPMap,
 	derpClient *derpbind.Client,
@@ -1288,6 +1289,7 @@ func startExternalTransportManager(
 		DiscoveryInterval:       1 * time.Second,
 		EndpointRefreshInterval: 1 * time.Second,
 		DirectStaleTimeout:      10 * time.Second,
+		DiscoveryKey:            externalTransportDiscoveryKey(tok, derpClient.PublicKey(), peerDERP),
 		SendControl: func(ctx context.Context, msg transport.ControlMessage) error {
 			return sendTransportControl(ctx, derpClient, peerDERP, msg)
 		},

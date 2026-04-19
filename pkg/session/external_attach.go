@@ -210,6 +210,7 @@ func acceptExternalAttachConn(
 		transportCtx, transportCancel := context.WithCancel(ctx)
 		transportManager, transportCleanup, err := startExternalTransportManager(
 			transportCtx,
+			session.token,
 			session.probeConn,
 			session.derpMap,
 			session.derp,
@@ -368,6 +369,7 @@ func dialAttachExternal(ctx context.Context, cfg AttachDialConfig, tok token.Tok
 	transportCtx, transportCancel := context.WithCancel(ctx)
 	transportManager, transportCleanup, err := startExternalTransportManager(
 		transportCtx,
+		tok,
 		probeConn,
 		dm,
 		derpClient,

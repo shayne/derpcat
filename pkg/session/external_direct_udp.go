@@ -445,7 +445,7 @@ func sendExternalViaDirectUDP(ctx context.Context, cfg SendConfig) (retErr error
 	pathEmitter.SuppressWatcherDirect()
 	transportCtx, transportCancel := context.WithCancel(ctx)
 	defer transportCancel()
-	transportManager, transportCleanup, err := startExternalTransportManager(transportCtx, probeConn, dm, derpClient, listenerDERP, parseCandidateStrings(localCandidates), pm, cfg.ForceRelay)
+	transportManager, transportCleanup, err := startExternalTransportManager(transportCtx, tok, probeConn, dm, derpClient, listenerDERP, parseCandidateStrings(localCandidates), pm, cfg.ForceRelay)
 	if err != nil {
 		return err
 	}
@@ -983,7 +983,7 @@ func listenExternalViaDirectUDP(ctx context.Context, cfg ListenConfig) (retTok s
 
 		transportCtx, transportCancel := context.WithCancel(ctx)
 		defer transportCancel()
-		transportManager, transportCleanup, err := startExternalTransportManager(transportCtx, probeConn, session.derpMap, session.derp, peerDERP, localCandidates, pm, cfg.ForceRelay)
+		transportManager, transportCleanup, err := startExternalTransportManager(transportCtx, session.token, probeConn, session.derpMap, session.derp, peerDERP, localCandidates, pm, cfg.ForceRelay)
 		if err != nil {
 			return tok, err
 		}

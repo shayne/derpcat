@@ -473,6 +473,7 @@ func handleDerptunServeClaim(
 	transportCtx, transportCancel := context.WithCancel(ctx)
 	transportManager, transportCleanup, err := startExternalTransportManager(
 		transportCtx,
+		claimToken,
 		probeConn,
 		dm,
 		derpClient,
@@ -771,6 +772,7 @@ func dialDerptunMux(ctx context.Context, clientToken string, emitter *telemetry.
 	transportCtx, transportCancel := context.WithCancel(ctx)
 	transportManager, transportCleanup, err := startExternalTransportManager(
 		transportCtx,
+		tok,
 		probeConn,
 		dm,
 		derpClient,

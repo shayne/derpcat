@@ -135,7 +135,7 @@ func offerExternal(ctx context.Context, cfg OfferConfig) (retTok string, retErr 
 
 		transportCtx, transportCancel := context.WithCancel(ctx)
 		defer transportCancel()
-		transportManager, transportCleanup, err := startExternalTransportManager(transportCtx, probeConn, session.derpMap, session.derp, peerDERP, localCandidates, pm, cfg.ForceRelay)
+		transportManager, transportCleanup, err := startExternalTransportManager(transportCtx, session.token, probeConn, session.derpMap, session.derp, peerDERP, localCandidates, pm, cfg.ForceRelay)
 		if err != nil {
 			return tok, err
 		}
@@ -346,7 +346,7 @@ func receiveExternal(ctx context.Context, cfg ReceiveConfig) (retErr error) {
 
 	transportCtx, transportCancel := context.WithCancel(ctx)
 	defer transportCancel()
-	transportManager, transportCleanup, err := startExternalTransportManager(transportCtx, probeConn, dm, derpClient, listenerDERP, parseCandidateStrings(localCandidates), pm, cfg.ForceRelay)
+	transportManager, transportCleanup, err := startExternalTransportManager(transportCtx, tok, probeConn, dm, derpClient, listenerDERP, parseCandidateStrings(localCandidates), pm, cfg.ForceRelay)
 	if err != nil {
 		return err
 	}

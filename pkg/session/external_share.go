@@ -76,7 +76,7 @@ func shareExternal(ctx context.Context, cfg ShareConfig) (string, error) {
 		}
 		pathEmitter.Emit(StateClaimed)
 		transportCtx, transportCancel := context.WithCancel(ctx)
-		transportManager, transportCleanup, err := startExternalTransportManager(transportCtx, session.probeConn, session.derpMap, session.derp, peerDERP, localCandidates, publicSessionPortmap(session), cfg.ForceRelay)
+		transportManager, transportCleanup, err := startExternalTransportManager(transportCtx, session.token, session.probeConn, session.derpMap, session.derp, peerDERP, localCandidates, publicSessionPortmap(session), cfg.ForceRelay)
 		if err != nil {
 			transportCancel()
 			return tok, err
@@ -168,7 +168,7 @@ func openExternal(ctx context.Context, cfg OpenConfig, tok token.Token) error {
 	pathEmitter.Emit(StateProbing)
 	transportCtx, transportCancel := context.WithCancel(ctx)
 	defer transportCancel()
-	transportManager, transportCleanup, err := startExternalTransportManager(transportCtx, probeConn, dm, derpClient, listenerDERP, parseCandidateStrings(localCandidates), pm, cfg.ForceRelay)
+	transportManager, transportCleanup, err := startExternalTransportManager(transportCtx, tok, probeConn, dm, derpClient, listenerDERP, parseCandidateStrings(localCandidates), pm, cfg.ForceRelay)
 	if err != nil {
 		return err
 	}

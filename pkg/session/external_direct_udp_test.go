@@ -61,6 +61,53 @@ func TestExternalDirectUDPWaitCoversPunchHandshakeWindow(t *testing.T) {
 	}
 }
 
+func TestExternalTransportDiscoveryKeyIsSymmetricForSessionPeers(t *testing.T) {
+	tok := token.Token{
+		SessionID:    [16]byte{1, 2, 3},
+		BearerSecret: [32]byte{4, 5, 6},
+	}
+	first := key.NewNode().Public()
+	second := key.NewNode().Public()
+
+	forward := externalTransportDiscoveryKey(tok, first, second)
+	reverse := externalTransportDiscoveryKey(tok, second, first)
+	if forward != reverse {
+		t.Fatalf("forward key = %x, reverse key = %x", forward, reverse)
+	}
+	if forward.IsZero() {
+		t.Fatal("derived discovery key is zero")
+	}
+}
+
+func TestExternalTransportDiscoveryKeyChangesWithBearerSecret(t *testing.T) {
+	tok := token.Token{
+		SessionID:    [16]byte{1, 2, 3},
+		BearerSecret: [32]byte{4, 5, 6},
+	}
+	changed := tok
+	changed.BearerSecret = [32]byte{6, 5, 4}
+	first := key.NewNode().Public()
+	second := key.NewNode().Public()
+
+	if externalTransportDiscoveryKey(tok, first, second) == externalTransportDiscoveryKey(changed, first, second) {
+		t.Fatal("discovery key did not change after bearer secret changed")
+	}
+}
+
+func TestExternalTransportDiscoveryKeyChangesWithPeerIdentity(t *testing.T) {
+	tok := token.Token{
+		SessionID:    [16]byte{1, 2, 3},
+		BearerSecret: [32]byte{4, 5, 6},
+	}
+	local := key.NewNode().Public()
+	firstPeer := key.NewNode().Public()
+	secondPeer := key.NewNode().Public()
+
+	if externalTransportDiscoveryKey(tok, local, firstPeer) == externalTransportDiscoveryKey(tok, local, secondPeer) {
+		t.Fatal("discovery key did not change after peer identity changed")
+	}
+}
+
 func writeExternalDirectUDPProbePacket(t *testing.T, conn net.PacketConn, dst net.Addr, packet probe.Packet) {
 	t.Helper()
 	wire, err := probe.MarshalPacket(packet, nil)

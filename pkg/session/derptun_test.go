@@ -19,6 +19,7 @@ import (
 	"github.com/shayne/derphole/pkg/rendezvous"
 	"github.com/shayne/derphole/pkg/telemetry"
 	"github.com/shayne/derphole/pkg/token"
+	"go4.org/mem"
 	"tailscale.com/types/key"
 )
 
@@ -328,6 +329,39 @@ func TestDerptunServerTokenForClaimRejectsExpiredServerCredential(t *testing.T) 
 	}
 	if reject.Reject == nil || reject.Reject.Code != rendezvous.RejectExpired {
 		t.Fatalf("Reject = %+v, want %q", reject.Reject, rendezvous.RejectExpired)
+	}
+}
+
+func TestDerptunServerAndClientDeriveSameTransportDiscoveryKey(t *testing.T) {
+	now := time.Now()
+	serverToken, clientToken := derptunServerAndClientTokens(t)
+	serverCred, err := derptun.DecodeServerToken(serverToken, now)
+	if err != nil {
+		t.Fatalf("DecodeServerToken() error = %v", err)
+	}
+	clientCred, err := derptun.DecodeClientToken(clientToken, now)
+	if err != nil {
+		t.Fatalf("DecodeClientToken() error = %v", err)
+	}
+	claim := derptunClaimForClient(t, clientCred, 97)
+	serverTok, reject, err := derptunServerTokenForClaim(serverCred, claim, now)
+	if err != nil {
+		t.Fatalf("derptunServerTokenForClaim() error = %v reject=%+v", err, reject)
+	}
+	clientTok, err := clientCred.SessionToken()
+	if err != nil {
+		t.Fatalf("SessionToken() error = %v", err)
+	}
+	serverDERP, err := serverCred.DERPKey()
+	if err != nil {
+		t.Fatalf("DERPKey() error = %v", err)
+	}
+	clientDERP := key.NodePublicFromRaw32(mem.B(claim.DERPPublic[:]))
+
+	serverKey := externalTransportDiscoveryKey(serverTok, serverDERP.Public(), clientDERP)
+	clientKey := externalTransportDiscoveryKey(clientTok, clientDERP, serverDERP.Public())
+	if serverKey != clientKey {
+		t.Fatalf("server key = %x, client key = %x", serverKey, clientKey)
 	}
 }
 
