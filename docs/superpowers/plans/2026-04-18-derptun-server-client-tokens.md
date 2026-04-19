@@ -2,6 +2,8 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
+> **Execution status:** Completed on `main` across `8c75cd1`, `dcb7fef`, `36d5150`, `a160857`, `eac4744`, `f73d8ea`, and `281591e`. The final token defaults were later updated to 180 days for server tokens and 90 days for client tokens.
+
 **Goal:** Replace the current all-in-one `derptun` token with breaking-change server and client token roles so only the server token can serve or mint client tokens.
 
 **Architecture:** `dts1_` server tokens carry durable private server identity and a signing secret. `dtc1_` client tokens carry only client access material, server public identity, expiry, and a server-signed proof that the server can verify during rendezvous. `derptun serve` accepts only server tokens, while `derptun open` and `derptun connect` accept only client tokens.
@@ -121,7 +123,7 @@ Without that future state file, V1 can expire individual client tokens and can r
 - Modify: `pkg/derptun/token.go`
 - Modify: `pkg/derptun/token_test.go`
 
-- [ ] **Step 1: Replace token tests with role-specific failing tests**
+- [x] **Step 1: Replace token tests with role-specific failing tests**
 
 Replace `pkg/derptun/token_test.go` with:
 
@@ -282,13 +284,13 @@ func decodeTokenPayload(t *testing.T, prefix, encoded string) map[string]any {
 }
 ```
 
-- [ ] **Step 2: Run token tests and verify they fail**
+- [x] **Step 2: Run token tests and verify they fail**
 
 Run: `go test ./pkg/derptun -run 'TestGenerateServerToken|TestGenerateClientToken|TestClientToken|TestDecodeRejectsWrongTokenRole|TestServerAndClientSessionTokens' -count=1`
 
 Expected: FAIL with undefined identifiers such as `GenerateServerToken`, `ServerTokenOptions`, and `ClientTokenPrefix`.
 
-- [ ] **Step 3: Implement server/client token types**
+- [x] **Step 3: Implement server/client token types**
 
 Replace `pkg/derptun/token.go` with a role split based on this structure:
 
@@ -615,13 +617,13 @@ func VerifyClientCredential(secret [32]byte, client ClientCredential, now time.T
 }
 ```
 
-- [ ] **Step 4: Run token tests**
+- [x] **Step 4: Run token tests**
 
 Run: `go test ./pkg/derptun -count=1`
 
 Expected: PASS.
 
-- [ ] **Step 5: Commit token split**
+- [x] **Step 5: Commit token split**
 
 ```bash
 git add pkg/derptun/token.go pkg/derptun/token_test.go
@@ -634,7 +636,7 @@ git commit -m "feat: split derptun server and client tokens"
 - Modify: `pkg/rendezvous/messages.go`
 - Modify: `pkg/rendezvous/rendezvous_test.go`
 
-- [ ] **Step 1: Write failing claim serialization test**
+- [x] **Step 1: Write failing claim serialization test**
 
 Add this test to `pkg/rendezvous/rendezvous_test.go`:
 
@@ -685,13 +687,13 @@ func TestClaimSerializesClientProof(t *testing.T) {
 }
 ```
 
-- [ ] **Step 2: Run rendezvous test and verify it fails**
+- [x] **Step 2: Run rendezvous test and verify it fails**
 
 Run: `go test ./pkg/rendezvous -run TestClaimSerializesClientProof -count=1`
 
 Expected: FAIL with `undefined: ClientProof` or `Claim has no field or method Client`.
 
-- [ ] **Step 3: Add optional claim proof fields**
+- [x] **Step 3: Add optional claim proof fields**
 
 In `pkg/rendezvous/messages.go`, add this type and field to `Claim`:
 
@@ -719,13 +721,13 @@ type Claim struct {
 
 Keep `Client` optional. Do not change `validateClaimForToken` in `pkg/rendezvous/state.go`; non-derptun flows must continue to ignore absent or present optional proof fields.
 
-- [ ] **Step 4: Run rendezvous tests**
+- [x] **Step 4: Run rendezvous tests**
 
 Run: `go test ./pkg/rendezvous -count=1`
 
 Expected: PASS.
 
-- [ ] **Step 5: Commit claim proof**
+- [x] **Step 5: Commit claim proof**
 
 ```bash
 git add pkg/rendezvous/messages.go pkg/rendezvous/rendezvous_test.go
@@ -738,7 +740,7 @@ git commit -m "feat: carry derptun client proof in claims"
 - Modify: `pkg/session/derptun.go`
 - Modify: `pkg/session/derptun_test.go`
 
-- [ ] **Step 1: Update session tests for role-specific tokens**
+- [x] **Step 1: Update session tests for role-specific tokens**
 
 At the top of `pkg/session/derptun_test.go`, add this helper:
 
@@ -820,13 +822,13 @@ func TestDerptunRejectsWrongTokenRoles(t *testing.T) {
 }
 ```
 
-- [ ] **Step 2: Run derptun session tests and verify they fail**
+- [x] **Step 2: Run derptun session tests and verify they fail**
 
 Run: `go test ./pkg/session -run 'TestDerptun' -count=1`
 
 Expected: FAIL with unknown config fields `ServerToken` and `ClientToken`.
 
-- [ ] **Step 3: Rename session config fields**
+- [x] **Step 3: Rename session config fields**
 
 In `pkg/session/derptun.go`, replace config structs with:
 
@@ -870,7 +872,7 @@ func decodeDerptunClient(raw string) (derptun.ClientCredential, error) {
 }
 ```
 
-- [ ] **Step 4: Decode server in `DerptunServe`**
+- [x] **Step 4: Decode server in `DerptunServe`**
 
 In `DerptunServe`, replace:
 
@@ -886,7 +888,7 @@ cred, err := decodeDerptunServer(cfg.ServerToken)
 
 Keep the existing `SessionToken`, `DERPKey`, and `QUICPrivateKey` flow, now called on `derptun.ServerCredential`.
 
-- [ ] **Step 5: Decode client in dial path and attach proof**
+- [x] **Step 5: Decode client in dial path and attach proof**
 
 Change `dialDerptunMux` signature:
 
@@ -942,7 +944,7 @@ claim := rendezvous.Claim{
 
 Update `DerptunOpen` and `DerptunConnect` to pass `cfg.ClientToken` to `dialDerptunMux`.
 
-- [ ] **Step 6: Verify client proof before accepting a claim**
+- [x] **Step 6: Verify client proof before accepting a claim**
 
 Add this import to `pkg/session/derptun.go`:
 
@@ -1051,13 +1053,13 @@ func sameDerptunConnector(a, b rendezvous.Claim) bool {
 
 Use `*derptunClientGate` in `serveDerptunClaims` and `handleDerptunServeClaim` in place of `*rendezvous.DurableGate`.
 
-- [ ] **Step 7: Run focused session tests**
+- [x] **Step 7: Run focused session tests**
 
 Run: `go test ./pkg/session -run 'TestDerptun' -count=1`
 
 Expected: PASS.
 
-- [ ] **Step 8: Commit session split**
+- [x] **Step 8: Commit session split**
 
 ```bash
 git add pkg/session/derptun.go pkg/session/derptun_test.go pkg/derptun/token.go
@@ -1076,7 +1078,7 @@ git commit -m "feat: enforce derptun token roles in sessions"
 - Modify: `cmd/derptun/token_test.go`
 - Modify: `cmd/derptun/command_test.go`
 
-- [ ] **Step 1: Update CLI command tests**
+- [x] **Step 1: Update CLI command tests**
 
 Replace `cmd/derptun/token_test.go` with:
 
@@ -1187,13 +1189,13 @@ func TestRunConnectRequiresStdio(t *testing.T) {
 }
 ```
 
-- [ ] **Step 2: Run CLI tests and verify they fail**
+- [x] **Step 2: Run CLI tests and verify they fail**
 
 Run: `go test ./cmd/derptun -count=1`
 
 Expected: FAIL because `token` has no role subcommands and command configs do not yet expose role-specific session fields.
 
-- [ ] **Step 3: Update root help**
+- [x] **Step 3: Update root help**
 
 In `cmd/derptun/root.go`, replace examples and descriptions:
 
@@ -1216,7 +1218,7 @@ Update subcommand descriptions:
 "connect": {Info: yargs.SubCommandInfo{Name: "connect", Description: "Connect one client tunnel stream over stdin/stdout."}},
 ```
 
-- [ ] **Step 4: Implement token role parsing**
+- [x] **Step 4: Implement token role parsing**
 
 Replace `cmd/derptun/token.go` with:
 
@@ -1377,7 +1379,7 @@ func tokenHelpText() string {
 }
 ```
 
-- [ ] **Step 5: Keep serve/open/connect `--token` flags and wire role-specific configs**
+- [x] **Step 5: Keep serve/open/connect `--token` flags and wire role-specific configs**
 
 In `cmd/derptun/serve.go`, change:
 
@@ -1419,19 +1421,19 @@ Change config construction to:
 ClientToken: parsed.SubCommandFlags.Token,
 ```
 
-- [ ] **Step 6: Run CLI tests**
+- [x] **Step 6: Run CLI tests**
 
 Run: `go test ./cmd/derptun -count=1`
 
 Expected: PASS.
 
-- [ ] **Step 7: Build CLI**
+- [x] **Step 7: Build CLI**
 
 Run: `mise run build`
 
 Expected: PASS and creates `dist/derphole` plus `dist/derptun`.
 
-- [ ] **Step 8: Commit CLI split**
+- [x] **Step 8: Commit CLI split**
 
 ```bash
 git add cmd/derptun
@@ -1446,7 +1448,7 @@ git commit -m "feat: update derptun cli token roles"
 
 Do this after the token, session, and CLI implementation tasks so the README examples match the final working commands.
 
-- [ ] **Step 1: Update remote smoke script token workflow**
+- [x] **Step 1: Update remote smoke script token workflow**
 
 In `scripts/smoke-remote-derptun.sh`, replace all-in-one token generation:
 
@@ -1492,13 +1494,13 @@ Replace every local client-side token read in the script, including `connect`, a
 --token "$(cat "$client_token_file")"
 ```
 
-- [ ] **Step 2: Run smoke script shell syntax check**
+- [x] **Step 2: Run smoke script shell syntax check**
 
 Run: `bash -n scripts/smoke-remote-derptun.sh`
 
 Expected: PASS with no output.
 
-- [ ] **Step 3: Update README derptun section**
+- [x] **Step 3: Update README derptun section**
 
 Use the `caveman` skill for tight README prose before editing. Replace the current `derptun` examples with:
 
@@ -1542,13 +1544,13 @@ Update the security section sentence to:
 `derphole` session tokens expire after one hour. `derptun` server tokens default to seven days and can mint shorter-lived client tokens; only server tokens can serve.
 ```
 
-- [ ] **Step 4: Run docs-related checks**
+- [x] **Step 4: Run docs-related checks**
 
 Run: `rg -n 'dt1_|derptun token --days|server-token|client-token|client-name' README.md cmd/derptun scripts/smoke-remote-derptun.sh`
 
 Expected: No matches except references in tests that intentionally verify legacy rejection. If any non-test match remains, update it to the V1 `--token` workflow.
 
-- [ ] **Step 5: Commit docs and smoke update**
+- [x] **Step 5: Commit docs and smoke update**
 
 ```bash
 git add README.md scripts/smoke-remote-derptun.sh
@@ -1560,31 +1562,31 @@ git commit -m "docs: document derptun token roles"
 **Files:**
 - Verify all modified files.
 
-- [ ] **Step 1: Run focused package tests**
+- [x] **Step 1: Run focused package tests**
 
 Run: `go test ./pkg/derptun ./pkg/rendezvous ./pkg/session ./cmd/derptun -count=1`
 
 Expected: PASS.
 
-- [ ] **Step 2: Run full test suite through mise**
+- [x] **Step 2: Run full test suite through mise**
 
 Run: `mise run test`
 
 Expected: PASS.
 
-- [ ] **Step 3: Run vet**
+- [x] **Step 3: Run vet**
 
 Run: `mise run vet`
 
 Expected: PASS.
 
-- [ ] **Step 4: Run build**
+- [x] **Step 4: Run build**
 
 Run: `mise run build`
 
 Expected: PASS and `dist/derptun` exists.
 
-- [ ] **Step 5: Run command smoke locally**
+- [x] **Step 5: Run command smoke locally**
 
 Run:
 
@@ -1597,7 +1599,7 @@ test "${client_token#dtc1_}" != "$client_token"
 
 Expected: PASS with no output.
 
-- [ ] **Step 6: Review public help text**
+- [x] **Step 6: Review public help text**
 
 Run: `./dist/derptun --help`
 
@@ -1615,7 +1617,7 @@ Run: `./dist/derptun connect --help`
 
 Expected: Usage includes `--token`.
 
-- [ ] **Step 7: Run required live validation against `ktzlxc`**
+- [x] **Step 7: Run required live validation against `ktzlxc`**
 
 This live validation is required before the implementation can be considered complete. The machine is accessible with `ssh root@ktzlxc`.
 
@@ -1635,7 +1637,7 @@ REMOTE_HOST=ktzlxc mise run smoke-remote-derptun
 
 Expected: PASS. This matches the existing smoke task convention: `REMOTE_HOST` is the host name, and `DERPHOLE_REMOTE_USER` defaults to `root`. The test must exercise the new `derptun token server`, `derptun token client --token ...`, `derptun serve --token ...`, `derptun connect --token ...`, and `derptun open --token ...` workflow against `ktzlxc`.
 
-- [ ] **Step 8: Final repository check**
+- [x] **Step 8: Final repository check**
 
 Run: `git status --short`
 

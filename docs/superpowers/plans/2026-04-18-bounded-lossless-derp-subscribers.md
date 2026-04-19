@@ -2,6 +2,8 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
+> **Execution status:** Completed on `main` in commit `9f99178` (`derpbind: bound lossless subscriber queues`).
+
 **Goal:** Bound `SubscribeLossless` memory while preserving ordered, non-dropping delivery for control frames.
 
 **Architecture:** Keep the public API unchanged: `SubscribeLossless(func(Packet) bool) (<-chan Packet, func())`. Lossless subscribers get a hard backlog cap and apply backpressure when full; they never drop matching packets. Lossy `Subscribe` keeps drop-oldest behavior.
@@ -48,7 +50,7 @@ Effective per-subscriber retention is bounded by `losslessSubscriberQueueSize + 
 **Files:**
 - Modify: `pkg/derpbind/derpbind_test.go`
 
-- [ ] **Step 1: Add `TestClientSubscribeLosslessBlocksWhenQueueFull`**
+- [x] **Step 1: Add `TestClientSubscribeLosslessBlocksWhenQueueFull`**
 
 Append this test near the existing lossless subscriber tests:
 
@@ -97,7 +99,7 @@ func TestClientSubscribeLosslessBlocksWhenQueueFull(t *testing.T) {
 }
 ```
 
-- [ ] **Step 2: Add `TestClientSubscribeLosslessUnsubscribeReleasesBlockedDispatch`**
+- [x] **Step 2: Add `TestClientSubscribeLosslessUnsubscribeReleasesBlockedDispatch`**
 
 Append this test:
 
@@ -144,7 +146,7 @@ func TestClientSubscribeLosslessUnsubscribeReleasesBlockedDispatch(t *testing.T)
 }
 ```
 
-- [ ] **Step 3: Replace the current backed-up subscriber test**
+- [x] **Step 3: Replace the current backed-up subscriber test**
 
 Rename `TestClientSubscribeLosslessDoesNotBlockDispatchWhenConsumerBacksUp` to `TestClientSubscribeLosslessDoesNotBlockBeforeHardLimit` and change its `total` to:
 
@@ -154,7 +156,7 @@ const total = losslessSubscriberQueueSize
 
 Keep its assertion that dispatch completes quickly and packets drain in order.
 
-- [ ] **Step 4: Run red tests**
+- [x] **Step 4: Run red tests**
 
 Run:
 
@@ -169,7 +171,7 @@ Expected: FAIL. `TestClientSubscribeLosslessBlocksWhenQueueFull` should report t
 **Files:**
 - Modify: `pkg/derpbind/client.go`
 
-- [ ] **Step 1: Add a slot semaphore field**
+- [x] **Step 1: Add a slot semaphore field**
 
 Update `packetSubscriber`:
 
@@ -191,7 +193,7 @@ type packetSubscriber struct {
 }
 ```
 
-- [ ] **Step 2: Initialize the semaphore**
+- [x] **Step 2: Initialize the semaphore**
 
 Inside `subscribe`, in the `subscriberLossless` branch:
 
@@ -204,7 +206,7 @@ if mode == subscriberLossless {
 }
 ```
 
-- [ ] **Step 3: Acquire a slot before append**
+- [x] **Step 3: Acquire a slot before append**
 
 Replace `packetSubscriber.enqueue` with:
 
@@ -243,7 +245,7 @@ func (s *packetSubscriber) enqueue(stopCh <-chan struct{}, pkt Packet) bool {
 }
 ```
 
-- [ ] **Step 4: Clear shifted packet references**
+- [x] **Step 4: Clear shifted packet references**
 
 In `nextQueuedPacket`, replace the pop block with:
 
@@ -258,7 +260,7 @@ if len(s.queue) > 0 {
 }
 ```
 
-- [ ] **Step 5: Release slots in the runner**
+- [x] **Step 5: Release slots in the runner**
 
 Replace `packetSubscriber.run` with:
 
@@ -289,7 +291,7 @@ func (s *packetSubscriber) run(stopCh <-chan struct{}) {
 }
 ```
 
-- [ ] **Step 6: Run green tests**
+- [x] **Step 6: Run green tests**
 
 Run:
 
@@ -306,7 +308,7 @@ Expected: PASS.
 - Test: `pkg/session/...`
 - Test: `pkg/derphole/webrelay/...`
 
-- [ ] **Step 1: Run DERP package tests**
+- [x] **Step 1: Run DERP package tests**
 
 Run:
 
@@ -316,7 +318,7 @@ go test ./pkg/derpbind -count=1
 
 Expected: PASS.
 
-- [ ] **Step 2: Run key lossless call-site tests**
+- [x] **Step 2: Run key lossless call-site tests**
 
 Run:
 
@@ -326,7 +328,7 @@ go test ./pkg/session ./pkg/derphole/webrelay -count=1
 
 Expected: PASS.
 
-- [ ] **Step 3: Run full suite**
+- [x] **Step 3: Run full suite**
 
 Run:
 
@@ -344,7 +346,7 @@ If relay or transport tests expose throughput stalls, keep the lossless cap beha
 - Modify: `pkg/derpbind/client.go`
 - Modify: `pkg/derpbind/derpbind_test.go`
 
-- [ ] **Step 1: Run vet**
+- [x] **Step 1: Run vet**
 
 Run:
 
@@ -354,7 +356,7 @@ mise run vet
 
 Expected: PASS.
 
-- [ ] **Step 2: Run local smoke**
+- [x] **Step 2: Run local smoke**
 
 Run:
 
@@ -364,7 +366,7 @@ mise run smoke-local
 
 Expected: PASS.
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 Run:
 

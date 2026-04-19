@@ -2,6 +2,8 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
+> **Execution status:** Completed on `main` in commits `41f3e57` (`transport: authenticate direct udp discovery probes`), `4938463` (`session: bind transport discovery to bearer secret`), and `0a805b7` (`test: stabilize mac-bound discovery promotion`).
+
 **Goal:** Authenticate direct UDP promotion probes so the shared transport manager only promotes to direct after receiving a session-bound proof from the expected peer path.
 
 **Architecture:** Keep the existing transport manager state machine, DERP control messages, STUN handling, and direct UDP data plane intact. Replace transport promotion payloads in `pkg/transport/disco.go` with optional MAC-bound probe/ack packets derived from the session bearer secret. Production session call sites always set the key; zero-key transport unit tests can keep legacy static probes until migrated.
@@ -46,7 +48,7 @@
 - Create: `pkg/transport/disco_mac.go`
 - Create: `pkg/transport/disco_mac_test.go`
 
-- [ ] **Step 1: Write failing packet tests**
+- [x] **Step 1: Write failing packet tests**
 
 Create `pkg/transport/disco_mac_test.go`:
 
@@ -120,7 +122,7 @@ func TestDiscoveryMACUsesLegacyStaticPacketsWhenKeyMissing(t *testing.T) {
 }
 ```
 
-- [ ] **Step 2: Run red packet tests**
+- [x] **Step 2: Run red packet tests**
 
 Run:
 
@@ -130,7 +132,7 @@ go test ./pkg/transport -run 'TestDiscoveryMAC' -count=1
 
 Expected: FAIL because helpers do not exist.
 
-- [ ] **Step 3: Implement helper API**
+- [x] **Step 3: Implement helper API**
 
 Create `pkg/transport/disco_mac.go`:
 
@@ -240,7 +242,7 @@ func decodeDiscoveryMAC(key DiscoveryKey, payload []byte, kind byte) ([16]byte, 
 }
 ```
 
-- [ ] **Step 4: Run packet tests green**
+- [x] **Step 4: Run packet tests green**
 
 Run:
 
@@ -259,7 +261,7 @@ Expected: PASS.
 - Modify: `pkg/transport/fake_test.go`
 - Modify: `pkg/transport/manager_test.go`
 
-- [ ] **Step 1: Add failing manager tests**
+- [x] **Step 1: Add failing manager tests**
 
 Add tests in `pkg/transport/manager_test.go`:
 
@@ -278,7 +280,7 @@ Use an existing fake direct connection test helper. Set `ManagerConfig.Discovery
 - MAC ack from `directAckPayloadForProbe(key, probePayload)` promotes direct
 - inbound MAC probe gets a MAC ack, not the static ack
 
-- [ ] **Step 2: Run red manager tests**
+- [x] **Step 2: Run red manager tests**
 
 Run:
 
@@ -288,7 +290,7 @@ go test ./pkg/transport -run 'TestManager.*MAC|TestManagerRejectsStaticAckWhenDi
 
 Expected: FAIL because `ManagerConfig.DiscoveryKey` and MAC promotion are not wired.
 
-- [ ] **Step 3: Add config and pending token storage**
+- [x] **Step 3: Add config and pending token storage**
 
 Change `ManagerConfig` in `pkg/transport/manager.go`:
 
@@ -322,7 +324,7 @@ func (m *Manager) tryPromoteDirect(now time.Time, addr net.Addr, token directPro
 
 `consumeProbe` must compare token equality, not just address and age.
 
-- [ ] **Step 4: Wire `disco.go`**
+- [x] **Step 4: Wire `disco.go`**
 
 In `discoveryTick`, generate one fresh probe per target:
 
@@ -355,7 +357,7 @@ if isDirectDiscoveryMACPayload(payload) {
 
 Mirror that behavior in `HandleDirectPacket`.
 
-- [ ] **Step 5: Update fake responder**
+- [x] **Step 5: Update fake responder**
 
 In `pkg/transport/fake_test.go`, add:
 
@@ -373,7 +375,7 @@ if ack, ok := directAckPayloadForProbe(c.discoveryKey, payload); ok {
 }
 ```
 
-- [ ] **Step 6: Run transport tests green**
+- [x] **Step 6: Run transport tests green**
 
 Run:
 
@@ -389,7 +391,7 @@ Expected: PASS.
 - Create: `pkg/session/external_transport_security.go`
 - Modify: `pkg/session/external_direct_udp_test.go`
 
-- [ ] **Step 1: Add failing key tests**
+- [x] **Step 1: Add failing key tests**
 
 Add tests in `pkg/session/external_direct_udp_test.go`:
 
@@ -401,7 +403,7 @@ func TestExternalTransportDiscoveryKeyChangesWithPeerIdentity(t *testing.T)
 
 Each test should build a `token.Token` with a fixed `SessionID` and `BearerSecret`, two `key.NodePublic` values, and compare `externalTransportDiscoveryKey` outputs.
 
-- [ ] **Step 2: Run red key tests**
+- [x] **Step 2: Run red key tests**
 
 Run:
 
@@ -411,7 +413,7 @@ go test ./pkg/session -run 'TestExternalTransportDiscoveryKey' -count=1
 
 Expected: FAIL because helper does not exist.
 
-- [ ] **Step 3: Add key derivation helper**
+- [x] **Step 3: Add key derivation helper**
 
 Create `pkg/session/external_transport_security.go`:
 
@@ -448,7 +450,7 @@ func externalTransportDiscoveryKey(tok token.Token, localDERP, peerDERP key.Node
 }
 ```
 
-- [ ] **Step 4: Run key tests green**
+- [x] **Step 4: Run key tests green**
 
 Run:
 
@@ -468,7 +470,7 @@ Expected: PASS.
 - Modify: `pkg/session/external_offer.go`
 - Modify: `pkg/session/derptun.go`
 
-- [ ] **Step 1: Change helper signature**
+- [x] **Step 1: Change helper signature**
 
 Change `startExternalTransportManager` from:
 
@@ -488,13 +490,13 @@ Set:
 DiscoveryKey: externalTransportDiscoveryKey(tok, derpClient.PublicKey(), peerDERP),
 ```
 
-- [ ] **Step 2: Update every call site**
+- [x] **Step 2: Update every call site**
 
 Pass `tok` in normal session sender/client paths.
 
 Pass `claimToken` in `handleDerptunServeClaim`, because that token has the client-specific bearer secret after proof validation.
 
-- [ ] **Step 3: Compile session package**
+- [x] **Step 3: Compile session package**
 
 Run:
 
@@ -509,7 +511,7 @@ Expected: compile pass.
 **Files:**
 - Modify: `pkg/session/derptun_test.go`
 
-- [ ] **Step 1: Add failing derptun key test**
+- [x] **Step 1: Add failing derptun key test**
 
 Add:
 
@@ -549,7 +551,7 @@ func TestDerptunServerAndClientDeriveSameTransportDiscoveryKey(t *testing.T) {
 
 Add imports for `go4.org/mem` if not already present in the test file.
 
-- [ ] **Step 2: Run red derptun key test**
+- [x] **Step 2: Run red derptun key test**
 
 Run:
 
@@ -559,7 +561,7 @@ go test ./pkg/session -run 'TestDerptunServerAndClientDeriveSameTransportDiscove
 
 Expected: FAIL until Task 3 helper exists and derptun call sites are updated.
 
-- [ ] **Step 3: Run derptun-focused tests green**
+- [x] **Step 3: Run derptun-focused tests green**
 
 Run:
 
@@ -575,7 +577,7 @@ Expected: PASS.
 - Test: `pkg/transport`
 - Test: `pkg/session`
 
-- [ ] **Step 1: Package-level red/green**
+- [x] **Step 1: Package-level red/green**
 
 Run:
 
@@ -585,7 +587,7 @@ go test ./pkg/transport ./pkg/session -count=1
 
 Expected: PASS.
 
-- [ ] **Step 2: Full suite**
+- [x] **Step 2: Full suite**
 
 Run:
 
@@ -595,7 +597,7 @@ mise run test
 
 Expected: PASS.
 
-- [ ] **Step 3: Live derptun smoke against ktzlxc**
+- [x] **Step 3: Live derptun smoke against ktzlxc**
 
 Run:
 
@@ -605,7 +607,7 @@ REMOTE_HOST=ktzlxc DERPHOLE_TEST_DISABLE_TAILSCALE_CANDIDATES=1 mise run smoke-r
 
 Expected: PASS with `connected-direct` evidence.
 
-- [ ] **Step 4: Live direct UDP promotion smoke**
+- [x] **Step 4: Live direct UDP promotion smoke**
 
 Run:
 
@@ -616,7 +618,7 @@ DERPHOLE_TEST_DISABLE_TAILSCALE_CANDIDATES=1 ./scripts/promotion-test-reverse.sh
 
 Expected: PASS. Throughput may vary, but the run must not fail due to direct promotion timeout, MAC rejection, or relay-only behavior when direct was previously available.
 
-- [ ] **Step 5: Final repository gate**
+- [x] **Step 5: Final repository gate**
 
 Run:
 

@@ -2,6 +2,8 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
+> **Execution status:** Completed on `main` in commit `52d6f50` (`security: validate peer candidates`).
+
 **Goal:** Make peer-provided rendezvous and transport candidates parseable, bounded, deduplicated, and class-filtered before they can be accepted or probed.
 
 **Architecture:** Add a small reusable `pkg/candidate` policy package. Use it fail-closed at signed rendezvous claim validation, defensively in session candidate seeding, and entry-filtered in transport control messages so malformed controls do not clear healthy endpoints. Keep local candidate generation and native TCP bind overrides separate from peer-candidate policy.
@@ -44,7 +46,7 @@
 - Create: `pkg/candidate/policy.go`
 - Create: `pkg/candidate/policy_test.go`
 
-- [ ] **Step 1: Add failing policy tests**
+- [x] **Step 1: Add failing policy tests**
 
 Create `pkg/candidate/policy_test.go`:
 
@@ -114,7 +116,7 @@ func TestStringifyLocalAddrsCapsDeduplicatesAndSkipsUnsafe(t *testing.T) {
 }
 ```
 
-- [ ] **Step 2: Run red policy tests**
+- [x] **Step 2: Run red policy tests**
 
 Run:
 
@@ -124,7 +126,7 @@ go test ./pkg/candidate -run 'TestValidateClaimStrings|TestParsePeerAddrs|TestSt
 
 Expected: FAIL because `pkg/candidate` does not exist.
 
-- [ ] **Step 3: Implement policy package**
+- [x] **Step 3: Implement policy package**
 
 Create `pkg/candidate/policy.go`:
 
@@ -280,7 +282,7 @@ func addrPortFromNetAddr(addr net.Addr) (netip.AddrPort, bool) {
 }
 ```
 
-- [ ] **Step 4: Verify green**
+- [x] **Step 4: Verify green**
 
 Run:
 
@@ -297,7 +299,7 @@ Expected: PASS.
 - Modify: `pkg/rendezvous/rendezvous_test.go`
 - Modify: `pkg/rendezvous/durable_gate_test.go`
 
-- [ ] **Step 1: Update fixtures and add red rendezvous tests**
+- [x] **Step 1: Update fixtures and add red rendezvous tests**
 
 In `pkg/rendezvous/rendezvous_test.go`, change `testClaim` candidates to:
 
@@ -345,7 +347,7 @@ func TestGateRejectsDuplicateCandidates(t *testing.T) {
 
 In `pkg/rendezvous/durable_gate_test.go`, update any `udp4:` fixture candidates to canonical `203.0.113.10:12345`.
 
-- [ ] **Step 2: Run red rendezvous tests**
+- [x] **Step 2: Run red rendezvous tests**
 
 Run:
 
@@ -355,7 +357,7 @@ go test ./pkg/rendezvous -run 'TestGateRejects.*Candidate|TestDurableGateRejects
 
 Expected: FAIL because current `validCandidates` only checks count, empty string, and length.
 
-- [ ] **Step 3: Use shared claim validator**
+- [x] **Step 3: Use shared claim validator**
 
 Modify `pkg/rendezvous/state.go`:
 
@@ -372,7 +374,7 @@ func validCandidates(candidates []string) bool {
 
 Keep existing MAC-first order in `validateClaimForToken`.
 
-- [ ] **Step 4: Verify rendezvous green**
+- [x] **Step 4: Verify rendezvous green**
 
 Run:
 
@@ -390,7 +392,7 @@ Expected: PASS.
 - Modify: `pkg/session/session_test.go`
 - Modify: `pkg/session/derptun_test.go`
 
-- [ ] **Step 1: Add failing session tests**
+- [x] **Step 1: Add failing session tests**
 
 Add tests in `pkg/session/session_test.go` for:
 
@@ -411,7 +413,7 @@ Assert only `203.0.113.10:12345` is seeded or parsed without fake transport. In 
 
 In `pkg/session/derptun_test.go`, change `derptunTestClaim` and `derptunClaimForClient` fixture candidates from `udp4:203.0.113.10:12345` to `203.0.113.10:12345`.
 
-- [ ] **Step 2: Run red session tests**
+- [x] **Step 2: Run red session tests**
 
 Run:
 
@@ -421,7 +423,7 @@ go test ./pkg/session -run 'TestSeedAccepted.*Candidates|TestParseRemoteCandidat
 
 Expected: FAIL because current `parseCandidateStrings` has no peer/local policy split.
 
-- [ ] **Step 3: Split local and peer parsing**
+- [x] **Step 3: Split local and peer parsing**
 
 Modify `pkg/session/external.go`:
 
@@ -441,7 +443,7 @@ Change direct UDP remote candidate parsing from `decision.Accept.Candidates` and
 
 Modify `pkg/session/external_native_tcp.go` so `externalNativeTCPEnvAddrs` keeps local parsing. Explicit local test binds such as `127.0.0.1:8321` must continue to work.
 
-- [ ] **Step 4: Verify session green**
+- [x] **Step 4: Verify session green**
 
 Run:
 
@@ -458,7 +460,7 @@ Expected: PASS.
 - Modify: `pkg/transport/control_test.go`
 - Modify: `pkg/transport/manager_test.go`
 
-- [ ] **Step 1: Add failing transport tests**
+- [x] **Step 1: Add failing transport tests**
 
 Modify `pkg/transport/control_test.go`:
 
@@ -488,7 +490,7 @@ func TestManagerDropsUnsafePeerCandidateControl(t *testing.T)
 
 Set up a manager with an existing direct endpoint, deliver `ControlCandidates{Candidates: []string{"bad", "127.0.0.1:1"}}`, and assert the existing endpoint remains unchanged.
 
-- [ ] **Step 2: Run red transport tests**
+- [x] **Step 2: Run red transport tests**
 
 Run:
 
@@ -498,7 +500,7 @@ go test ./pkg/transport -run 'TestParseCandidateAddrs|TestManager.*Candidate' -c
 
 Expected: FAIL because invalid-only controls currently parse to an empty slice and can clear endpoint state.
 
-- [ ] **Step 3: Apply peer policy in transport controls**
+- [x] **Step 3: Apply peer policy in transport controls**
 
 Modify `pkg/transport/control.go`:
 
@@ -514,7 +516,7 @@ func stringifyCandidates(addrs []net.Addr) []string {
 
 In `handleControl`, ignore non-empty `ControlCandidates` messages when parsing returns zero valid addresses. Keep empty candidate controls meaningful only when the raw candidate list is empty.
 
-- [ ] **Step 4: Verify transport green**
+- [x] **Step 4: Verify transport green**
 
 Run:
 
@@ -532,7 +534,7 @@ Expected: PASS.
 - Test: `pkg/session`
 - Test: `pkg/transport`
 
-- [ ] **Step 1: Run focused package suite**
+- [x] **Step 1: Run focused package suite**
 
 Run:
 
@@ -542,7 +544,7 @@ go test ./pkg/candidate ./pkg/rendezvous ./pkg/session ./pkg/transport -count=1
 
 Expected: PASS.
 
-- [ ] **Step 2: Run full local verification**
+- [x] **Step 2: Run full local verification**
 
 Run:
 
@@ -553,7 +555,7 @@ mise run vet
 
 Expected: both pass.
 
-- [ ] **Step 3: Run live no-Tailscale smoke**
+- [x] **Step 3: Run live no-Tailscale smoke**
 
 Run:
 
@@ -565,7 +567,7 @@ REMOTE_HOST=ktzlxc mise run smoke-remote-derptun
 
 Expected: all pass with `connected-direct` evidence.
 
-- [ ] **Step 4: Final repository gate**
+- [x] **Step 4: Final repository gate**
 
 Run:
 
