@@ -415,6 +415,25 @@ func collectStatuses() (Callbacks, func() []string) {
 	}
 }
 
+func collectProgress() (Callbacks, func() []Progress) {
+	var mu sync.Mutex
+	var progresses []Progress
+	cb := Callbacks{
+		Progress: func(progress Progress) {
+			mu.Lock()
+			defer mu.Unlock()
+			progresses = append(progresses, progress)
+		},
+	}
+	return cb, func() []Progress {
+		mu.Lock()
+		defer mu.Unlock()
+		out := make([]Progress, len(progresses))
+		copy(out, progresses)
+		return out
+	}
+}
+
 func collectTraces() (Callbacks, func() []string) {
 	var mu sync.Mutex
 	var traces []string
@@ -925,7 +944,7 @@ func TestReceiveFramesDirectReadySwitchesAndMergesDirectData(t *testing.T) {
 	}
 }
 
-func TestReceiveFramesSkipsPerFrameAckOnActiveDirectData(t *testing.T) {
+func TestReceiveFramesSkipsDERPPerFrameAckOnActiveDirectData(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
@@ -969,6 +988,50 @@ func TestReceiveFramesSkipsPerFrameAckOnActiveDirectData(t *testing.T) {
 	wantAcks := []int64{0, 3, 9}
 	if !slices.Equal(gotAcks, wantAcks) {
 		t.Fatalf("ack bytes = %v, want %v", gotAcks, wantAcks)
+	}
+}
+
+func TestReceiveFramesSendsDirectAckAfterActiveDirectWrite(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	client := newFakeDERPClient()
+	peerDERP := key.NewNode().Public()
+	sink := &fakeSink{}
+	direct := newFakeDirect()
+	derpFrames := make(chan derpbind.Packet, 16)
+	merged, stopMerge := mergeFrameSources(ctx, derpFrames, direct)
+	defer stopMerge()
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- receiveFrames(ctx, client, peerDERP, merged, direct, sink, Callbacks{})
+	}()
+
+	derpFrames <- derpbind.Packet{From: peerDERP, Payload: mustMarshalFrame(t, webproto.FrameMeta, 0, webproto.Meta{Name: "file.txt", Size: 9})}
+	derpFrames <- derpbind.Packet{From: peerDERP, Payload: mustMarshalFrame(t, webproto.FrameData, 1, []byte("abc"))}
+	derpFrames <- derpbind.Packet{From: peerDERP, Payload: mustMarshalFrame(t, webproto.FrameDirectReady, 2, webproto.DirectReady{BytesReceived: 3, NextSeq: 2})}
+	client.waitForSentKind(t, webproto.FramePathSwitch)
+
+	direct.recvCh <- mustMarshalFrame(t, webproto.FrameData, 2, []byte("def"))
+	direct.recvCh <- mustMarshalFrame(t, webproto.FrameData, 3, []byte("ghi"))
+	direct.recvCh <- mustMarshalFrame(t, webproto.FrameDone, 4, nil)
+	close(direct.recvCh)
+	close(derpFrames)
+
+	if err := <-errCh; err != nil {
+		t.Fatalf("receiveFrames() error = %v", err)
+	}
+
+	var gotDirectAcks []int64
+	for _, frame := range direct.sentFrames(t) {
+		if frame.Kind == webproto.FrameAck {
+			gotDirectAcks = append(gotDirectAcks, ackBytes(t, frame))
+		}
+	}
+	wantDirectAcks := []int64{6, 9}
+	if !slices.Equal(gotDirectAcks, wantDirectAcks) {
+		t.Fatalf("direct ack bytes = %v, want %v", gotDirectAcks, wantDirectAcks)
 	}
 }
 
@@ -1048,7 +1111,10 @@ func TestSendWithOptionsSwitchesToDirectAfterHandoff(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Parse(direct sent frame) error = %v", err)
 		}
-		if frame.Kind == webproto.FrameDone {
+		switch frame.Kind {
+		case webproto.FrameData:
+			direct.recvCh <- mustMarshalFrame(t, webproto.FrameAck, 0, webproto.Ack{BytesReceived: source.Size()})
+		case webproto.FrameDone:
 			close(doneSent)
 			go func() {
 				<-releaseFinalAck
@@ -1154,6 +1220,121 @@ func TestSendWithOptionsSwitchesToDirectAfterHandoff(t *testing.T) {
 	}
 }
 
+func TestSendWithOptionsDirectProgressWaitsForDirectAck(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	client := newFakeDERPClient()
+	peerDERP := key.NewNode().Public()
+	tok, err := newToken(client.PublicKey(), 1)
+	if err != nil {
+		t.Fatalf("newToken() error = %v", err)
+	}
+
+	source := newFakeSource("file.txt", []byte("abc"), []byte("def"))
+	direct := newFakeDirect()
+	direct.markReady()
+
+	directDataSent := make(chan struct{})
+	directDataSentOnce := sync.Once{}
+	doneSent := make(chan struct{})
+	releaseFinalAck := make(chan struct{})
+	direct.sendHook = func(raw []byte) error {
+		frame, err := webproto.Parse(raw)
+		if err != nil {
+			t.Fatalf("Parse(direct sent frame) error = %v", err)
+		}
+		switch frame.Kind {
+		case webproto.FrameData:
+			directDataSentOnce.Do(func() { close(directDataSent) })
+		case webproto.FrameDone:
+			close(doneSent)
+			go func() {
+				<-releaseFinalAck
+				client.emit(peerDERP, mustMarshalFrame(t, webproto.FrameAck, 0, webproto.Ack{BytesReceived: source.Size()}))
+			}()
+		}
+		return nil
+	}
+
+	client.sendHook = func(_ key.NodePublic, payload []byte) {
+		frame, err := webproto.Parse(payload)
+		if err != nil {
+			t.Fatalf("Parse(sent frame) error = %v", err)
+		}
+		switch frame.Kind {
+		case webproto.FrameMeta:
+			client.emit(peerDERP, mustMarshalFrame(t, webproto.FrameAck, 0, webproto.Ack{BytesReceived: 0}))
+		case webproto.FrameData:
+			client.emit(peerDERP, mustMarshalFrame(t, webproto.FrameAck, 0, webproto.Ack{BytesReceived: 3}))
+		case webproto.FrameDirectReady:
+			var ready webproto.DirectReady
+			if err := json.Unmarshal(frame.Payload, &ready); err != nil {
+				t.Fatalf("Unmarshal(DirectReady) error = %v", err)
+			}
+			client.emit(peerDERP, mustMarshalFrame(t, webproto.FramePathSwitch, ready.NextSeq, webproto.PathSwitch{
+				Path:          "webrtc",
+				BytesReceived: ready.BytesReceived,
+				NextSeq:       ready.NextSeq,
+			}))
+		}
+	}
+
+	cb, progresses := collectProgress()
+	offer := &Offer{
+		client: client,
+		token:  tok,
+		gate:   rendezvous.NewGate(tok),
+	}
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- offer.SendWithOptions(ctx, source, cb, TransferOptions{Direct: direct})
+	}()
+
+	client.waitForSubscribers(t, 1)
+	claim, err := newClaim(tok, peerDERP)
+	if err != nil {
+		t.Fatalf("newClaim() error = %v", err)
+	}
+	client.emit(peerDERP, mustMarshalFrame(t, webproto.FrameClaim, 0, claim))
+
+	select {
+	case <-directDataSent:
+	case <-ctx.Done():
+		t.Fatal("timed out waiting for direct data frame")
+	}
+
+	time.Sleep(50 * time.Millisecond)
+	for _, progress := range progresses() {
+		if progress.Bytes > 3 {
+			t.Fatalf("progress advanced past relay ack before direct ack: %+v", progresses())
+		}
+	}
+	select {
+	case <-doneSent:
+		t.Fatal("direct done sent before direct data ack")
+	default:
+	}
+
+	direct.recvCh <- mustMarshalFrame(t, webproto.FrameAck, 0, webproto.Ack{BytesReceived: 6})
+
+	select {
+	case <-doneSent:
+	case <-ctx.Done():
+		t.Fatal("timed out waiting for direct done after direct ack")
+	}
+
+	if got := progresses(); len(got) == 0 || got[len(got)-1].Bytes < 6 {
+		t.Fatalf("progress did not advance after direct ack: %+v", got)
+	}
+
+	close(releaseFinalAck)
+	if err := <-errCh; err != nil {
+		t.Fatalf("SendWithOptions() error = %v", err)
+	}
+}
+
 func TestSendWithOptionsUsesDirectChunkSizeAfterHandoff(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -1171,12 +1352,17 @@ func TestSendWithOptionsUsesDirectChunkSizeAfterHandoff(t *testing.T) {
 
 	doneSent := make(chan struct{})
 	releaseFinalAck := make(chan struct{})
+	directAck := int64(relayChunkBytes)
 	direct.sendHook = func(raw []byte) error {
 		frame, err := webproto.Parse(raw)
 		if err != nil {
 			t.Fatalf("Parse(direct sent frame) error = %v", err)
 		}
-		if frame.Kind == webproto.FrameDone {
+		switch frame.Kind {
+		case webproto.FrameData:
+			directAck += int64(len(frame.Payload))
+			direct.recvCh <- mustMarshalFrame(t, webproto.FrameAck, 0, webproto.Ack{BytesReceived: directAck})
+		case webproto.FrameDone:
 			close(doneSent)
 			go func() {
 				<-releaseFinalAck
@@ -1742,7 +1928,10 @@ func TestSendWithOptionsDirectDoneWaitIgnoresDirectCloseAfterFinalAck(t *testing
 		if err != nil {
 			t.Fatalf("Parse(direct sent frame) error = %v", err)
 		}
-		if frame.Kind == webproto.FrameDone {
+		switch frame.Kind {
+		case webproto.FrameData:
+			direct.recvCh <- mustMarshalFrame(t, webproto.FrameAck, 0, webproto.Ack{BytesReceived: source.Size()})
+		case webproto.FrameDone:
 			direct.fail(errors.New("datachannel closed"))
 			client.emit(peerDERP, mustMarshalFrame(t, webproto.FrameAck, 0, webproto.Ack{BytesReceived: 6}))
 		}

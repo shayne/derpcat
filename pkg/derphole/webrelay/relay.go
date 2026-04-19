@@ -390,6 +390,15 @@ func (o *Offer) sendDataWindowed(ctx context.Context, src FileSource, cb Callbac
 			chunkSize := relayChunkBytes
 			if direct != nil && direct.active && directTransport != nil {
 				chunkSize = directChunkBytes
+				if err := drainDirectWindowAcks(ctx, peerCh, directTransport, window, cb, total); err != nil {
+					if err := abortIfContextDone(ctx, o.client, peerDERP); err != nil {
+						return offset, seq, directTransport, direct, err
+					}
+					return offset, seq, directTransport, direct, notifyAbort(ctx, o.client, peerDERP, err)
+				}
+				if !window.canSend(chunkSize) {
+					break
+				}
 			} else if !window.canSend(chunkSize) {
 				break
 			}
@@ -420,7 +429,7 @@ func (o *Offer) sendDataWindowed(ctx context.Context, src FileSource, cb Callbac
 					}
 					return offset, seq, directTransport, direct, notifyAbort(ctx, o.client, peerDERP, err)
 				}
-				window.ack(nextOffset)
+				window.markSent(seq)
 			} else if err := sendRelayDataFrame(ctx, o.client, peerDERP, frame); err != nil {
 				if err := abortIfContextDone(ctx, o.client, peerDERP); err != nil {
 					return offset, seq, directTransport, direct, err
@@ -431,7 +440,9 @@ func (o *Offer) sendDataWindowed(ctx context.Context, src FileSource, cb Callbac
 			}
 
 			offset = nextOffset
-			cb.progress(Progress{Bytes: offset, Total: total})
+			if direct == nil || !direct.active {
+				cb.progress(Progress{Bytes: offset, Total: total})
+			}
 			seq++
 
 			if direct != nil && direct.ready && !direct.active {
@@ -467,8 +478,30 @@ func (o *Offer) sendDataWindowed(ctx context.Context, src FileSource, cb Callbac
 			}
 			if switched {
 				direct.noteSwitched()
+				window.cfg = relayWindowConfig{MaxBytes: maxDirectPendingBytes, MaxFrames: maxDirectPendingFrames}
 				cb.status(statusDirect)
 			}
+		}
+
+		if direct != nil && direct.active && directTransport != nil {
+			if err := drainDirectWindowAcks(ctx, peerCh, directTransport, window, cb, total); err != nil {
+				if err := abortIfContextDone(ctx, o.client, peerDERP); err != nil {
+					return offset, seq, directTransport, direct, err
+				}
+				return offset, seq, directTransport, direct, notifyAbort(ctx, o.client, peerDERP, err)
+			}
+			if eof && window.empty() {
+				return offset, seq, directTransport, direct, nil
+			}
+			if !window.empty() {
+				if err := awaitDirectWindowAck(ctx, peerCh, directTransport, window, cb, total); err != nil {
+					if err := abortIfContextDone(ctx, o.client, peerDERP); err != nil {
+						return offset, seq, directTransport, direct, err
+					}
+					return offset, seq, directTransport, direct, notifyAbort(ctx, o.client, peerDERP, err)
+				}
+			}
+			continue
 		}
 
 		if eof && window.empty() {
@@ -652,7 +685,9 @@ func receiveFrames(ctx context.Context, client derpClient, peerDERP key.NodePubl
 				return abortAndReturn(ctx, client, peerDERP, "data before metadata")
 			}
 			if frame.Seq < expectedSeq {
-				if !directActive {
+				if directActive && direct != nil {
+					_ = sendDirectAck(ctx, direct, received)
+				} else {
 					_ = sendAck(ctx, client, peerDERP, received)
 				}
 				continue
@@ -674,7 +709,9 @@ func receiveFrames(ctx context.Context, client derpClient, peerDERP key.NodePubl
 						cb.trace(fmt.Sprintf("receive-buffered seq=%d expected=%d pending=%d", frame.Seq, expectedSeq, len(pendingFrames)))
 					}
 				}
-				if !directActive {
+				if directActive && direct != nil {
+					_ = sendDirectAck(ctx, direct, received)
+				} else {
 					_ = sendAck(ctx, client, peerDERP, received)
 				}
 				continue
@@ -685,7 +722,11 @@ func receiveFrames(ctx context.Context, client derpClient, peerDERP key.NodePubl
 			if err := drainPending(); err != nil {
 				return err
 			}
-			if !directActive {
+			if directActive && direct != nil {
+				if err := sendDirectAck(ctx, direct, received); err != nil {
+					return err
+				}
+			} else {
 				if err := sendAck(ctx, client, peerDERP, received); err != nil {
 					return err
 				}
@@ -1048,6 +1089,107 @@ func awaitRelayWindowAck(ctx context.Context, client derpClient, peerDERP key.No
 	}
 }
 
+func drainDirectWindowAcks(ctx context.Context, relayFrames <-chan derpbind.Packet, direct DirectTransport, window *relayWindow, cb Callbacks, total int64) error {
+	if direct == nil || window == nil {
+		return nil
+	}
+	directFrames := direct.ReceiveFrames()
+	directFailed := direct.Failed()
+	for {
+		select {
+		case raw, ok := <-directFrames:
+			if !ok {
+				return io.ErrClosedPipe
+			}
+			if err := handleDirectWindowFrame(raw, window, cb, total); err != nil {
+				return err
+			}
+		case pkt, ok := <-relayFrames:
+			if !ok {
+				return io.ErrClosedPipe
+			}
+			if err := handleDirectWindowFrame(pkt.Payload, window, cb, total); err != nil {
+				return err
+			}
+		case err := <-directFailed:
+			if err == nil {
+				err = errors.New("direct path failed")
+			}
+			return err
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+			return nil
+		}
+	}
+}
+
+func awaitDirectWindowAck(ctx context.Context, relayFrames <-chan derpbind.Packet, direct DirectTransport, window *relayWindow, cb Callbacks, total int64) error {
+	if direct == nil || window == nil {
+		return nil
+	}
+	directFrames := direct.ReceiveFrames()
+	directFailed := direct.Failed()
+	for {
+		if window.empty() {
+			return nil
+		}
+		before := window.ackedOffset()
+		select {
+		case raw, ok := <-directFrames:
+			if !ok {
+				return io.ErrClosedPipe
+			}
+			if err := handleDirectWindowFrame(raw, window, cb, total); err != nil {
+				return err
+			}
+			if window.ackedOffset() > before || window.empty() {
+				return nil
+			}
+		case pkt, ok := <-relayFrames:
+			if !ok {
+				return io.ErrClosedPipe
+			}
+			if err := handleDirectWindowFrame(pkt.Payload, window, cb, total); err != nil {
+				return err
+			}
+			if window.ackedOffset() > before || window.empty() {
+				return nil
+			}
+		case err := <-directFailed:
+			if err == nil {
+				err = errors.New("direct path failed")
+			}
+			return err
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+}
+
+func handleDirectWindowFrame(raw []byte, window *relayWindow, cb Callbacks, total int64) error {
+	frame, err := webproto.Parse(raw)
+	if err != nil {
+		return nil
+	}
+	switch frame.Kind {
+	case webproto.FrameAck:
+		ack, err := decodeAck(frame.Payload)
+		if err != nil {
+			return nil
+		}
+		before := window.ackedOffset()
+		window.ack(ack.BytesReceived)
+		after := window.ackedOffset()
+		if after > before {
+			cb.progress(Progress{Bytes: after, Total: total})
+		}
+	case webproto.FrameAbort:
+		return decodeAbort(frame.Payload)
+	}
+	return nil
+}
+
 func awaitAckOrDirectFailure(ctx context.Context, frames <-chan derpbind.Packet, wantBytes int64, timeout time.Duration, directFailed <-chan error) error {
 	timer := time.NewTimer(timeout)
 	defer timer.Stop()
@@ -1118,6 +1260,14 @@ func sendAck(ctx context.Context, client derpClient, peerDERP key.NodePublic, by
 		return err
 	}
 	return sendFrame(ctx, client, peerDERP, webproto.FrameAck, 0, payload)
+}
+
+func sendDirectAck(ctx context.Context, direct DirectTransport, bytesReceived int64) error {
+	payload, err := json.Marshal(webproto.Ack{BytesReceived: bytesReceived})
+	if err != nil {
+		return err
+	}
+	return sendDirectFrame(ctx, direct, webproto.FrameAck, 0, payload)
 }
 
 func decodeAck(payload []byte) (webproto.Ack, error) {
