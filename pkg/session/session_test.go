@@ -3276,6 +3276,34 @@ func TestSeedAcceptedDecisionCandidatesUsesAcceptCandidates(t *testing.T) {
 	}
 }
 
+func TestSeedAcceptedDecisionCandidatesFiltersUnsafeCandidates(t *testing.T) {
+	ctx := context.Background()
+	decision := rendezvous.Decision{
+		Accepted: true,
+		Accept: &rendezvous.AcceptInfo{
+			Candidates: []string{
+				"127.0.0.1:1",
+				"203.0.113.10:12345",
+				"203.0.113.10:12345",
+				"bad",
+			},
+		},
+	}
+	seeder := &captureCandidateSeeder{}
+
+	seedAcceptedDecisionCandidates(ctx, seeder, decision)
+
+	if seeder.calls != 1 {
+		t.Fatalf("SeedRemoteCandidates() calls = %d, want 1", seeder.calls)
+	}
+	if got := len(seeder.candidates); got != 1 {
+		t.Fatalf("seeded candidates = %#v, want 1 filtered candidate", seeder.candidates)
+	}
+	if got := seeder.candidates[0].String(); got != "203.0.113.10:12345" {
+		t.Fatalf("seeded candidate = %q, want %q", got, "203.0.113.10:12345")
+	}
+}
+
 func TestSeedAcceptedClaimCandidatesUsesClaimCandidates(t *testing.T) {
 	ctx := context.Background()
 	claim := rendezvous.Claim{
@@ -3296,6 +3324,62 @@ func TestSeedAcceptedClaimCandidatesUsesClaimCandidates(t *testing.T) {
 	}
 	if got := seeder.candidates[0].String(); got != "192.0.2.20:2345" {
 		t.Fatalf("first seeded candidate = %q, want %q", got, "192.0.2.20:2345")
+	}
+}
+
+func TestSeedAcceptedClaimCandidatesFiltersUnsafeCandidates(t *testing.T) {
+	ctx := context.Background()
+	claim := rendezvous.Claim{
+		Candidates: []string{
+			"127.0.0.1:1",
+			"203.0.113.10:12345",
+			"203.0.113.10:12345",
+			"bad",
+		},
+	}
+	seeder := &captureCandidateSeeder{}
+
+	seedAcceptedClaimCandidates(ctx, seeder, claim)
+
+	if seeder.calls != 1 {
+		t.Fatalf("SeedRemoteCandidates() calls = %d, want 1", seeder.calls)
+	}
+	if got := len(seeder.candidates); got != 1 {
+		t.Fatalf("seeded candidates = %#v, want 1 filtered candidate", seeder.candidates)
+	}
+	if got := seeder.candidates[0].String(); got != "203.0.113.10:12345" {
+		t.Fatalf("seeded candidate = %q, want %q", got, "203.0.113.10:12345")
+	}
+}
+
+func TestParseRemoteCandidateStringsRejectsLoopbackWithoutFakeTransport(t *testing.T) {
+	got := parseRemoteCandidateStrings([]string{
+		"127.0.0.1:1",
+		"203.0.113.10:12345",
+	})
+	if len(got) != 1 {
+		t.Fatalf("parseRemoteCandidateStrings() = %#v, want 1 candidate", got)
+	}
+	if got[0].String() != "203.0.113.10:12345" {
+		t.Fatalf("candidate = %v, want 203.0.113.10:12345", got[0])
+	}
+}
+
+func TestParseRemoteCandidateStringsAllowsLoopbackForFakeTransport(t *testing.T) {
+	t.Setenv("DERPHOLE_FAKE_TRANSPORT", "1")
+	remote := parseRemoteCandidateStrings([]string{"127.0.0.1:1"})
+	if len(remote) != 1 {
+		t.Fatalf("parseRemoteCandidateStrings(fake) = %#v, want loopback accepted", remote)
+	}
+	if remote[0].String() != "127.0.0.1:1" {
+		t.Fatalf("remote candidate = %v, want 127.0.0.1:1", remote[0])
+	}
+	local := parseCandidateStrings([]string{"127.0.0.1:1"})
+	if len(local) != 1 {
+		t.Fatalf("parseCandidateStrings(fake) = %#v, want loopback accepted locally", local)
+	}
+	if local[0].String() != "127.0.0.1:1" {
+		t.Fatalf("local candidate = %v, want 127.0.0.1:1", local[0])
 	}
 }
 

@@ -145,7 +145,7 @@ func offerExternal(ctx context.Context, cfg OfferConfig) (retTok string, retErr 
 		pathEmitter.Watch(transportCtx, transportManager)
 		pathEmitter.Flush(transportManager)
 		seedAcceptedClaimCandidates(transportCtx, transportManager, *env.Claim)
-		remoteCandidates := parseCandidateStrings(env.Claim.Candidates)
+		remoteCandidates := parseRemoteCandidateStrings(env.Claim.Candidates)
 		punchCtx, punchCancel := context.WithCancel(transportCtx)
 		defer punchCancel()
 		if !cfg.ForceRelay {
@@ -355,7 +355,7 @@ func receiveExternal(ctx context.Context, cfg ReceiveConfig) (retErr error) {
 	pathEmitter.Watch(transportCtx, transportManager)
 	pathEmitter.Flush(transportManager)
 	seedAcceptedDecisionCandidates(transportCtx, transportManager, decision)
-	remoteCandidates := parseCandidateStrings(decision.Accept.Candidates)
+	remoteCandidates := parseRemoteCandidateStrings(decision.Accept.Candidates)
 	punchCtx, punchCancel := context.WithCancel(transportCtx)
 	defer punchCancel()
 	if !cfg.ForceRelay {

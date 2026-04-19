@@ -18,6 +18,7 @@ import (
 	"time"
 
 	quic "github.com/quic-go/quic-go"
+	"github.com/shayne/derphole/pkg/candidate"
 	"github.com/shayne/derphole/pkg/derpbind"
 	"github.com/shayne/derphole/pkg/portmap"
 	"github.com/shayne/derphole/pkg/quicpath"
@@ -2708,19 +2709,14 @@ func closePublicSessionTransport(session *relaySession) {
 }
 
 func parseCandidateStrings(raw []string) []net.Addr {
-	addrs := make([]net.Addr, 0, len(raw))
-	for _, candidate := range raw {
-		addrPort, err := netip.ParseAddrPort(candidate)
-		if err != nil {
-			continue
-		}
-		addrs = append(addrs, &net.UDPAddr{
-			IP:   append(net.IP(nil), addrPort.Addr().AsSlice()...),
-			Port: int(addrPort.Port()),
-			Zone: addrPort.Addr().Zone(),
-		})
+	return candidate.ParseLocalAddrs(raw)
+}
+
+func parseRemoteCandidateStrings(raw []string) []net.Addr {
+	if fakeTransportEnabled() {
+		return candidate.ParsePeerAddrs(raw, candidate.AllowLoopback())
 	}
-	return addrs
+	return candidate.ParsePeerAddrs(raw)
 }
 
 func cloneSessionAddr(addr net.Addr) net.Addr {
@@ -2740,14 +2736,14 @@ func seedAcceptedDecisionCandidates(ctx context.Context, seeder remoteCandidateS
 	if seeder == nil || decision.Accept == nil || len(decision.Accept.Candidates) == 0 {
 		return
 	}
-	seeder.SeedRemoteCandidates(ctx, parseCandidateStrings(decision.Accept.Candidates))
+	seeder.SeedRemoteCandidates(ctx, parseRemoteCandidateStrings(decision.Accept.Candidates))
 }
 
 func seedAcceptedClaimCandidates(ctx context.Context, seeder remoteCandidateSeeder, claim rendezvous.Claim) {
 	if seeder == nil || len(claim.Candidates) == 0 {
 		return
 	}
-	seeder.SeedRemoteCandidates(ctx, parseCandidateStrings(claim.Candidates))
+	seeder.SeedRemoteCandidates(ctx, parseRemoteCandidateStrings(claim.Candidates))
 }
 
 func isTransportControlPayload(payload []byte) bool {

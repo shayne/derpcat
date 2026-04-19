@@ -5,8 +5,9 @@ import (
 	"errors"
 	"io"
 	"net"
-	"net/netip"
 	"time"
+
+	"github.com/shayne/derphole/pkg/candidate"
 )
 
 type ControlType string
@@ -21,8 +22,8 @@ type ControlMessage struct {
 	Candidates []string    `json:"candidates,omitempty"`
 }
 
-const maxControlCandidates = 32
-const maxControlCandidateLength = 128
+const maxControlCandidates = candidate.MaxCount
+const maxControlCandidateLength = candidate.MaxLength
 
 func (m *Manager) MarkDirectBroken() error {
 	m.noteRelayOnly(m.now())
@@ -65,7 +66,11 @@ func (m *Manager) receiveControlLoop(ctx context.Context) {
 func (m *Manager) handleControl(ctx context.Context, msg ControlMessage) error {
 	switch msg.Type {
 	case ControlCandidates:
-		m.applyRemoteCandidates(m.now(), parseCandidateAddrs(msg.Candidates))
+		candidates := parseCandidateAddrs(msg.Candidates)
+		if len(msg.Candidates) > 0 && len(candidates) == 0 {
+			return nil
+		}
+		m.applyRemoteCandidates(m.now(), candidates)
 		m.requestDiscovery(ctx, false)
 		return nil
 	case ControlCallMeMaybe:
@@ -113,44 +118,11 @@ func (m *Manager) applyRemoteCandidates(now time.Time, candidates []net.Addr) {
 }
 
 func parseCandidateAddrs(raw []string) []net.Addr {
-	if len(raw) > maxControlCandidates {
-		raw = raw[:maxControlCandidates]
-	}
-	addrs := make([]net.Addr, 0, len(raw))
-	for _, candidate := range raw {
-		if candidate == "" || len(candidate) > maxControlCandidateLength {
-			continue
-		}
-		addrPort, err := netip.ParseAddrPort(candidate)
-		if err != nil {
-			continue
-		}
-		addr := &net.UDPAddr{
-			IP:   append(net.IP(nil), addrPort.Addr().AsSlice()...),
-			Port: int(addrPort.Port()),
-			Zone: addrPort.Addr().Zone(),
-		}
-		addrs = append(addrs, addr)
-	}
-	return addrs
+	return candidate.ParsePeerAddrs(raw)
 }
 
 func stringifyCandidates(addrs []net.Addr) []string {
-	out := make([]string, 0, len(addrs))
-	for _, addr := range addrs {
-		if len(out) >= maxControlCandidates {
-			break
-		}
-		if addr == nil {
-			continue
-		}
-		candidate := addr.String()
-		if len(candidate) > maxControlCandidateLength {
-			continue
-		}
-		out = append(out, candidate)
-	}
-	return out
+	return candidate.StringifyLocalAddrs(addrs)
 }
 
 func (m *Manager) waitForNextControlRead(ctx context.Context) bool {

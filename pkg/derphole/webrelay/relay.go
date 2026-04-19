@@ -1282,7 +1282,6 @@ func newClaim(tok token.Token, pub key.NodePublic) (rendezvous.Claim, error) {
 		DERPPublic:   derpPublicKeyRaw32(pub),
 		QUICPublic:   quicPublic,
 		Parallel:     defaultClaimPar,
-		Candidates:   []string{"websocket-derp"},
 		Capabilities: tok.Capabilities,
 	}
 	claim.BearerMAC = rendezvous.ComputeBearerMAC(tok.BearerSecret, claim)

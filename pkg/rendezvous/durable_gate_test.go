@@ -25,7 +25,7 @@ func durableTestClaim(tok token.Token, marker byte) Claim {
 		DERPPublic:   [32]byte{marker},
 		QUICPublic:   [32]byte{marker + 1},
 		Parallel:     2,
-		Candidates:   []string{"udp4:203.0.113.10:12345"},
+		Candidates:   []string{"203.0.113.10:12345"},
 		Capabilities: token.CapabilityDerptunTCP,
 	}
 	claim.BearerMAC = ComputeBearerMAC(tok.BearerSecret, claim)

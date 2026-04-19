@@ -505,6 +505,79 @@ func TestManagerKeepsActiveDirectPathWhenCandidateSetReplacesEndpoint(t *testing
 	}
 }
 
+func TestManagerIgnoresInvalidOnlyCandidateControlWithoutClearingEndpoint(t *testing.T) {
+	t.Helper()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	clock := newFakeClock(time.Unix(1700000017, 0))
+	direct := newFakePacketConn(&net.IPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	direct.useClock(clock)
+	peerCandidate := &net.UDPAddr{IP: net.IPv4(100, 64, 0, 33), Port: 23333}
+	mgr := NewManager(ManagerConfig{
+		DirectConn:         direct,
+		Clock:              clock,
+		DiscoveryInterval:  1 * time.Second,
+		DirectStaleTimeout: 4 * time.Second,
+	})
+	mgr.state.noteCandidates(clock.Now(), []net.Addr{peerCandidate})
+
+	if err := mgr.handleControl(ctx, ControlMessage{
+		Type:       ControlCandidates,
+		Candidates: []string{"bad", "127.0.0.1:1"},
+	}); err != nil {
+		t.Fatalf("handleControl() error = %v", err)
+	}
+	cancel()
+	mgr.directWG.Wait()
+
+	mgr.mu.Lock()
+	_, oldOK := mgr.state.endpoints[peerCandidate.String()]
+	_, loopbackOK := mgr.state.endpoints["127.0.0.1:1"]
+	count := len(mgr.state.endpoints)
+	mgr.mu.Unlock()
+	if !oldOK || loopbackOK || count != 1 {
+		t.Fatalf("endpoints after invalid-only control: old=%t loopback=%t count=%d, want old only", oldOK, loopbackOK, count)
+	}
+}
+
+func TestManagerDropsUnsafePeerCandidateControl(t *testing.T) {
+	t.Helper()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	clock := newFakeClock(time.Unix(1700000018, 0))
+	direct := newFakePacketConn(&net.IPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	direct.useClock(clock)
+	peerCandidate := &net.UDPAddr{IP: net.IPv4(100, 64, 0, 34), Port: 23444}
+	mgr := NewManager(ManagerConfig{
+		DirectConn:         direct,
+		Clock:              clock,
+		DiscoveryInterval:  1 * time.Second,
+		DirectStaleTimeout: 4 * time.Second,
+	})
+
+	if err := mgr.handleControl(ctx, ControlMessage{
+		Type:       ControlCandidates,
+		Candidates: []string{"127.0.0.1:1", peerCandidate.String()},
+	}); err != nil {
+		t.Fatalf("handleControl() error = %v", err)
+	}
+	cancel()
+	mgr.directWG.Wait()
+
+	mgr.mu.Lock()
+	_, peerOK := mgr.state.endpoints[peerCandidate.String()]
+	_, loopbackOK := mgr.state.endpoints["127.0.0.1:1"]
+	count := len(mgr.state.endpoints)
+	mgr.mu.Unlock()
+	if !peerOK || loopbackOK || count != 1 {
+		t.Fatalf("endpoints after mixed control: peer=%t loopback=%t count=%d, want safe peer only", peerOK, loopbackOK, count)
+	}
+}
+
 func TestManagerFallsBackToRelayAndRetriesDiscovery(t *testing.T) {
 	t.Helper()
 

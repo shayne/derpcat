@@ -827,7 +827,7 @@ func derptunTestClaim(tok token.Token, marker byte) rendezvous.Claim {
 		SessionID:    tok.SessionID,
 		DERPPublic:   [32]byte{marker},
 		QUICPublic:   [32]byte{marker + 1},
-		Candidates:   []string{"udp4:203.0.113.10:12345"},
+		Candidates:   []string{"203.0.113.10:12345"},
 		Capabilities: tok.Capabilities,
 	}
 	claim.BearerMAC = rendezvous.ComputeBearerMAC(tok.BearerSecret, claim)
@@ -845,7 +845,7 @@ func derptunClaimForClient(t *testing.T, cred derptun.ClientCredential, marker b
 		SessionID:    tok.SessionID,
 		DERPPublic:   [32]byte{marker},
 		QUICPublic:   [32]byte{marker + 1},
-		Candidates:   []string{"udp4:203.0.113.10:12345"},
+		Candidates:   []string{"203.0.113.10:12345"},
 		Capabilities: tok.Capabilities,
 		Client: &rendezvous.ClientProof{
 			ClientID:    cred.ClientID,

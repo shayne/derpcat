@@ -461,7 +461,6 @@ func TestSendClaimUntilDecisionTracesClaimAttemptsAndDecision(t *testing.T) {
 		DERPPublic:   derpPublicKeyRaw32(client.PublicKey()),
 		QUICPublic:   [32]byte{4, 5, 6},
 		Parallel:     1,
-		Candidates:   []string{"websocket-derp"},
 		Capabilities: 1 << 4,
 	}
 	cb, traces := collectTraces()

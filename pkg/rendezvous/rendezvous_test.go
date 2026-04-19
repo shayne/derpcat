@@ -25,7 +25,7 @@ func testClaim(tok token.Token) Claim {
 		DERPPublic:   [32]byte{1, 2, 3, 4},
 		QUICPublic:   [32]byte{5, 6, 7, 8},
 		Parallel:     4,
-		Candidates:   []string{"udp4:203.0.113.10:12345", "udp6:[2001:db8::10]:12345"},
+		Candidates:   []string{"203.0.113.10:12345", "[2001:db8::10]:12345"},
 		Capabilities: tok.Capabilities,
 	}
 	claim.BearerMAC = ComputeBearerMAC(tok.BearerSecret, claim)
@@ -166,6 +166,40 @@ func TestGateAuthenticatesSecondClaimBeforeClaimedRejection(t *testing.T) {
 	}
 	if decision.Reject == nil || decision.Reject.Code != RejectBadMAC {
 		t.Fatalf("Reject = %+v, want %q", decision.Reject, RejectBadMAC)
+	}
+}
+
+func TestGateRejectsMalformedCandidateStrings(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0).UTC()
+	tok := testToken(now)
+	gate := NewGate(tok)
+	claim := testClaim(tok)
+	claim.Candidates = []string{"udp4:203.0.113.10:12345"}
+	claim.BearerMAC = ComputeBearerMAC(tok.BearerSecret, claim)
+
+	decision, err := gate.Accept(now, claim)
+	if !errors.Is(err, ErrDenied) {
+		t.Fatalf("Accept() error = %v, want ErrDenied", err)
+	}
+	if decision.Reject == nil || decision.Reject.Code != RejectClaimMalformed {
+		t.Fatalf("Reject = %+v, want %q", decision.Reject, RejectClaimMalformed)
+	}
+}
+
+func TestGateRejectsDuplicateCandidates(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0).UTC()
+	tok := testToken(now)
+	gate := NewGate(tok)
+	claim := testClaim(tok)
+	claim.Candidates = []string{"203.0.113.10:12345", "203.0.113.10:12345"}
+	claim.BearerMAC = ComputeBearerMAC(tok.BearerSecret, claim)
+
+	decision, err := gate.Accept(now, claim)
+	if !errors.Is(err, ErrDenied) {
+		t.Fatalf("Accept() error = %v, want ErrDenied", err)
+	}
+	if decision.Reject == nil || decision.Reject.Code != RejectClaimMalformed {
+		t.Fatalf("Reject = %+v, want %q", decision.Reject, RejectClaimMalformed)
 	}
 }
 

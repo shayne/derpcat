@@ -4,9 +4,11 @@ import (
 	"crypto/hmac"
 	"encoding/hex"
 	"errors"
+	"os"
 	"sync"
 	"time"
 
+	"github.com/shayne/derphole/pkg/candidate"
 	"github.com/shayne/derphole/pkg/token"
 )
 
@@ -15,8 +17,8 @@ var (
 	ErrDenied  = errors.New("claim denied")
 )
 
-const MaxClaimCandidates = 32
-const MaxCandidateLength = 128
+const MaxClaimCandidates = candidate.MaxCount
+const MaxCandidateLength = candidate.MaxLength
 
 type Gate struct {
 	mu    sync.Mutex
@@ -91,13 +93,8 @@ func validBearerMAC(secret [32]byte, claim Claim) bool {
 }
 
 func validCandidates(candidates []string) bool {
-	if len(candidates) > MaxClaimCandidates {
-		return false
+	if os.Getenv("DERPHOLE_FAKE_TRANSPORT") == "1" {
+		return candidate.ValidateClaimStrings(candidates, candidate.AllowLoopback()) == nil
 	}
-	for _, candidate := range candidates {
-		if candidate == "" || len(candidate) > MaxCandidateLength {
-			return false
-		}
-	}
-	return true
+	return candidate.ValidateClaimStrings(candidates) == nil
 }
