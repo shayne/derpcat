@@ -19,6 +19,7 @@ import (
 var errAmbiguousReceiveOutput = errors.New("received output directory contains more than one file")
 
 var derpholeReceive = derphole.Receive
+var derptunOpen = session.DerptunOpen
 
 type Callbacks interface {
 	Status(status string)
@@ -32,19 +33,90 @@ type Receiver struct {
 	generation uint64
 }
 
+type TunnelCallbacks interface {
+	Status(status string)
+	Trace(trace string)
+	BoundAddr(addr string)
+}
+
+type TunnelClient struct {
+	mu         sync.Mutex
+	cancel     context.CancelFunc
+	generation uint64
+}
+
 func NewReceiver() *Receiver {
 	return &Receiver{}
 }
 
-func ParsePayload(payload string) (string, error) {
-	return qrpayload.ParseReceivePayload(payload)
+func NewTunnelClient() *TunnelClient {
+	return &TunnelClient{}
+}
+
+type ParsedPayload struct {
+	kind   string
+	token  string
+	scheme string
+	path   string
+}
+
+func (p *ParsedPayload) Kind() string {
+	if p == nil {
+		return ""
+	}
+	return p.kind
+}
+
+func (p *ParsedPayload) Token() string {
+	if p == nil {
+		return ""
+	}
+	return p.token
+}
+
+func (p *ParsedPayload) Scheme() string {
+	if p == nil {
+		return ""
+	}
+	return p.scheme
+}
+
+func (p *ParsedPayload) Path() string {
+	if p == nil {
+		return ""
+	}
+	return p.path
+}
+
+func ParsePayload(payload string) (*ParsedPayload, error) {
+	parsed, err := qrpayload.Parse(payload)
+	if err != nil {
+		return nil, err
+	}
+	return &ParsedPayload{
+		kind:   string(parsed.Kind),
+		token:  parsed.Token,
+		scheme: parsed.Scheme,
+		path:   parsed.Path,
+	}, nil
+}
+
+func ParseFileToken(payload string) (string, error) {
+	parsed, err := qrpayload.Parse(payload)
+	if err != nil {
+		return "", err
+	}
+	if parsed.Kind != qrpayload.KindFile {
+		return "", qrpayload.ErrUnsupportedPayload
+	}
+	return parsed.Token, nil
 }
 
 func (r *Receiver) Receive(payloadOrToken string, outputDir string, callbacks Callbacks) (string, error) {
 	if strings.TrimSpace(outputDir) == "" {
 		return "", errors.New("output directory is required")
 	}
-	token, err := ParsePayload(payloadOrToken)
+	token, err := ParseFileToken(payloadOrToken)
 	if err != nil {
 		return "", err
 	}
@@ -126,6 +198,84 @@ func (r *Receiver) clearCancel(generation uint64) {
 		r.cancel = nil
 	}
 	r.mu.Unlock()
+}
+
+func (c *TunnelClient) Open(token, listenAddr string, callbacks TunnelCallbacks) error {
+	token = strings.TrimSpace(token)
+	if token == "" {
+		return qrpayload.ErrMissingToken
+	}
+	listenAddr = strings.TrimSpace(listenAddr)
+	if listenAddr == "" {
+		listenAddr = "127.0.0.1:0"
+	}
+
+	ctx, cancel, generation := c.beginContext()
+	bindSink := make(chan string, 1)
+	done := make(chan error, 1)
+	statusWriter := callbackLineWriter{line: func(line string) {
+		if callbacks != nil {
+			callbacks.Status(line)
+			callbacks.Trace(line)
+		}
+	}}
+
+	go func() {
+		err := derptunOpen(ctx, session.DerptunOpenConfig{
+			ClientToken:   token,
+			ListenAddr:    listenAddr,
+			BindAddrSink:  bindSink,
+			Emitter:       telemetry.New(statusWriter, telemetry.LevelDefault),
+			ForceRelay:    false,
+			UsePublicDERP: true,
+		})
+		c.clearCancel(generation)
+		done <- err
+	}()
+
+	select {
+	case bindAddr := <-bindSink:
+		if callbacks != nil {
+			callbacks.BoundAddr(bindAddr)
+		}
+		return nil
+	case err := <-done:
+		cancel()
+		if err != nil {
+			return err
+		}
+		return nil
+	}
+}
+
+func (c *TunnelClient) Cancel() {
+	c.mu.Lock()
+	cancel := c.cancel
+	c.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+}
+
+func (c *TunnelClient) beginContext() (context.Context, context.CancelFunc, uint64) {
+	ctx, cancel := context.WithCancel(context.Background())
+	c.mu.Lock()
+	if c.cancel != nil {
+		c.cancel()
+	}
+	c.generation++
+	c.cancel = cancel
+	generation := c.generation
+	c.mu.Unlock()
+	return ctx, cancel, generation
+}
+
+func (c *TunnelClient) clearCancel(generation uint64) {
+	c.mu.Lock()
+	if c.generation == generation {
+		c.cancel = nil
+	}
+	c.mu.Unlock()
 }
 
 type callbackLineWriter struct {

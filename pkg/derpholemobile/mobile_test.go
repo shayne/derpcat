@@ -9,6 +9,7 @@ import (
 
 	"github.com/shayne/derphole/pkg/derphole"
 	"github.com/shayne/derphole/pkg/derphole/qrpayload"
+	"github.com/shayne/derphole/pkg/session"
 )
 
 type testCallbacks struct {
@@ -23,17 +24,130 @@ func (c *testCallbacks) Progress(current int64, total int64) {
 	c.progress = append(c.progress, [2]int64{current, total})
 }
 
-func TestParsePayloadReturnsToken(t *testing.T) {
+type recordingTunnelCallbacks struct {
+	statuses  []string
+	traces    []string
+	boundAddr string
+}
+
+func (c *recordingTunnelCallbacks) Status(status string)  { c.statuses = append(c.statuses, status) }
+func (c *recordingTunnelCallbacks) Trace(trace string)    { c.traces = append(c.traces, trace) }
+func (c *recordingTunnelCallbacks) BoundAddr(addr string) { c.boundAddr = addr }
+
+func TestParsePayloadClassifiesModes(t *testing.T) {
+	for _, tt := range []struct {
+		name   string
+		raw    string
+		kind   string
+		token  string
+		scheme string
+		path   string
+	}{
+		{name: "file", raw: "derphole://file?v=1&token=file-token", kind: "file", token: "file-token"},
+		{name: "web", raw: "derphole://web?path=%2Fadmin&scheme=http&token=dtc1_test&v=1", kind: "web", token: "dtc1_test", scheme: "http", path: "/admin"},
+		{name: "tcp", raw: "derphole://tcp?v=1&token=dtc1_test", kind: "tcp", token: "dtc1_test"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			parsed, err := ParsePayload(tt.raw)
+			if err != nil {
+				t.Fatalf("ParsePayload() error = %v", err)
+			}
+			if parsed.Kind() != tt.kind {
+				t.Fatalf("Kind() = %q, want %q", parsed.Kind(), tt.kind)
+			}
+			if parsed.Token() != tt.token {
+				t.Fatalf("Token() = %q, want %q", parsed.Token(), tt.token)
+			}
+			if parsed.Scheme() != tt.scheme {
+				t.Fatalf("Scheme() = %q, want %q", parsed.Scheme(), tt.scheme)
+			}
+			if parsed.Path() != tt.path {
+				t.Fatalf("Path() = %q, want %q", parsed.Path(), tt.path)
+			}
+		})
+	}
+}
+
+func TestParseFileTokenReturnsFileToken(t *testing.T) {
 	payload, err := qrpayload.EncodeFileToken("token-123")
 	if err != nil {
 		t.Fatalf("EncodeFileToken() error = %v", err)
 	}
-	got, err := ParsePayload(payload)
+	got, err := ParseFileToken(payload)
 	if err != nil {
-		t.Fatalf("ParsePayload() error = %v", err)
+		t.Fatalf("ParseFileToken() error = %v", err)
 	}
 	if got != "token-123" {
-		t.Fatalf("ParsePayload() = %q, want token-123", got)
+		t.Fatalf("ParseFileToken() = %q, want token-123", got)
+	}
+}
+
+func TestParseFileTokenRejectsNonFilePayload(t *testing.T) {
+	payload, err := qrpayload.EncodeTCPToken("dtc1_test")
+	if err != nil {
+		t.Fatalf("EncodeTCPToken() error = %v", err)
+	}
+	_, err = ParseFileToken(payload)
+	if !errors.Is(err, qrpayload.ErrUnsupportedPayload) {
+		t.Fatalf("ParseFileToken() error = %v, want %v", err, qrpayload.ErrUnsupportedPayload)
+	}
+}
+
+func TestTunnelClientOpenUsesDerptunOpen(t *testing.T) {
+	oldOpen := derptunOpen
+	t.Cleanup(func() { derptunOpen = oldOpen })
+
+	canceled := make(chan struct{})
+	called := false
+	derptunOpen = func(ctx context.Context, cfg session.DerptunOpenConfig) error {
+		called = true
+		if cfg.ClientToken != "dtc1_test" {
+			t.Fatalf("ClientToken = %q, want dtc1_test", cfg.ClientToken)
+		}
+		if cfg.ListenAddr != "127.0.0.1:0" {
+			t.Fatalf("ListenAddr = %q, want 127.0.0.1:0", cfg.ListenAddr)
+		}
+		if cfg.Emitter == nil {
+			t.Fatal("Emitter is nil")
+		}
+		cfg.Emitter.Status("connected-direct")
+		cfg.BindAddrSink <- "127.0.0.1:54321"
+		<-ctx.Done()
+		close(canceled)
+		return nil
+	}
+
+	client := NewTunnelClient()
+	callbacks := &recordingTunnelCallbacks{}
+	if err := client.Open("dtc1_test", "127.0.0.1:0", callbacks); err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	if !called {
+		t.Fatal("derptunOpen was not called")
+	}
+	if callbacks.boundAddr != "127.0.0.1:54321" {
+		t.Fatalf("boundAddr = %q, want 127.0.0.1:54321", callbacks.boundAddr)
+	}
+	if len(callbacks.statuses) != 1 || callbacks.statuses[0] != "connected-direct" {
+		t.Fatalf("statuses = %#v, want connected-direct", callbacks.statuses)
+	}
+
+	client.Cancel()
+	<-canceled
+}
+
+func TestTunnelClientOpenReturnsFirstError(t *testing.T) {
+	oldOpen := derptunOpen
+	t.Cleanup(func() { derptunOpen = oldOpen })
+
+	sentinel := errors.New("open failed")
+	derptunOpen = func(context.Context, session.DerptunOpenConfig) error {
+		return sentinel
+	}
+
+	err := NewTunnelClient().Open("dtc1_test", "127.0.0.1:0", &recordingTunnelCallbacks{})
+	if !errors.Is(err, sentinel) {
+		t.Fatalf("Open() error = %v, want %v", err, sentinel)
 	}
 }
 

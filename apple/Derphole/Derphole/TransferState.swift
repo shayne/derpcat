@@ -299,7 +299,7 @@ final class TransferState: ObservableObject {
 
     private func parsePayload(_ payload: String) throws -> String {
         var error: NSError?
-        let token = DerpholemobileParsePayload(payload, &error)
+        let token = DerpholemobileParseFileToken(payload, &error)
         if let error {
             throw error
         }
