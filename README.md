@@ -11,7 +11,7 @@
 - local TCP service sharing with `share` and `open`
 - SSH access exchange with `ssh invite` and `ssh accept`
 
-Both tools use the public Tailscale [DERP](#what-is-derp) relay network for rendezvous and fallback, then promote live traffic to direct encrypted UDP when possible. They are **not** affiliated with Tailscale and do **not** use `tailscaled`.
+Both tools use the public Tailscale [DERP](#what-is-derp) relay network for rendezvous and fallback, then promote live traffic to direct encrypted UDP when possible. Payload bytes stay end-to-end encrypted on relay fallback, direct UDP, and authenticated QUIC stream paths; DERP sees routing metadata, not contents. They are **not** affiliated with Tailscale and do **not** use `tailscaled`.
 
 Neither tool is a WireGuard overlay or VPN. `derphole` handles one token, one session, one transfer or shared service. `derptun` handles one long-lived tunnel. See [Transport Model](#transport-model), [Why It Is Fast](#why-it-is-fast), and [Security Model](#security-model).
 
@@ -247,7 +247,7 @@ Result: move bytes early, keep relay fallback, and shift live sessions to direct
 
 Tokens are **bearer capabilities**. Anyone with a token can claim the matching session or tunnel until expiry, so share tokens over a trusted channel. `derphole` session tokens expire after one hour. `derptun` server tokens default to 180 days and can mint shorter-lived client tokens. Client tokens default to 90 days and cannot serve.
 
-DERP relays do **not** get keys needed to read or impersonate sessions. DERP can see routing metadata and packet timing, but not plaintext user payload bytes:
+Payload bytes are always end-to-end encrypted between token holders. Session and tunnel encryption is pinned to token-derived identity, so DERP relays do **not** get keys needed to read or impersonate sessions. DERP can see routing metadata and packet timing, but not plaintext user payload bytes:
 
 - On `listen/pipe` and `send/receive`, direct UDP and relay fallback both encrypt and authenticate user payloads with session AEAD derived from the bearer secret.
 - Relay-prefix startup frames leave frame kind and byte offsets visible for flow control, but encrypt user payload bytes.
