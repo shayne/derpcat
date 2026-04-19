@@ -247,14 +247,14 @@ Result: move bytes early, keep relay fallback, and shift live sessions to direct
 
 Tokens are **bearer capabilities**. Anyone with a token can claim the matching session or tunnel until expiry, so share tokens over a trusted channel. `derphole` session tokens expire after one hour. `derptun` server tokens default to 180 days and can mint shorter-lived client tokens. Client tokens default to 90 days and cannot serve.
 
-DERP relays do **not** get keys needed to read or impersonate sessions:
+DERP relays do **not** get keys needed to read or impersonate sessions. DERP can see routing metadata and packet timing, but not plaintext user payload bytes:
 
-- On the default `listen/pipe` and `send/receive` direct UDP path, payload packets are encrypted and authenticated with session AEAD derived from the bearer secret.
+- On `listen/pipe` and `send/receive`, direct UDP and relay fallback both encrypt and authenticate user payloads with session AEAD derived from the bearer secret.
+- Relay-prefix startup frames leave frame kind and byte offsets visible for flow control, but encrypt user payload bytes.
 - On `share/open`, stream traffic uses authenticated QUIC streams for the claimed session.
 - On `derptun`, stream traffic uses authenticated QUIC streams pinned to the stable tunnel identity in the token.
-- If packets are relayed through DERP, DERP only forwards encrypted session bytes.
 
-Simple rule: token possession authorizes the session. Intermediaries that only see DERP traffic do not have decrypt keys.
+Simple rule: token possession authorizes the session. Relays move packets; they do not hold decrypt keys for user payloads.
 
 ## Behavior
 
