@@ -14,6 +14,7 @@ import (
 type sendFlags struct {
 	ForceRelay   bool `flag:"force-relay" help:"Disable direct probing"`
 	HideProgress bool `flag:"hide-progress" help:"Suppress progress-bar display"`
+	QR           bool `flag:"qr" help:"Render a QR code for the receive token"`
 }
 
 type sendArgs struct {
@@ -34,7 +35,7 @@ var sendHelpConfig = yargs.HelpConfig{
 		"send": {
 			Name:        "send",
 			Description: "Send text, a file, or a directory.",
-			Usage:       "[--force-relay] [what]",
+			Usage:       "[--force-relay] [--qr] [what]",
 			Examples: []string{
 				"derphole send hello",
 				"derphole send ./photo.jpg",
@@ -84,6 +85,7 @@ func runSend(args []string, level telemetry.Level, stdin io.Reader, stdout, stde
 		Emitter:        telemetry.New(stderr, commandSessionTelemetryLevel(level)),
 		UsePublicDERP:  usePublicDERPTransport(),
 		ForceRelay:     parsed.SubCommandFlags.ForceRelay,
+		QR:             parsed.SubCommandFlags.QR,
 		ParallelPolicy: session.DefaultParallelPolicy(),
 	}); err != nil {
 		fmt.Fprintln(stderr, err)

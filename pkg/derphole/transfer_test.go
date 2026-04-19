@@ -254,6 +254,61 @@ func TestSendTextDoesNotEmitProgressBar(t *testing.T) {
 	}
 }
 
+func TestSendQRRejectsNonFileTransfer(t *testing.T) {
+	dir := t.TempDir()
+	for _, cfg := range []SendConfig{
+		{QR: true},
+		{QR: true, Text: "hello"},
+		{QR: true, What: "hello"},
+		{QR: true, Stdin: strings.NewReader("hello")},
+		{QR: true, What: dir},
+	} {
+		err := Send(context.Background(), cfg)
+		if err == nil || !strings.Contains(err.Error(), "--qr only supports file sends") {
+			t.Fatalf("Send(%#v) error = %v, want QR file-only error", cfg, err)
+		}
+	}
+}
+
+func TestSendQROfferPrintsQRInstruction(t *testing.T) {
+	prev := derpholeSessionOffer
+	t.Cleanup(func() {
+		derpholeSessionOffer = prev
+	})
+
+	derpholeSessionOffer = func(_ context.Context, cfg session.OfferConfig) (string, error) {
+		if cfg.TokenSink != nil {
+			cfg.TokenSink <- "token-123"
+		}
+		_, _ = io.Copy(io.Discard, cfg.StdioIn)
+		return "", nil
+	}
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "photo.jpg")
+	if err := os.WriteFile(path, []byte("image"), 0o644); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+
+	var stderr bytes.Buffer
+	err := Send(context.Background(), SendConfig{
+		QR:     true,
+		What:   path,
+		Stdin:  strings.NewReader("ignored"),
+		Stderr: &stderr,
+	})
+	if err != nil {
+		t.Fatalf("Send() error = %v", err)
+	}
+	got := stderr.String()
+	if strings.Contains(got, "npx -y derphole@latest receive") {
+		t.Fatalf("stderr contains npm receive command in QR mode: %q", got)
+	}
+	if !strings.Contains(got, "Scan this QR code") {
+		t.Fatalf("stderr = %q, want QR instruction", got)
+	}
+}
+
 func TestSendDefaultsParallelPolicyForOffer(t *testing.T) {
 	prev := derpholeSessionOffer
 	t.Cleanup(func() {

@@ -33,6 +33,7 @@ type SendConfig struct {
 	Emitter        *telemetry.Emitter
 	UsePublicDERP  bool
 	ForceRelay     bool
+	QR             bool
 	ParallelPolicy session.ParallelPolicy
 }
 
@@ -86,6 +87,10 @@ func normalizeParallelPolicy(policy session.ParallelPolicy) session.ParallelPoli
 func Send(ctx context.Context, cfg SendConfig) error {
 	cfg.ParallelPolicy = normalizeParallelPolicy(cfg.ParallelPolicy)
 
+	if err := validateQRSendConfig(cfg); err != nil {
+		return err
+	}
+
 	tx, err := prepareSendTransfer(cfg)
 	if err != nil {
 		return err
@@ -124,6 +129,27 @@ func Send(ctx context.Context, cfg SendConfig) error {
 	default:
 		return errors.New("unsupported receive code")
 	}
+}
+
+func validateQRSendConfig(cfg SendConfig) error {
+	if !cfg.QR {
+		return nil
+	}
+	const qrFileOnlyErr = "--qr only supports file sends"
+	if cfg.Text != "" || cfg.What == "" {
+		return errors.New(qrFileOnlyErr)
+	}
+	info, err := os.Stat(cfg.What)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return errors.New(qrFileOnlyErr)
+		}
+		return err
+	}
+	if info.IsDir() {
+		return errors.New(qrFileOnlyErr)
+	}
+	return nil
 }
 
 func Receive(ctx context.Context, cfg ReceiveConfig) error {
@@ -418,7 +444,11 @@ func offerTransfer(ctx context.Context, cfg SendConfig, tx sendTransfer) error {
 	}
 
 	tx.header.Verify = VerificationString(token)
-	WriteSendInstruction(cfg.Stderr, token)
+	if cfg.QR {
+		WriteSendQRInstruction(cfg.Stderr, token)
+	} else {
+		WriteSendInstruction(cfg.Stderr, token)
+	}
 
 	progress, writeErr := writeTransferWithProgress(pipeWriter, tx, cfg.ProgressOutput, cfg.Stderr)
 	_ = pipeWriter.CloseWithError(writeErr)

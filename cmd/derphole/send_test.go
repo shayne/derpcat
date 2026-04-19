@@ -31,6 +31,40 @@ func TestSendHelpIncludesHideProgress(t *testing.T) {
 	}
 }
 
+func TestSendHelpIncludesQR(t *testing.T) {
+	if !strings.Contains(sendHelpText(), "--qr") {
+		t.Fatalf("sendHelpText() missing --qr:\n%s", sendHelpText())
+	}
+}
+
+func TestRunSendPassesQRFlag(t *testing.T) {
+	prev := runSendTransfer
+	t.Cleanup(func() {
+		runSendTransfer = prev
+	})
+
+	called := false
+	runSendTransfer = func(_ context.Context, cfg pkgderphole.SendConfig) error {
+		called = true
+		if !cfg.QR {
+			t.Fatal("cfg.QR = false, want true")
+		}
+		if cfg.What != "photo.jpg" {
+			t.Fatalf("cfg.What = %q, want photo.jpg", cfg.What)
+		}
+		return nil
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"send", "--qr", "photo.jpg"}, strings.NewReader("ignored"), &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("run() = %d, want 0, stderr=%q", code, stderr.String())
+	}
+	if !called {
+		t.Fatal("runSendTransfer was not called")
+	}
+}
+
 func TestRunSendInvokesTransfer(t *testing.T) {
 	prev := runSendTransfer
 	t.Cleanup(func() {

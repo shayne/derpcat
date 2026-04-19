@@ -6,6 +6,9 @@ import (
 	"fmt"
 	"io"
 	"strings"
+
+	"github.com/mdp/qrterminal/v3"
+	"github.com/shayne/derphole/pkg/derphole/qrpayload"
 )
 
 func VerificationString(token string) string {
@@ -20,6 +23,19 @@ func WriteSendInstruction(stderr io.Writer, token string) {
 	}
 	fmt.Fprintln(stderr, "On the other machine, run:")
 	fmt.Fprintf(stderr, "npx -y derphole@latest receive %s\n", token)
+}
+
+func WriteSendQRInstruction(stderr io.Writer, token string) {
+	if stderr == nil {
+		return
+	}
+	payload, err := qrpayload.EncodeReceiveToken(token)
+	if err != nil {
+		fmt.Fprintf(stderr, "Could not render QR payload: %v\n", err)
+		return
+	}
+	fmt.Fprintln(stderr, "Scan this QR code with the Derphole iOS app:")
+	qrterminal.GenerateHalfBlock(payload, qrterminal.M, stderr)
 }
 
 func WriteReceiveToken(stderr io.Writer, token string) {

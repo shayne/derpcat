@@ -3,6 +3,7 @@ module github.com/shayne/derphole
 go 1.26.1
 
 require (
+	github.com/mdp/qrterminal/v3 v3.2.1
 	github.com/pion/webrtc/v4 v4.2.11
 	github.com/quic-go/quic-go v0.59.0
 	github.com/shayne/yargs v1.0.1
@@ -55,7 +56,9 @@ require (
 	go4.org/netipx v0.0.0-20231129151722-fdeea329fbba // indirect
 	golang.org/x/exp v0.0.0-20250620022241-b7579e27df2b // indirect
 	golang.org/x/sync v0.19.0 // indirect
+	golang.org/x/term v0.40.0 // indirect
 	golang.org/x/time v0.12.0 // indirect
 	golang.zx2c4.com/wintun v0.0.0-20230126152724-0fa3db229ce2 // indirect
 	golang.zx2c4.com/wireguard/windows v0.5.3 // indirect
+	rsc.io/qr v0.2.0 // indirect
 )
