@@ -4,6 +4,8 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/cipher"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -620,6 +622,65 @@ func TestSendClaimAndReceiveDecisionIgnoresUnsignedDecisionWhenAuthConfigured(t 
 	}
 }
 
+func TestExternalRelayPrefixDERPDataFrameEncryptsAndAuthenticates(t *testing.T) {
+	aead := testExternalSessionAEAD(t, 0x41)
+	wrongAEAD := testExternalSessionAEAD(t, 0x42)
+	plaintext := []byte("relay-prefix-secret-marker")
+
+	wire, err := externalRelayPrefixDERPPayload(externalRelayPrefixDERPFrameData, 64, plaintext, aead)
+	if err != nil {
+		t.Fatalf("externalRelayPrefixDERPPayload() error = %v", err)
+	}
+	if externalRelayPrefixDERPFrameKindOf(wire) != externalRelayPrefixDERPFrameData {
+		t.Fatalf("frame kind = %v, want data", externalRelayPrefixDERPFrameKindOf(wire))
+	}
+	if bytes.Contains(wire, plaintext) {
+		t.Fatalf("encrypted relay-prefix frame contains plaintext marker: %x", wire)
+	}
+
+	got, err := externalRelayPrefixDERPDecodeChunk(wire, aead)
+	if err != nil {
+		t.Fatalf("externalRelayPrefixDERPDecodeChunk() error = %v", err)
+	}
+	if got.Offset != 64 {
+		t.Fatalf("offset = %d, want 64", got.Offset)
+	}
+	if !bytes.Equal(got.Payload, plaintext) {
+		t.Fatalf("payload = %q, want %q", got.Payload, plaintext)
+	}
+
+	if _, err := externalRelayPrefixDERPDecodeChunk(wire, wrongAEAD); err == nil {
+		t.Fatal("DecodeChunk() with wrong AEAD succeeded, want authentication failure")
+	}
+}
+
+func TestExternalRelayPrefixDERPDataFrameRejectsPlaintextAndTamper(t *testing.T) {
+	aead := testExternalSessionAEAD(t, 0x51)
+	plaintext := []byte("legacy-plaintext-marker")
+
+	legacy := legacyRelayPrefixDERPDataFrame(t, 7, plaintext)
+	if _, err := externalRelayPrefixDERPDecodeChunk(legacy, aead); err == nil {
+		t.Fatal("DecodeChunk() accepted legacy plaintext relay-prefix data frame")
+	}
+
+	wire, err := externalRelayPrefixDERPPayload(externalRelayPrefixDERPFrameData, 7, plaintext, aead)
+	if err != nil {
+		t.Fatalf("externalRelayPrefixDERPPayload() error = %v", err)
+	}
+
+	tamperedCiphertext := append([]byte(nil), wire...)
+	tamperedCiphertext[len(tamperedCiphertext)-1] ^= 0x80
+	if _, err := externalRelayPrefixDERPDecodeChunk(tamperedCiphertext, aead); err == nil {
+		t.Fatal("DecodeChunk() accepted tampered ciphertext")
+	}
+
+	tamperedHeader := append([]byte(nil), wire...)
+	tamperedHeader[24] ^= 0x01
+	if _, err := externalRelayPrefixDERPDecodeChunk(tamperedHeader, aead); err == nil {
+		t.Fatal("DecodeChunk() accepted tampered associated-data header")
+	}
+}
+
 func TestSendExternalHandoffDERPStopUsesReceiverHandoffAckBelowReadBoundary(t *testing.T) {
 	srv := newSessionTestDERPServer(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
@@ -636,6 +697,7 @@ func TestSendExternalHandoffDERPStopUsesReceiverHandoffAckBelowReadBoundary(t *t
 		t.Fatalf("NewClient(sender) error = %v", err)
 	}
 	defer senderDERP.Close()
+	aead := testExternalSessionAEAD(t, 0x61)
 
 	relayFrames, unsubscribe := listenerDERP.SubscribeLossless(func(pkt derpbind.Packet) bool {
 		return pkt.From == senderDERP.PublicKey() && externalRelayPrefixDERPFrameKindOf(pkt.Payload) != 0
@@ -652,7 +714,7 @@ func TestSendExternalHandoffDERPStopUsesReceiverHandoffAckBelowReadBoundary(t *t
 	errCh := make(chan error, 1)
 	metrics := newExternalTransferMetrics(time.Now())
 	go func() {
-		errCh <- sendExternalHandoffDERP(ctx, senderDERP, listenerDERP.PublicKey(), spool, stopCh, metrics)
+		errCh <- sendExternalHandoffDERP(ctx, senderDERP, listenerDERP.PublicKey(), spool, stopCh, metrics, aead)
 	}()
 
 	for dataFrames := 0; dataFrames < 2; {
@@ -732,6 +794,7 @@ func TestSendExternalHandoffDERPWaitsForRelayPauseControlBeforeSendingFrames(t *
 		t.Fatalf("NewClient(sender) error = %v", err)
 	}
 	defer senderDERP.Close()
+	aead := testExternalSessionAEAD(t, 0x62)
 
 	relayFrames, unsubscribe := listenerDERP.SubscribeLossless(func(pkt derpbind.Packet) bool {
 		return pkt.From == senderDERP.PublicKey() && externalRelayPrefixDERPFrameKindOf(pkt.Payload) != 0
@@ -749,7 +812,7 @@ func TestSendExternalHandoffDERPWaitsForRelayPauseControlBeforeSendingFrames(t *
 
 	errCh := make(chan error, 1)
 	go func() {
-		errCh <- sendExternalHandoffDERP(ctx, senderDERP, listenerDERP.PublicKey(), spool, nil, nil)
+		errCh <- sendExternalHandoffDERP(ctx, senderDERP, listenerDERP.PublicKey(), spool, nil, nil, aead)
 	}()
 
 	select {
@@ -787,6 +850,7 @@ func TestSendExternalHandoffDERPStopToleratesDelayedReceiverHandoffAck(t *testin
 		t.Fatalf("NewClient(sender) error = %v", err)
 	}
 	defer senderDERP.Close()
+	aead := testExternalSessionAEAD(t, 0x63)
 
 	relayFrames, unsubscribe := listenerDERP.SubscribeLossless(func(pkt derpbind.Packet) bool {
 		return pkt.From == senderDERP.PublicKey() && externalRelayPrefixDERPFrameKindOf(pkt.Payload) != 0
@@ -802,7 +866,7 @@ func TestSendExternalHandoffDERPStopToleratesDelayedReceiverHandoffAck(t *testin
 	stopCh := make(chan struct{})
 	errCh := make(chan error, 1)
 	go func() {
-		errCh <- sendExternalHandoffDERP(ctx, senderDERP, listenerDERP.PublicKey(), spool, stopCh, nil)
+		errCh <- sendExternalHandoffDERP(ctx, senderDERP, listenerDERP.PublicKey(), spool, stopCh, nil, aead)
 	}()
 
 	for dataFrames := 0; dataFrames < 2; {
@@ -826,7 +890,7 @@ func TestSendExternalHandoffDERPStopToleratesDelayedReceiverHandoffAck(t *testin
 		case pkt := <-relayFrames:
 			switch externalRelayPrefixDERPFrameKindOf(pkt.Payload) {
 			case externalRelayPrefixDERPFrameData:
-				chunk, err := externalRelayPrefixDERPDecodeChunk(pkt.Payload)
+				chunk, err := externalRelayPrefixDERPDecodeChunk(pkt.Payload, aead)
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -908,6 +972,7 @@ func TestSendExternalHandoffDERPStopBeforeRelayProgressStillStartsRelayData(t *t
 		t.Fatalf("NewClient(sender) error = %v", err)
 	}
 	defer senderDERP.Close()
+	aead := testExternalSessionAEAD(t, 0x64)
 
 	relayFrames, unsubscribe := listenerDERP.SubscribeLossless(func(pkt derpbind.Packet) bool {
 		return pkt.From == senderDERP.PublicKey() && externalRelayPrefixDERPFrameKindOf(pkt.Payload) != 0
@@ -923,7 +988,7 @@ func TestSendExternalHandoffDERPStopBeforeRelayProgressStillStartsRelayData(t *t
 	stopCh := make(chan struct{})
 	errCh := make(chan error, 1)
 	go func() {
-		errCh <- sendExternalHandoffDERP(ctx, senderDERP, listenerDERP.PublicKey(), spool, stopCh, nil)
+		errCh <- sendExternalHandoffDERP(ctx, senderDERP, listenerDERP.PublicKey(), spool, stopCh, nil, aead)
 	}()
 	close(stopCh)
 
@@ -940,7 +1005,7 @@ func TestSendExternalHandoffDERPStopBeforeRelayProgressStillStartsRelayData(t *t
 			}
 			switch kind {
 			case externalRelayPrefixDERPFrameData:
-				chunk, err := externalRelayPrefixDERPDecodeChunk(pkt.Payload)
+				chunk, err := externalRelayPrefixDERPDecodeChunk(pkt.Payload, aead)
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -988,6 +1053,7 @@ func TestReceiveExternalHandoffDERPReturnsCurrentWatermarkOnHandoffBelowBoundary
 		t.Fatalf("NewClient(sender) error = %v", err)
 	}
 	defer senderDERP.Close()
+	aead := testExternalSessionAEAD(t, 0x65)
 	warmExternalQUICModeTestDERPRoute(t, ctx, senderDERP, listenerDERP)
 	warmExternalQUICModeTestDERPRoute(t, ctx, listenerDERP, senderDERP)
 
@@ -1005,10 +1071,10 @@ func TestReceiveExternalHandoffDERPReturnsCurrentWatermarkOnHandoffBelowBoundary
 	metrics := newExternalTransferMetrics(time.Now())
 	errCh := make(chan error, 1)
 	go func() {
-		errCh <- receiveExternalHandoffDERP(ctx, listenerDERP, senderDERP.PublicKey(), rx, relayFrames, metrics)
+		errCh <- receiveExternalHandoffDERP(ctx, listenerDERP, senderDERP.PublicKey(), rx, relayFrames, metrics, aead)
 	}()
 
-	if err := externalRelayPrefixDERPSendChunk(ctx, senderDERP, listenerDERP.PublicKey(), externalHandoffChunk{Offset: 0, Payload: []byte("abcd")}); err != nil {
+	if err := externalRelayPrefixDERPSendChunk(ctx, senderDERP, listenerDERP.PublicKey(), externalHandoffChunk{Offset: 0, Payload: []byte("abcd")}, aead); err != nil {
 		t.Fatal(err)
 	}
 	select {
@@ -1061,6 +1127,7 @@ func TestReceiveExternalHandoffDERPTracksOnlyDeliveredRelayBytes(t *testing.T) {
 		t.Fatalf("NewClient(sender) error = %v", err)
 	}
 	defer senderDERP.Close()
+	aead := testExternalSessionAEAD(t, 0x66)
 	warmExternalQUICModeTestDERPRoute(t, ctx, senderDERP, listenerDERP)
 	warmExternalQUICModeTestDERPRoute(t, ctx, listenerDERP, senderDERP)
 
@@ -1078,10 +1145,10 @@ func TestReceiveExternalHandoffDERPTracksOnlyDeliveredRelayBytes(t *testing.T) {
 	metrics := newExternalTransferMetrics(time.Now())
 	errCh := make(chan error, 1)
 	go func() {
-		errCh <- receiveExternalHandoffDERP(ctx, listenerDERP, senderDERP.PublicKey(), rx, relayFrames, metrics)
+		errCh <- receiveExternalHandoffDERP(ctx, listenerDERP, senderDERP.PublicKey(), rx, relayFrames, metrics, aead)
 	}()
 
-	if err := externalRelayPrefixDERPSendChunk(ctx, senderDERP, listenerDERP.PublicKey(), externalHandoffChunk{Offset: 0, Payload: []byte("abcd")}); err != nil {
+	if err := externalRelayPrefixDERPSendChunk(ctx, senderDERP, listenerDERP.PublicKey(), externalHandoffChunk{Offset: 0, Payload: []byte("abcd")}, aead); err != nil {
 		t.Fatal(err)
 	}
 	select {
@@ -1097,7 +1164,7 @@ func TestReceiveExternalHandoffDERPTracksOnlyDeliveredRelayBytes(t *testing.T) {
 		t.Fatal("timed out waiting for first DERP prefix ACK")
 	}
 
-	if err := externalRelayPrefixDERPSendChunk(ctx, senderDERP, listenerDERP.PublicKey(), externalHandoffChunk{Offset: 2, Payload: []byte("cdef")}); err != nil {
+	if err := externalRelayPrefixDERPSendChunk(ctx, senderDERP, listenerDERP.PublicKey(), externalHandoffChunk{Offset: 2, Payload: []byte("cdef")}, aead); err != nil {
 		t.Fatal(err)
 	}
 	select {
@@ -1149,6 +1216,8 @@ func TestSendExternalViaRelayPrefixThenDirectUDPCompletesSmallPayloadBeforeSlowD
 		t.Fatalf("NewClient(sender) error = %v", err)
 	}
 	defer senderDERP.Close()
+	tok := testExternalSessionToken(0x67)
+	aead := testExternalSessionAEAD(t, 0x67)
 
 	relayFrames, unsubscribe := listenerDERP.SubscribeLossless(func(pkt derpbind.Packet) bool {
 		return pkt.From == senderDERP.PublicKey() && externalRelayPrefixDERPFrameKindOf(pkt.Payload) != 0
@@ -1163,7 +1232,7 @@ func TestSendExternalViaRelayPrefixThenDirectUDPCompletesSmallPayloadBeforeSlowD
 	receiveErrCh := make(chan error, 1)
 	go func() {
 		rx := newExternalHandoffReceiver(&out, externalHandoffMaxUnackedBytes)
-		receiveErrCh <- receiveExternalHandoffDERP(ctx, listenerDERP, senderDERP.PublicKey(), rx, relayFrames, nil)
+		receiveErrCh <- receiveExternalHandoffDERP(ctx, listenerDERP, senderDERP.PublicKey(), rx, relayFrames, nil, aead)
 	}()
 
 	prevWaitDirectUDPAddr := waitExternalDirectUDPAddr
@@ -1198,6 +1267,7 @@ func TestSendExternalViaRelayPrefixThenDirectUDPCompletesSmallPayloadBeforeSlowD
 	start := time.Now()
 	err = sendExternalViaRelayPrefixThenDirectUDP(ctx, externalRelayPrefixSendConfig{
 		src:          bytes.NewReader(payload),
+		tok:          tok,
 		decision:     rendezvous.Decision{Accept: &rendezvous.AcceptInfo{}},
 		derpClient:   senderDERP,
 		listenerDERP: listenerDERP.PublicKey(),
@@ -1248,6 +1318,8 @@ func TestSendExternalViaRelayPrefixThenDirectUDPFallsBackToRelayWhenDirectPrepar
 		t.Fatalf("NewClient(sender) error = %v", err)
 	}
 	defer senderDERP.Close()
+	tok := testExternalSessionToken(0x68)
+	aead := testExternalSessionAEAD(t, 0x68)
 
 	relayFrames, unsubscribe := listenerDERP.SubscribeLossless(func(pkt derpbind.Packet) bool {
 		return pkt.From == senderDERP.PublicKey() && externalRelayPrefixDERPFrameKindOf(pkt.Payload) != 0
@@ -1260,7 +1332,7 @@ func TestSendExternalViaRelayPrefixThenDirectUDPFallsBackToRelayWhenDirectPrepar
 	receiveErrCh := make(chan error, 1)
 	go func() {
 		rx := newExternalHandoffReceiver(&out, externalHandoffMaxUnackedBytes)
-		receiveErrCh <- receiveExternalHandoffDERP(ctx, listenerDERP, senderDERP.PublicKey(), rx, relayFrames, nil)
+		receiveErrCh <- receiveExternalHandoffDERP(ctx, listenerDERP, senderDERP.PublicKey(), rx, relayFrames, nil, aead)
 	}()
 
 	prevWaitDirectUDPAddr := waitExternalDirectUDPAddr
@@ -1287,6 +1359,7 @@ func TestSendExternalViaRelayPrefixThenDirectUDPFallsBackToRelayWhenDirectPrepar
 	var status bytes.Buffer
 	err = sendExternalViaRelayPrefixThenDirectUDP(ctx, externalRelayPrefixSendConfig{
 		src:          bytes.NewReader(payload),
+		tok:          tok,
 		decision:     rendezvous.Decision{Accept: &rendezvous.AcceptInfo{}},
 		derpClient:   senderDERP,
 		listenerDERP: listenerDERP.PublicKey(),
@@ -1322,7 +1395,7 @@ func TestSendExternalViaRelayPrefixThenDirectUDPContinuesRelayWhileDirectPrepPen
 	start := time.Now()
 	prepDone := make(chan struct{})
 	relayProgressAfterStall := make(chan struct{}, 1)
-	externalSendExternalHandoffDERPFn = func(ctx context.Context, client *derpbind.Client, peerDERP key.NodePublic, spool *externalHandoffSpool, stop <-chan struct{}, metrics *externalTransferMetrics) error {
+	externalSendExternalHandoffDERPFn = func(ctx context.Context, client *derpbind.Client, peerDERP key.NodePublic, spool *externalHandoffSpool, stop <-chan struct{}, metrics *externalTransferMetrics, packetAEAD cipher.AEAD) error {
 		for {
 			select {
 			case <-stop:
@@ -1418,7 +1491,7 @@ func TestSendExternalViaRelayPrefixThenDirectUDPDoesNotResumeRelayAfterHandoff(t
 	prevSendRelay := externalSendExternalHandoffDERPFn
 	relayPaused := make(chan struct{})
 	relayCalls := 0
-	externalSendExternalHandoffDERPFn = func(ctx context.Context, client *derpbind.Client, peerDERP key.NodePublic, spool *externalHandoffSpool, stop <-chan struct{}, metrics *externalTransferMetrics) error {
+	externalSendExternalHandoffDERPFn = func(ctx context.Context, client *derpbind.Client, peerDERP key.NodePublic, spool *externalHandoffSpool, stop <-chan struct{}, metrics *externalTransferMetrics, packetAEAD cipher.AEAD) error {
 		relayCalls++
 		if relayCalls > 1 {
 			return errors.New("unexpected post-handoff relay resume")
@@ -1501,7 +1574,7 @@ func TestSendExternalViaRelayPrefixThenDirectUDPWaitsForHandoffReadyBeforeStoppi
 	prevSendRelay := externalSendExternalHandoffDERPFn
 	prepReady := make(chan struct{})
 	relayPaused := make(chan struct{})
-	externalSendExternalHandoffDERPFn = func(ctx context.Context, client *derpbind.Client, peerDERP key.NodePublic, spool *externalHandoffSpool, stop <-chan struct{}, metrics *externalTransferMetrics) error {
+	externalSendExternalHandoffDERPFn = func(ctx context.Context, client *derpbind.Client, peerDERP key.NodePublic, spool *externalHandoffSpool, stop <-chan struct{}, metrics *externalTransferMetrics, packetAEAD cipher.AEAD) error {
 		for {
 			_, err := spool.NextChunk()
 			if err == nil {
@@ -1579,7 +1652,7 @@ func TestSendExternalViaRelayPrefixThenDirectUDPStartsPrepareBeforeTransportMana
 	defer cancel()
 
 	prevSendRelay := externalSendExternalHandoffDERPFn
-	externalSendExternalHandoffDERPFn = func(ctx context.Context, client *derpbind.Client, peerDERP key.NodePublic, spool *externalHandoffSpool, stop <-chan struct{}, metrics *externalTransferMetrics) error {
+	externalSendExternalHandoffDERPFn = func(ctx context.Context, client *derpbind.Client, peerDERP key.NodePublic, spool *externalHandoffSpool, stop <-chan struct{}, metrics *externalTransferMetrics, packetAEAD cipher.AEAD) error {
 		<-ctx.Done()
 		return ctx.Err()
 	}
@@ -2030,7 +2103,7 @@ func TestReceiveExternalViaRelayPrefixThenDirectUDPStartsPrepareBeforeTransportM
 	defer cancel()
 
 	prevReceiveRelay := externalReceiveExternalHandoffDERPFn
-	externalReceiveExternalHandoffDERPFn = func(ctx context.Context, client *derpbind.Client, peerDERP key.NodePublic, rx *externalHandoffReceiver, packets <-chan derpbind.Packet, metrics *externalTransferMetrics) error {
+	externalReceiveExternalHandoffDERPFn = func(ctx context.Context, client *derpbind.Client, peerDERP key.NodePublic, rx *externalHandoffReceiver, packets <-chan derpbind.Packet, metrics *externalTransferMetrics, packetAEAD cipher.AEAD) error {
 		<-ctx.Done()
 		return ctx.Err()
 	}
@@ -6614,4 +6687,40 @@ func TestExternalDirectUDPDistributeDiscardStreamDoesNotBlockOtherLanesBehindSlo
 	}
 	_ = writerA.Close()
 	<-drainA
+}
+
+func testExternalSessionToken(seed byte) token.Token {
+	var tok token.Token
+	tok.Version = token.SupportedVersion
+	tok.ExpiresUnix = time.Now().Add(time.Hour).Unix()
+	tok.Capabilities = token.CapabilityStdio
+	for i := range tok.SessionID {
+		tok.SessionID[i] = seed + byte(i)
+	}
+	for i := range tok.BearerSecret {
+		tok.BearerSecret[i] = seed ^ byte(i+1)
+	}
+	return tok
+}
+
+func testExternalSessionAEAD(t *testing.T, seed byte) cipher.AEAD {
+	t.Helper()
+	aead, err := externalSessionPacketAEAD(testExternalSessionToken(seed))
+	if err != nil {
+		t.Fatalf("externalSessionPacketAEAD() error = %v", err)
+	}
+	return aead
+}
+
+func legacyRelayPrefixDERPDataFrame(t *testing.T, offset int64, payload []byte) []byte {
+	t.Helper()
+	if offset < 0 {
+		t.Fatalf("negative offset %d", offset)
+	}
+	out := make([]byte, 25+len(payload))
+	copy(out[:16], externalRelayPrefixDERPMagic[:])
+	out[16] = byte(externalRelayPrefixDERPFrameData)
+	binary.BigEndian.PutUint64(out[17:25], uint64(offset))
+	copy(out[25:], payload)
+	return out
 }

@@ -108,6 +108,7 @@ const (
 	externalDirectUDPRateProbeNonceOffset = externalDirectUDPRateProbeIndexOffset + 4
 	externalDirectUDPRateProbeMACOffset   = externalDirectUDPRateProbeNonceOffset + 16
 	externalDirectUDPRateProbeHeaderSize  = externalDirectUDPRateProbeMACOffset + sha256.Size
+	externalRelayPrefixDERPHeaderSize     = 25
 )
 
 type externalDirectUDPRateProbeAuth struct {
@@ -147,7 +148,8 @@ var externalDirectUDPReceiveRateProbesFn = externalDirectUDPReceiveRateProbes
 var externalDirectUDPConnsFn = externalDirectUDPConns
 var externalSendExternalHandoffDERPFn = sendExternalHandoffDERP
 var externalReceiveExternalHandoffDERPFn = receiveExternalHandoffDERP
-var externalDirectUDPPacketAEADDomain = []byte("derphole-direct-udp-packet-aead-v1")
+var externalSessionPacketAEADDomain = []byte("derphole-session-packet-aead-v1")
+var externalRelayPrefixDERPDataNonceDomain = []byte("derphole-relay-prefix-derp-data-nonce-v1")
 var externalDirectUDPObservePunchAddrsByConn = probe.ObservePunchAddrsByConn
 
 type externalDirectUDPSendPlan struct {
@@ -345,9 +347,9 @@ type externalDirectUDPReceivePlan struct {
 
 var waitExternalDirectUDPAddr = waitExternalDirectUDPAddrDefault
 
-func externalDirectUDPPacketAEAD(tok token.Token) (cipher.AEAD, error) {
+func externalSessionPacketAEAD(tok token.Token) (cipher.AEAD, error) {
 	hash := sha256.New()
-	_, _ = hash.Write(externalDirectUDPPacketAEADDomain)
+	_, _ = hash.Write(externalSessionPacketAEADDomain)
 	_, _ = hash.Write(tok.SessionID[:])
 	_, _ = hash.Write(tok.BearerSecret[:])
 	block, err := aes.NewCipher(hash.Sum(nil))
@@ -576,7 +578,7 @@ func externalPrepareDirectUDPSend(ctx context.Context, tok token.Token, derpClie
 		handoffWatermark = watermark
 	}
 	directExpectedBytes := externalDirectUDPRemainingExpectedBytes(cfg.StdioExpectedBytes, handoffWatermark)
-	packetAEAD, err := externalDirectUDPPacketAEAD(tok)
+	packetAEAD, err := externalSessionPacketAEAD(tok)
 	if err != nil {
 		return plan, err
 	}
@@ -785,7 +787,7 @@ func externalPrepareDirectUDPReceive(ctx context.Context, dst io.Writer, tok tok
 		}
 		cfg.Emitter.Debug("udp-direct-addrs=" + strings.Join(remoteAddrs, ","))
 	}
-	packetAEAD, err := externalDirectUDPPacketAEAD(tok)
+	packetAEAD, err := externalSessionPacketAEAD(tok)
 	if err != nil {
 		return plan, err
 	}
@@ -1131,6 +1133,10 @@ func sendExternalViaRelayPrefixThenDirectUDP(ctx context.Context, rcfg externalR
 	}
 	metrics := newExternalTransferMetrics(time.Now())
 	ctx = withExternalTransferMetrics(ctx, metrics)
+	packetAEAD, err := externalSessionPacketAEAD(rcfg.tok)
+	if err != nil {
+		return err
+	}
 	spool, err := newExternalHandoffSpool(rcfg.src, externalRelayPrefixDERPChunkSize, externalRelayPrefixDERPMaxUnacked)
 	if err != nil {
 		return err
@@ -1143,7 +1149,7 @@ func sendExternalViaRelayPrefixThenDirectUDP(ctx context.Context, rcfg externalR
 	relayStopCh := make(chan struct{})
 	relayErrCh := make(chan error, 1)
 	go func() {
-		relayErrCh <- externalSendExternalHandoffDERPFn(ctx, rcfg.derpClient, rcfg.listenerDERP, spool, relayStopCh, metrics)
+		relayErrCh <- externalSendExternalHandoffDERPFn(ctx, rcfg.derpClient, rcfg.listenerDERP, spool, relayStopCh, metrics, packetAEAD)
 	}()
 
 	handoffRelay := func() (bool, int64, error) {
@@ -1334,13 +1340,17 @@ type externalRelayPrefixReceiveConfig struct {
 func receiveExternalViaRelayPrefixThenDirectUDP(ctx context.Context, rcfg externalRelayPrefixReceiveConfig) error {
 	metrics := newExternalTransferMetrics(time.Now())
 	ctx = withExternalTransferMetrics(ctx, metrics)
+	packetAEAD, err := externalSessionPacketAEAD(rcfg.tok)
+	if err != nil {
+		return err
+	}
 	rx := newExternalHandoffReceiver(externalTransferMetricsWriter{w: rcfg.dst, record: metrics.RecordRelayWrite}, externalHandoffMaxUnackedBytes)
 	keepaliveCtx, keepaliveCancel := context.WithCancel(ctx)
 	defer keepaliveCancel()
 	go externalRelayPrefixTransportKeepalive(keepaliveCtx, rcfg.transportManager)
 	relayErrCh := make(chan error, 1)
 	go func() {
-		relayErrCh <- externalReceiveExternalHandoffDERPFn(ctx, rcfg.derpClient, rcfg.peerDERP, rx, rcfg.relayPackets, nil)
+		relayErrCh <- externalReceiveExternalHandoffDERPFn(ctx, rcfg.derpClient, rcfg.peerDERP, rx, rcfg.relayPackets, nil, packetAEAD)
 	}()
 
 	waitRelayOrReturnDirectError := func(directErr error) error {
@@ -1462,7 +1472,7 @@ func externalRelayPrefixTransportKeepalive(ctx context.Context, manager *transpo
 	}
 }
 
-func sendExternalHandoffDERP(ctx context.Context, client *derpbind.Client, peerDERP key.NodePublic, spool *externalHandoffSpool, stop <-chan struct{}, metrics *externalTransferMetrics) error {
+func sendExternalHandoffDERP(ctx context.Context, client *derpbind.Client, peerDERP key.NodePublic, spool *externalHandoffSpool, stop <-chan struct{}, metrics *externalTransferMetrics, packetAEAD cipher.AEAD) error {
 	externalTransferTracef("sender-derp-prefix-start")
 	if client == nil {
 		return errors.New("nil DERP client")
@@ -1630,7 +1640,7 @@ func sendExternalHandoffDERP(ctx context.Context, client *derpbind.Client, peerD
 		switch {
 		case err == nil:
 			externalTransferTracef("sender-derp-prefix-data offset=%d bytes=%d", chunk.Offset, len(chunk.Payload))
-			if err := externalRelayPrefixDERPSendChunk(ctx, client, peerDERP, chunk); err != nil {
+			if err := externalRelayPrefixDERPSendChunk(ctx, client, peerDERP, chunk, packetAEAD); err != nil {
 				return err
 			}
 			if metrics != nil {
@@ -1667,7 +1677,7 @@ func sendExternalHandoffDERP(ctx context.Context, client *derpbind.Client, peerD
 	}
 }
 
-func receiveExternalHandoffDERP(ctx context.Context, client *derpbind.Client, peerDERP key.NodePublic, rx *externalHandoffReceiver, packets <-chan derpbind.Packet, metrics *externalTransferMetrics) error {
+func receiveExternalHandoffDERP(ctx context.Context, client *derpbind.Client, peerDERP key.NodePublic, rx *externalHandoffReceiver, packets <-chan derpbind.Packet, metrics *externalTransferMetrics, packetAEAD cipher.AEAD) error {
 	externalTransferTracef("listener-derp-prefix-start")
 	if client == nil {
 		return errors.New("nil DERP client")
@@ -1705,7 +1715,7 @@ func receiveExternalHandoffDERP(ctx context.Context, client *derpbind.Client, pe
 		externalTransferTracef("listener-derp-prefix-frame kind=%d bytes=%d watermark=%d", kind, len(pkt.Payload), rx.Watermark())
 		switch kind {
 		case externalRelayPrefixDERPFrameData:
-			chunk, err := externalRelayPrefixDERPDecodeChunk(pkt.Payload)
+			chunk, err := externalRelayPrefixDERPDecodeChunk(pkt.Payload, packetAEAD)
 			if err != nil {
 				return err
 			}
@@ -1754,7 +1764,7 @@ func receiveExternalHandoffDERP(ctx context.Context, client *derpbind.Client, pe
 }
 
 func externalRelayPrefixDERPFrameKindOf(payload []byte) externalRelayPrefixDERPFrameKind {
-	if len(payload) < 25 || !mem.B(payload[:16]).Equal(mem.B(externalRelayPrefixDERPMagic[:])) {
+	if len(payload) < externalRelayPrefixDERPHeaderSize || !mem.B(payload[:16]).Equal(mem.B(externalRelayPrefixDERPMagic[:])) {
 		return 0
 	}
 	kind := externalRelayPrefixDERPFrameKind(payload[16])
@@ -1766,20 +1776,56 @@ func externalRelayPrefixDERPFrameKindOf(payload []byte) externalRelayPrefixDERPF
 	}
 }
 
-func externalRelayPrefixDERPPayload(kind externalRelayPrefixDERPFrameKind, offset int64, payload []byte) ([]byte, error) {
+func externalRelayPrefixDERPHeader(kind externalRelayPrefixDERPFrameKind, offset int64) ([]byte, error) {
 	if offset < 0 {
 		return nil, fmt.Errorf("negative relay-prefix DERP offset %d", offset)
 	}
-	out := make([]byte, 25+len(payload))
+	out := make([]byte, externalRelayPrefixDERPHeaderSize)
 	copy(out[:16], externalRelayPrefixDERPMagic[:])
 	out[16] = byte(kind)
 	binary.BigEndian.PutUint64(out[17:25], uint64(offset))
-	copy(out[25:], payload)
 	return out, nil
 }
 
-func externalRelayPrefixDERPSendChunk(ctx context.Context, client *derpbind.Client, peerDERP key.NodePublic, chunk externalHandoffChunk) error {
-	payload, err := externalRelayPrefixDERPPayload(externalRelayPrefixDERPFrameData, chunk.Offset, chunk.Payload)
+func externalRelayPrefixDERPDataNonce(header []byte) ([12]byte, error) {
+	var nonce [12]byte
+	if len(header) != externalRelayPrefixDERPHeaderSize {
+		return nonce, fmt.Errorf("relay-prefix DERP header length = %d, want %d", len(header), externalRelayPrefixDERPHeaderSize)
+	}
+	hash := sha256.New()
+	_, _ = hash.Write(externalRelayPrefixDERPDataNonceDomain)
+	_, _ = hash.Write(header)
+	sum := hash.Sum(nil)
+	copy(nonce[:], sum[:len(nonce)])
+	return nonce, nil
+}
+
+func externalRelayPrefixDERPPayload(kind externalRelayPrefixDERPFrameKind, offset int64, payload []byte, packetAEAD cipher.AEAD) ([]byte, error) {
+	header, err := externalRelayPrefixDERPHeader(kind, offset)
+	if err != nil {
+		return nil, err
+	}
+	if kind != externalRelayPrefixDERPFrameData {
+		if len(payload) != 0 {
+			return nil, errors.New("relay-prefix DERP control frame cannot carry payload")
+		}
+		return header, nil
+	}
+	if packetAEAD == nil {
+		return nil, errors.New("nil relay-prefix DERP data AEAD")
+	}
+	if packetAEAD.NonceSize() != 12 {
+		return nil, errors.New("unsupported relay-prefix DERP data AEAD nonce size")
+	}
+	nonce, err := externalRelayPrefixDERPDataNonce(header)
+	if err != nil {
+		return nil, err
+	}
+	return packetAEAD.Seal(header, nonce[:], payload, header), nil
+}
+
+func externalRelayPrefixDERPSendChunk(ctx context.Context, client *derpbind.Client, peerDERP key.NodePublic, chunk externalHandoffChunk, packetAEAD cipher.AEAD) error {
+	payload, err := externalRelayPrefixDERPPayload(externalRelayPrefixDERPFrameData, chunk.Offset, chunk.Payload, packetAEAD)
 	if err != nil {
 		return err
 	}
@@ -1787,7 +1833,7 @@ func externalRelayPrefixDERPSendChunk(ctx context.Context, client *derpbind.Clie
 }
 
 func externalRelayPrefixDERPSendAck(ctx context.Context, client *derpbind.Client, peerDERP key.NodePublic, watermark int64) error {
-	payload, err := externalRelayPrefixDERPPayload(externalRelayPrefixDERPFrameAck, watermark, nil)
+	payload, err := externalRelayPrefixDERPPayload(externalRelayPrefixDERPFrameAck, watermark, nil, nil)
 	if err != nil {
 		return err
 	}
@@ -1795,7 +1841,7 @@ func externalRelayPrefixDERPSendAck(ctx context.Context, client *derpbind.Client
 }
 
 func externalRelayPrefixDERPSendEOF(ctx context.Context, client *derpbind.Client, peerDERP key.NodePublic, finalOffset int64) error {
-	payload, err := externalRelayPrefixDERPPayload(externalRelayPrefixDERPFrameEOF, finalOffset, nil)
+	payload, err := externalRelayPrefixDERPPayload(externalRelayPrefixDERPFrameEOF, finalOffset, nil, nil)
 	if err != nil {
 		return err
 	}
@@ -1803,7 +1849,7 @@ func externalRelayPrefixDERPSendEOF(ctx context.Context, client *derpbind.Client
 }
 
 func externalRelayPrefixDERPSendHandoff(ctx context.Context, client *derpbind.Client, peerDERP key.NodePublic, watermark int64) error {
-	payload, err := externalRelayPrefixDERPPayload(externalRelayPrefixDERPFrameHandoff, watermark, nil)
+	payload, err := externalRelayPrefixDERPPayload(externalRelayPrefixDERPFrameHandoff, watermark, nil, nil)
 	if err != nil {
 		return err
 	}
@@ -1811,7 +1857,7 @@ func externalRelayPrefixDERPSendHandoff(ctx context.Context, client *derpbind.Cl
 }
 
 func externalRelayPrefixDERPSendHandoffAck(ctx context.Context, client *derpbind.Client, peerDERP key.NodePublic, watermark int64) error {
-	payload, err := externalRelayPrefixDERPPayload(externalRelayPrefixDERPFrameHandoffAck, watermark, nil)
+	payload, err := externalRelayPrefixDERPPayload(externalRelayPrefixDERPFrameHandoffAck, watermark, nil, nil)
 	if err != nil {
 		return err
 	}
@@ -1837,7 +1883,7 @@ func externalRelayPrefixDERPDecodeAck(payload []byte) (int64, error) {
 	return externalRelayPrefixDERPDecodeOffset(payload)
 }
 
-func externalRelayPrefixDERPDecodeChunk(payload []byte) (externalHandoffChunk, error) {
+func externalRelayPrefixDERPDecodeChunk(payload []byte, packetAEAD cipher.AEAD) (externalHandoffChunk, error) {
 	if externalRelayPrefixDERPFrameKindOf(payload) != externalRelayPrefixDERPFrameData {
 		return externalHandoffChunk{}, errors.New("unexpected relay-prefix DERP data frame")
 	}
@@ -1845,7 +1891,22 @@ func externalRelayPrefixDERPDecodeChunk(payload []byte) (externalHandoffChunk, e
 	if err != nil {
 		return externalHandoffChunk{}, err
 	}
-	return externalHandoffChunk{Offset: offset, Payload: payload[25:]}, nil
+	if packetAEAD == nil {
+		return externalHandoffChunk{}, errors.New("nil relay-prefix DERP data AEAD")
+	}
+	if packetAEAD.NonceSize() != 12 {
+		return externalHandoffChunk{}, errors.New("unsupported relay-prefix DERP data AEAD nonce size")
+	}
+	header := payload[:externalRelayPrefixDERPHeaderSize]
+	nonce, err := externalRelayPrefixDERPDataNonce(header)
+	if err != nil {
+		return externalHandoffChunk{}, err
+	}
+	cleartext, err := packetAEAD.Open(nil, nonce[:], payload[externalRelayPrefixDERPHeaderSize:], header)
+	if err != nil {
+		return externalHandoffChunk{}, fmt.Errorf("decrypt relay-prefix DERP data: %w", err)
+	}
+	return externalHandoffChunk{Offset: offset, Payload: cleartext}, nil
 }
 
 func externalRelayPrefixShouldFinishRelay(spool *externalHandoffSpool) bool {
