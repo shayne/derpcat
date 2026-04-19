@@ -147,22 +147,20 @@ func (s *jsFileSink) Open(ctx context.Context, meta webproto.Meta) error {
 }
 
 func (s *jsFileSink) WriteChunk(ctx context.Context, chunk []byte) error {
-	write := s.writer.Get("write")
-	if write.Type() != js.TypeFunction {
+	if s.writer.Get("write").Type() != js.TypeFunction {
 		return errors.New("writer.write is not a function")
 	}
 	u8 := js.Global().Get("Uint8Array").New(len(chunk))
 	js.CopyBytesToJS(u8, chunk)
-	_, err := await(ctx, write.Invoke(u8))
+	_, err := await(ctx, s.writer.Call("write", u8))
 	return err
 }
 
 func (s *jsFileSink) Close(ctx context.Context) error {
-	closeFn := s.writer.Get("close")
-	if closeFn.Type() != js.TypeFunction {
+	if s.writer.Get("close").Type() != js.TypeFunction {
 		return nil
 	}
-	_, err := await(ctx, closeFn.Invoke())
+	_, err := await(ctx, s.writer.Call("close"))
 	return err
 }
 

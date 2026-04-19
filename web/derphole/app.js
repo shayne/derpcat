@@ -123,12 +123,16 @@ async function pickFile() {
 }
 
 async function makeSink(progress) {
-  if (window.showDirectoryPicker) {
-    const directory = await window.showDirectoryPicker({ mode: "readwrite" });
+  if (window.showSaveFilePicker) {
     return {
       async open(name) {
-        const handle = await directory.getFileHandle(name || "derphole-download", { create: true });
-        return handle.createWritable();
+        const handle = await window.showSaveFilePicker({
+          suggestedName: name || "derphole-download",
+          startIn: "downloads",
+          id: "derphole-receive",
+        });
+        const stream = await handle.createWritable();
+        return bindWritableStream(stream);
       },
     };
   }
@@ -153,6 +157,13 @@ async function makeSink(progress) {
         },
       };
     },
+  };
+}
+
+function bindWritableStream(stream) {
+  return {
+    write: async (chunk) => stream.write(chunk),
+    close: async () => stream.close(),
   };
 }
 
