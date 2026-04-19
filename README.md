@@ -174,7 +174,7 @@ ssh -p 2222 user@127.0.0.1
 For SSH without a separate local listener, use `ProxyCommand`:
 
 ```bash
-ssh -o ProxyCommand='npx -y derptun@latest connect --token-file ./client.dtc --stdio' foo@localhost
+ssh -o ProxyCommand='npx -y derptun@latest connect --token-file ./client.dtc --stdio' foo@127.0.0.1
 ```
 
 The server token is secret serving authority. Keep it on the serving machine or in its secret manager. The client token can connect until it expires, but it cannot serve or mint more tokens.
@@ -186,7 +186,7 @@ npx -y derptun@latest token server --expires 2026-05-01T00:00:00Z > server.dts
 npx -y derptun@latest token client --token-file server.dts --expires 2026-04-25T00:00:00Z > client.dtc
 ```
 
-`--token TOKEN` still works for quick one-off commands. Prefer `--token-file PATH` for durable tokens. `--token-stdin` reads the token from the first stdin line when a pipe is more convenient.
+Use `--token TOKEN` to pass a token inline for quick one-off commands. Prefer `--token-file PATH` for durable tokens. `--token-stdin` reads the token from the first stdin line when a pipe is more convenient.
 
 The first `derptun` release is TCP-only. UDP forwarding is planned for use cases like Minecraft Bedrock servers, but it is not part of this release.
 
