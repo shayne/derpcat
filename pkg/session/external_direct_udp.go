@@ -133,6 +133,7 @@ const (
 var externalDirectUDPPreviewTransportCaps = probe.PreviewTransportCaps
 var externalDirectUDPProbeCandidates = publicProbeCandidates
 var externalDirectUDPProbeSendFn = probe.Send
+var externalDirectUDPProbeReceiveToWriterFn = probe.ReceiveToWriter
 var externalSendDirectUDPOnlyFn = sendExternalViaDirectUDPOnly
 var externalPrepareDirectUDPSendFn = externalPrepareDirectUDPSend
 var externalExecutePreparedDirectUDPSendFn = externalExecutePreparedDirectUDPSend
@@ -484,7 +485,7 @@ func sendExternalViaDirectUDP(ctx context.Context, cfg SendConfig) (retErr error
 
 	var sendErr error
 	if cfg.ForceRelay {
-		sendErr = sendExternalRelayUDP(ctx, countedSrc, transportManager, tok.SessionID, cfg.Emitter)
+		sendErr = sendExternalRelayUDP(ctx, countedSrc, transportManager, tok, cfg.Emitter)
 	} else {
 		sendErr = sendExternalViaRelayPrefixThenDirectUDP(ctx, externalRelayPrefixSendConfig{
 			src:              countedSrc,
@@ -905,7 +906,7 @@ func sendExternalViaDirectUDPOnly(ctx context.Context, src io.Reader, tok token.
 	plan, err := externalPrepareDirectUDPSendFn(ctx, tok, derpClient, listenerDERP, peerAddr, probeConns, remoteCandidates, readyAckCh, startAckCh, rateProbeCh, cfg)
 	if err != nil {
 		if externalDirectUDPWaitCanFallback(ctx, err) {
-			return sendExternalRelayUDP(ctx, src, transportManager, tok.SessionID, cfg.Emitter)
+			return sendExternalRelayUDP(ctx, src, transportManager, tok, cfg.Emitter)
 		}
 		return err
 	}
@@ -1062,7 +1063,7 @@ func listenExternalViaDirectUDP(ctx context.Context, cfg ListenConfig) (retTok s
 
 		var receiveErr error
 		if cfg.ForceRelay {
-			receiveErr = receiveExternalRelayUDP(ctx, countedDst, transportManager, session.token.SessionID, cfg.Emitter)
+			receiveErr = receiveExternalRelayUDP(ctx, countedDst, transportManager, session.token, cfg.Emitter)
 		} else {
 			receiveErr = receiveExternalViaRelayPrefixThenDirectUDP(ctx, externalRelayPrefixReceiveConfig{
 				dst:              countedDst,
@@ -1099,7 +1100,7 @@ func receiveExternalViaDirectUDPOnly(ctx context.Context, dst io.Writer, tok tok
 	plan, err := externalPrepareDirectUDPReceiveFn(ctx, dst, tok, derpClient, peerDERP, peerAddr, probeConns, remoteCandidates, decision, readyCh, startCh, cfg)
 	if err != nil {
 		if externalDirectUDPWaitCanFallback(ctx, err) {
-			return receiveExternalRelayUDP(ctx, dst, transportManager, tok.SessionID, cfg.Emitter)
+			return receiveExternalRelayUDP(ctx, dst, transportManager, tok, cfg.Emitter)
 		}
 		return err
 	}
@@ -5273,34 +5274,44 @@ func externalDirectUDPMergeReceiveStats(dst *probe.TransferStats, src probe.Tran
 	}
 }
 
-func sendExternalRelayUDP(ctx context.Context, src io.Reader, manager *transport.Manager, runID [16]byte, emitter *telemetry.Emitter) error {
+func sendExternalRelayUDP(ctx context.Context, src io.Reader, manager *transport.Manager, tok token.Token, emitter *telemetry.Emitter) error {
 	if emitter != nil {
 		emitter.Debug("udp-relay=true")
+	}
+	packetAEAD, err := externalSessionPacketAEAD(tok)
+	if err != nil {
+		return err
 	}
 	peerConn := manager.PeerDatagramConn(ctx)
 	packetConn := newExternalPeerDatagramPacketConn(ctx, peerConn)
 	defer packetConn.Close()
-	_, err := externalDirectUDPProbeSendFn(ctx, packetConn, packetConn.remoteAddr.String(), externalDirectUDPBufferedReader(src), probe.SendConfig{
+	_, err = externalDirectUDPProbeSendFn(ctx, packetConn, packetConn.remoteAddr.String(), externalDirectUDPBufferedReader(src), probe.SendConfig{
 		Raw:        true,
 		Transport:  "legacy",
 		ChunkSize:  externalDirectUDPChunkSize,
 		WindowSize: 4096,
-		RunID:      runID,
+		RunID:      tok.SessionID,
+		PacketAEAD: packetAEAD,
 	})
 	return err
 }
 
-func receiveExternalRelayUDP(ctx context.Context, dst io.Writer, manager *transport.Manager, runID [16]byte, emitter *telemetry.Emitter) error {
+func receiveExternalRelayUDP(ctx context.Context, dst io.Writer, manager *transport.Manager, tok token.Token, emitter *telemetry.Emitter) error {
 	if emitter != nil {
 		emitter.Debug("udp-relay=true")
+	}
+	packetAEAD, err := externalSessionPacketAEAD(tok)
+	if err != nil {
+		return err
 	}
 	peerConn := manager.PeerDatagramConn(ctx)
 	packetConn := newExternalPeerDatagramPacketConn(ctx, peerConn)
 	defer packetConn.Close()
 	receiveDst, flushDst := externalDirectUDPBufferedWriter(dst)
-	_, err := probe.ReceiveToWriter(ctx, packetConn, "", receiveDst, probe.ReceiveConfig{
+	_, err = externalDirectUDPProbeReceiveToWriterFn(ctx, packetConn, "", receiveDst, probe.ReceiveConfig{
 		Raw:           true,
-		ExpectedRunID: runID,
+		ExpectedRunID: tok.SessionID,
+		PacketAEAD:    packetAEAD,
 	})
 	if err == nil {
 		err = flushDst()

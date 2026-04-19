@@ -6219,6 +6219,88 @@ func TestExternalDirectUDPDiscardParallelSendsIndependentLanes(t *testing.T) {
 	}
 }
 
+func TestSendExternalRelayUDPConfiguresPacketAEAD(t *testing.T) {
+	prevSend := externalDirectUDPProbeSendFn
+	t.Cleanup(func() { externalDirectUDPProbeSendFn = prevSend })
+
+	tok := testExternalSessionToken(0x71)
+	var captured probe.SendConfig
+	externalDirectUDPProbeSendFn = func(ctx context.Context, conn net.PacketConn, remoteAddr string, src io.Reader, cfg probe.SendConfig) (probe.TransferStats, error) {
+		captured = cfg
+		_, _ = io.Copy(io.Discard, src)
+		if cfg.PacketAEAD == nil {
+			return probe.TransferStats{}, errors.New("missing PacketAEAD")
+		}
+		return probe.TransferStats{}, nil
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	manager := transport.NewManager(transport.ManagerConfig{
+		RelayAddr: &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 1},
+		RelaySend: func(context.Context, []byte) error {
+			return nil
+		},
+	})
+	t.Cleanup(func() {
+		cancel()
+		manager.Wait()
+	})
+	if err := manager.Start(ctx); err != nil {
+		t.Fatalf("manager.Start() error = %v", err)
+	}
+
+	if err := sendExternalRelayUDP(ctx, strings.NewReader("force-relay-secret-marker"), manager, tok, nil); err != nil {
+		t.Fatalf("sendExternalRelayUDP() error = %v", err)
+	}
+	if captured.RunID != tok.SessionID {
+		t.Fatalf("RunID = %x, want %x", captured.RunID, tok.SessionID)
+	}
+	if captured.PacketAEAD == nil {
+		t.Fatal("PacketAEAD = nil, want token-derived AEAD")
+	}
+}
+
+func TestReceiveExternalRelayUDPConfiguresPacketAEAD(t *testing.T) {
+	prevReceive := externalDirectUDPProbeReceiveToWriterFn
+	t.Cleanup(func() { externalDirectUDPProbeReceiveToWriterFn = prevReceive })
+
+	tok := testExternalSessionToken(0x72)
+	var captured probe.ReceiveConfig
+	externalDirectUDPProbeReceiveToWriterFn = func(ctx context.Context, conn net.PacketConn, remoteAddr string, dst io.Writer, cfg probe.ReceiveConfig) (probe.TransferStats, error) {
+		captured = cfg
+		if cfg.PacketAEAD == nil {
+			return probe.TransferStats{}, errors.New("missing PacketAEAD")
+		}
+		return probe.TransferStats{}, nil
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	manager := transport.NewManager(transport.ManagerConfig{
+		RelayAddr: &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 1},
+		RelaySend: func(context.Context, []byte) error {
+			return nil
+		},
+	})
+	t.Cleanup(func() {
+		cancel()
+		manager.Wait()
+	})
+	if err := manager.Start(ctx); err != nil {
+		t.Fatalf("manager.Start() error = %v", err)
+	}
+
+	var out bytes.Buffer
+	if err := receiveExternalRelayUDP(ctx, &out, manager, tok, nil); err != nil {
+		t.Fatalf("receiveExternalRelayUDP() error = %v", err)
+	}
+	if captured.ExpectedRunID != tok.SessionID {
+		t.Fatalf("ExpectedRunID = %x, want %x", captured.ExpectedRunID, tok.SessionID)
+	}
+	if captured.PacketAEAD == nil {
+		t.Fatal("PacketAEAD = nil, want token-derived AEAD")
+	}
+}
+
 func TestExternalDirectUDPDiscardParallelPrefersLaneSendErrorOverPipeFallout(t *testing.T) {
 	prevSend := externalDirectUDPProbeSendFn
 	t.Cleanup(func() { externalDirectUDPProbeSendFn = prevSend })

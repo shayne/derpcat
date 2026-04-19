@@ -180,7 +180,7 @@ func offerExternal(ctx context.Context, cfg OfferConfig) (retTok string, retErr 
 		}
 		var sendErr error
 		if cfg.ForceRelay {
-			sendErr = sendExternalRelayUDP(ctx, countedSrc, transportManager, session.token.SessionID, cfg.Emitter)
+			sendErr = sendExternalRelayUDP(ctx, countedSrc, transportManager, session.token, cfg.Emitter)
 		} else {
 			sendErr = sendExternalViaRelayPrefixThenDirectUDP(ctx, externalRelayPrefixSendConfig{
 				src:              countedSrc,
@@ -376,7 +376,7 @@ func receiveExternal(ctx context.Context, cfg ReceiveConfig) (retErr error) {
 
 	var receiveErr error
 	if cfg.ForceRelay {
-		receiveErr = receiveExternalRelayUDP(ctx, countedDst, transportManager, tok.SessionID, cfg.Emitter)
+		receiveErr = receiveExternalRelayUDP(ctx, countedDst, transportManager, tok, cfg.Emitter)
 	} else {
 		listenCfg := ListenConfig{
 			Emitter:       cfg.Emitter,
