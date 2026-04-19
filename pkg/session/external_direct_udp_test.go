@@ -681,6 +681,16 @@ func TestExternalRelayPrefixDERPDataFrameRejectsPlaintextAndTamper(t *testing.T)
 	}
 }
 
+func TestExternalAssertNoPlaintextRelayMarker(t *testing.T) {
+	t.Setenv("DERPHOLE_TEST_RELAY_PLAINTEXT_MARKER", "relay-secret-marker")
+	if err := externalAssertNoPlaintextRelayMarker([]byte("ciphertext bytes only")); err != nil {
+		t.Fatalf("externalAssertNoPlaintextRelayMarker() clean payload error = %v", err)
+	}
+	if err := externalAssertNoPlaintextRelayMarker([]byte("prefix relay-secret-marker suffix")); err == nil {
+		t.Fatal("externalAssertNoPlaintextRelayMarker() accepted payload containing marker")
+	}
+}
+
 func TestSendExternalHandoffDERPStopUsesReceiverHandoffAckBelowReadBoundary(t *testing.T) {
 	srv := newSessionTestDERPServer(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)

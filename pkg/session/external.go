@@ -1274,6 +1274,9 @@ func startExternalTransportManager(
 	cfg := transport.ManagerConfig{
 		RelayConn: conn,
 		RelaySend: func(ctx context.Context, payload []byte) error {
+			if err := externalAssertNoPlaintextRelayMarker(payload); err != nil {
+				return err
+			}
 			return derpClient.Send(ctx, peerDERP, payload)
 		},
 		ReceiveRelay: func(ctx context.Context) ([]byte, error) {

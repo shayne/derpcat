@@ -1777,6 +1777,19 @@ func externalRelayPrefixDERPFrameKindOf(payload []byte) externalRelayPrefixDERPF
 	}
 }
 
+const externalTestRelayPlaintextMarkerEnv = "DERPHOLE_TEST_RELAY_PLAINTEXT_MARKER"
+
+func externalAssertNoPlaintextRelayMarker(payload []byte) error {
+	marker := os.Getenv(externalTestRelayPlaintextMarkerEnv)
+	if marker == "" {
+		return nil
+	}
+	if strings.Contains(string(payload), marker) {
+		return errors.New("relay payload contains plaintext marker")
+	}
+	return nil
+}
+
 func externalRelayPrefixDERPHeader(kind externalRelayPrefixDERPFrameKind, offset int64) ([]byte, error) {
 	if offset < 0 {
 		return nil, fmt.Errorf("negative relay-prefix DERP offset %d", offset)
@@ -1828,6 +1841,9 @@ func externalRelayPrefixDERPPayload(kind externalRelayPrefixDERPFrameKind, offse
 func externalRelayPrefixDERPSendChunk(ctx context.Context, client *derpbind.Client, peerDERP key.NodePublic, chunk externalHandoffChunk, packetAEAD cipher.AEAD) error {
 	payload, err := externalRelayPrefixDERPPayload(externalRelayPrefixDERPFrameData, chunk.Offset, chunk.Payload, packetAEAD)
 	if err != nil {
+		return err
+	}
+	if err := externalAssertNoPlaintextRelayMarker(payload); err != nil {
 		return err
 	}
 	return client.Send(ctx, peerDERP, payload)

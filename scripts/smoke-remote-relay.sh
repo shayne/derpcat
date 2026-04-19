@@ -9,6 +9,9 @@ remote_upload=""
 local_listener_pid=""
 remote_user="${DERPHOLE_REMOTE_USER:-root}"
 remote_env=()
+relay_plaintext_marker="relay-plaintext-marker-${target}-$(date +%s)-$$"
+export DERPHOLE_TEST_RELAY_PLAINTEXT_MARKER="${relay_plaintext_marker}"
+remote_env+=(DERPHOLE_TEST_RELAY_PLAINTEXT_MARKER="${relay_plaintext_marker}")
 
 if [[ "${DERPHOLE_TEST_DISABLE_TAILSCALE_CANDIDATES:-}" == "1" ]]; then
   remote_env+=(DERPHOLE_TEST_DISABLE_TAILSCALE_CANDIDATES=1)
@@ -91,7 +94,7 @@ mise run build-linux-amd64
 scp dist/derphole-linux-amd64 "${remote_user}@${target}:${remote_upload}" >/dev/null
 remote "install -m 0755 '${remote_upload}' /usr/local/bin/derphole && rm -f '${remote_upload}' && /usr/local/bin/derphole --help >/dev/null 2>&1"
 
-payload_local_to_remote="hello relay local-to-${target}-$(date +%s)"
+payload_local_to_remote="hello relay local-to-${target}-${relay_plaintext_marker}-$(date +%s)"
 remote "rm -f '${remote_base}.pid' '${remote_base}.out' '${remote_base}.err'; nohup /usr/local/bin/derphole listen --force-relay >'${remote_base}.out' 2>'${remote_base}.err' </dev/null & echo \$! > '${remote_base}.pid'"
 remote_token="$(wait_for_remote_token)" || {
   echo "failed to capture remote listener token" >&2
@@ -115,7 +118,7 @@ fi
 grep -q 'connected-relay' "${tmp}/local-sender.err"
 remote "grep -q 'connected-relay' '${remote_base}.err'"
 
-payload_remote_to_local="hello relay ${target}-to-local-$(date +%s)"
+payload_remote_to_local="hello relay ${target}-to-local-${relay_plaintext_marker}-$(date +%s)"
 local_listener_log="${tmp}/local-listener.err"
 local_listener_out="${tmp}/local-listener.out"
 dist/derphole listen --force-relay >"${local_listener_out}" 2>"${local_listener_log}" &
