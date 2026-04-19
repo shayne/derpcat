@@ -1,2 +1,8 @@
 /dist/
 *_BENCHMARKS.md
+.DS_Store
+.agents/
+.claude/
+skills-lock.json
+*.xcuserstate
+xcuserdata/
