@@ -97,8 +97,8 @@ const (
 	externalRelayPrefixDirectPrepStallWait         = 250 * time.Millisecond
 )
 
-var externalDirectUDPRateProbeMagic = [16]byte{0, 'd', 'e', 'r', 'p', 'c', 'a', 't', '-', 'r', 'a', 't', 'e', '-', 'v', '1'}
-var externalRelayPrefixDERPMagic = [16]byte{0, 'd', 'e', 'r', 'p', 'c', 'a', 't', '-', 'p', 'r', 'e', 'f', 'i', 'x', '1'}
+var externalDirectUDPRateProbeMagic = [16]byte{0, 'd', 'e', 'r', 'p', 'h', 'o', 'l', 'e', '-', 'r', 'a', 't', 'e', 'v', '1'}
+var externalRelayPrefixDERPMagic = [16]byte{0, 'd', 'e', 'r', 'p', 'h', 'o', 'l', 'e', '-', 'p', 'r', 'e', 'f', 'v', '1'}
 
 type externalRelayPrefixDERPFrameKind byte
 

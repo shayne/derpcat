@@ -4362,6 +4362,15 @@ func TestExternalDirectUDPRateProbeRatesSkipSmallTransfers(t *testing.T) {
 	}
 }
 
+func TestExternalDirectUDPMagicStringsUseDerpholeBrand(t *testing.T) {
+	if !bytes.Contains(externalDirectUDPRateProbeMagic[:], []byte("derphole")) {
+		t.Fatalf("rate-probe magic = %q, want derphole brand", string(externalDirectUDPRateProbeMagic[:]))
+	}
+	if !bytes.Contains(externalRelayPrefixDERPMagic[:], []byte("derphole")) {
+		t.Fatalf("relay-prefix magic = %q, want derphole brand", string(externalRelayPrefixDERPMagic[:]))
+	}
+}
+
 func TestExternalDirectUDPRateProbePayloadEncodesIndex(t *testing.T) {
 	payload, err := externalDirectUDPRateProbePayload(3, 128)
 	if err != nil {
