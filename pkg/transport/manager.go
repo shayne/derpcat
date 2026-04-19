@@ -341,6 +341,15 @@ func (m *Manager) noteProbeSentIfCurrent(generation uint64, now time.Time, addr 
 	m.state.noteProbeSent(now, addr, token)
 }
 
+func (m *Manager) noteProbeFailedIfCurrent(generation uint64, addr net.Addr, token directProbeToken) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.discoveryGen != generation {
+		return
+	}
+	m.state.forgetProbe(addr, token)
+}
+
 func (m *Manager) stateChanged() <-chan struct{} {
 	m.mu.Lock()
 	defer m.mu.Unlock()

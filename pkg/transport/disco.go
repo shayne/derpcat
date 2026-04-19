@@ -125,8 +125,9 @@ func (m *Manager) discoveryTick(ctx context.Context, forceCandidateRefresh bool)
 		if err != nil {
 			continue
 		}
-		if _, err := m.cfg.DirectConn.WriteTo(payload, target); err == nil {
-			m.noteProbeSentIfCurrent(plan.generation, m.now(), target, token)
+		m.noteProbeSentIfCurrent(plan.generation, m.now(), target, token)
+		if _, err := m.cfg.DirectConn.WriteTo(payload, target); err != nil {
+			m.noteProbeFailedIfCurrent(plan.generation, target, token)
 		}
 	}
 }

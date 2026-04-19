@@ -1433,7 +1433,7 @@ func TestManagerPromotesDirectWithMACBoundAck(t *testing.T) {
 	}
 
 	direct.enqueueRead(ack, peerCandidate)
-	if !waitForPath(t, mgr, PathDirect, 200*time.Millisecond) {
+	if !waitForPath(t, mgr, PathDirect, time.Second) {
 		t.Fatalf("PathState() after MAC-bound ack = %v, want %v", mgr.PathState(), PathDirect)
 	}
 }

@@ -246,6 +246,18 @@ func (s *pathState) noteProbeSent(now time.Time, addr net.Addr, token directProb
 	s.pendingProbes[addr.String()] = pendingDirectProbe{sentAt: now, token: token}
 }
 
+func (s *pathState) forgetProbe(addr net.Addr, token directProbeToken) {
+	if addr == nil {
+		return
+	}
+	key := addr.String()
+	pending, ok := s.pendingProbes[key]
+	if !ok || pending.token != token {
+		return
+	}
+	delete(s.pendingProbes, key)
+}
+
 func (s *pathState) consumeProbe(addr net.Addr, maxAge time.Duration, now time.Time, token directProbeToken) bool {
 	if addr == nil {
 		return false
