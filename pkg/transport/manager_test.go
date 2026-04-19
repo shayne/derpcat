@@ -1416,6 +1416,10 @@ func TestManagerPromotesDirectWithMACBoundAck(t *testing.T) {
 	if err := mgr.Start(ctx); err != nil {
 		t.Fatalf("Start() error = %v", err)
 	}
+	defer func() {
+		cancel()
+		mgr.Wait()
+	}()
 	waitForManagerTimers(t, clock, baseTimers, 2)
 	if !controls.deliver(ControlMessage{
 		Type:       ControlCandidates,
@@ -1426,7 +1430,7 @@ func TestManagerPromotesDirectWithMACBoundAck(t *testing.T) {
 	if !direct.waitForWritePayloadToMatching(peerCandidate, isDirectDiscoveryMACPayload, 200*time.Millisecond) {
 		t.Fatal("manager did not send MAC-bound direct probe")
 	}
-	probe := direct.firstWritePayloadToMatching(peerCandidate, isDirectDiscoveryMACPayload)
+	probe := direct.lastWritePayloadToMatching(peerCandidate, isDirectDiscoveryMACPayload)
 	ack, ok := directAckPayloadForProbe(key, probe)
 	if !ok {
 		t.Fatal("directAckPayloadForProbe() ok = false, want true")

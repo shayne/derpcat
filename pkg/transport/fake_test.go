@@ -315,10 +315,11 @@ func (c *fakePacketConn) waitForWritePayloadToMatching(addr net.Addr, match func
 	})
 }
 
-func (c *fakePacketConn) firstWritePayloadToMatching(addr net.Addr, match func([]byte) bool) []byte {
+func (c *fakePacketConn) lastWritePayloadToMatching(addr net.Addr, match func([]byte) bool) []byte {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	for _, pkt := range c.writes {
+	for i := len(c.writes) - 1; i >= 0; i-- {
+		pkt := c.writes[i]
 		if pkt.addr.String() == addr.String() && match(pkt.payload) {
 			return append([]byte(nil), pkt.payload...)
 		}
