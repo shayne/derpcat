@@ -22,6 +22,7 @@ final class DerpholeUITests: XCTestCase {
 
         app.tabBars.buttons["SSH"].tap()
         XCTAssertTrue(app.descendants(matching: .any)["sshTab"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.buttons["sshScanQRCodeButton"].waitForExistence(timeout: 5))
     }
 
     @MainActor

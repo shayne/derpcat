@@ -39,28 +39,6 @@ struct ContentView: View {
     }
 }
 
-private struct SSHTabView: View {
-    @ObservedObject var tokenStore: TokenStore
-
-    var body: some View {
-        VStack(spacing: 16) {
-            Spacer()
-            Label("SSH tunnel support is next.", systemImage: "terminal")
-                .font(.headline)
-            if let tcpToken = tokenStore.tcpToken {
-                Text(TransferFormatting.fingerprint(tcpToken))
-                    .font(.caption.monospaced())
-                    .foregroundStyle(.secondary)
-            }
-            Spacer()
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .padding(20)
-        .navigationTitle("SSH")
-        .accessibilityIdentifier("sshTab")
-    }
-}
-
 #Preview {
     ContentView()
 }
