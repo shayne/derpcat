@@ -174,9 +174,12 @@ echo "payload: ${payload}"
 
 test_destination="$(resolve_test_destination)"
 derived_data="${APPLE_DERIVED_DATA:-dist/apple-ssh-derived-data}"
-vvterm_vendor_root="${VVTERM_VENDOR_ROOT:-/Users/shayne/code/vvterm/Vendor}"
-if [[ ! -d "${vvterm_vendor_root}/libghostty" || ! -d "${vvterm_vendor_root}/libssh2" ]]; then
-  echo "VVTerm vendor libraries not found; set VVTERM_VENDOR_ROOT to a directory containing libghostty and libssh2." >&2
+apple_vendor_root="$PWD/apple/Derphole/Vendor"
+if [[ ! -f "${apple_vendor_root}/libghostty/ios/lib/libghostty.a" ||
+      ! -f "${apple_vendor_root}/libghostty/ios-simulator/lib/libghostty.a" ||
+      ! -f "${apple_vendor_root}/libssh2/ios/lib/libssh2.a" ||
+      ! -f "${apple_vendor_root}/libssh2/ios-simulator/lib/libssh2.a" ]]; then
+  echo "Apple vendor libraries not found under apple/Derphole/Vendor." >&2
   exit 1
 fi
 
@@ -186,7 +189,6 @@ if ! xcodebuild -quiet build-for-testing \
     -configuration "${APPLE_CONFIGURATION:-Debug}" \
     -destination "${test_destination}" \
     -derivedDataPath "${derived_data}" \
-    VVTERM_VENDOR_ROOT="${vvterm_vendor_root}" \
     CODE_SIGNING_ALLOWED="${CODE_SIGNING_ALLOWED:-NO}" \
     -only-testing:DerpholeUITests/DerpholeUITests/testLiveSSHTunnelPayloadOpensTerminal \
     >"${tmp}/xcodebuild-build-for-testing.out" 2>"${tmp}/xcodebuild-build-for-testing.err"; then

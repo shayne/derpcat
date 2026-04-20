@@ -55,7 +55,7 @@ final class SSHTunnelStateTests: XCTestCase {
         let state = SSHTunnelState(tokenStore: store, connectorFactory: { connector })
 
         state.reconnect()
-        state.username = "shayne"
+        state.username = "derpuser"
         state.password = "secret"
         await state.submitCredentials()
         state.disconnect()
@@ -80,12 +80,12 @@ final class SSHTunnelStateTests: XCTestCase {
         let state = SSHTunnelState(tokenStore: store, connectorFactory: { connector })
 
         state.reconnect()
-        state.username = "shayne"
+        state.username = "derpuser"
         state.password = "secret"
         await state.submitCredentials()
 
         XCTAssertEqual(connector.connectedToken, "dtc1_tcp_token")
-        XCTAssertEqual(connector.connectedUsername, "shayne")
+        XCTAssertEqual(connector.connectedUsername, "derpuser")
         XCTAssertEqual(connector.connectedPassword, "secret")
         XCTAssertEqual(state.username, "")
         XCTAssertEqual(state.password, "")
@@ -110,12 +110,12 @@ final class SSHTunnelStateTests: XCTestCase {
         let state = SSHTunnelState(tokenStore: store, connectorFactory: { connector })
 
         state.reconnect()
-        state.username = "shayne"
+        state.username = "derpuser"
         state.password = "secret"
         await state.submitCredentials()
 
         XCTAssertEqual(connector.connectedToken, "dtc1_tcp_token")
-        XCTAssertEqual(connector.connectedUsername, "shayne")
+        XCTAssertEqual(connector.connectedUsername, "derpuser")
         XCTAssertEqual(connector.connectedPassword, "secret")
         XCTAssertTrue(state.terminalSession === session)
         XCTAssertTrue(state.isConnected)
@@ -136,7 +136,7 @@ final class SSHTunnelStateTests: XCTestCase {
         let state = SSHTunnelState(tokenStore: store, connectorFactory: { RecordingSSHConnector(session: session) })
 
         state.reconnect()
-        state.username = "shayne"
+        state.username = "derpuser"
         state.password = "secret"
         await state.submitCredentials()
         state.terminalExited()
@@ -160,7 +160,7 @@ final class SSHTunnelStateTests: XCTestCase {
         let state = SSHTunnelState(tokenStore: store, connectorFactory: { connector })
 
         state.reconnect()
-        state.username = "shayne"
+        state.username = "derpuser"
         state.password = "secret"
         await state.submitCredentials()
         state.credentialPromptDismissed()
@@ -180,7 +180,7 @@ final class SSHTunnelStateTests: XCTestCase {
         let state = SSHTunnelState(tokenStore: store, connectorFactory: { connector })
 
         state.reconnect()
-        state.username = "shayne"
+        state.username = "derpuser"
         state.password = "secret"
         let submitTask = Task {
             await state.submitCredentials()

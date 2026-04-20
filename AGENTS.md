@@ -31,6 +31,8 @@ When editing `README.md`, use the `Caveman` skill for tight, direct prose. Keep 
 
 Do not hand-edit generated `dist/` contents. Update the source script or template instead.
 
+Do not commit machine-specific or personal details unless the user explicitly allows it. This includes absolute local paths, local usernames, hostnames, device names, private filesystem layouts, and environment-variable defaults that point at one developer's machine. Prefer repo-relative paths, generated runtime values, or documented user-provided configuration.
+
 ## Testing Guidelines
 
 Tests live alongside code in `*_test.go` files. Prefer focused package tests first, then full-suite verification.
