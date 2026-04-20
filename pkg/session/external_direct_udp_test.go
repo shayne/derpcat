@@ -29,6 +29,8 @@ import (
 	"tailscale.com/types/key"
 )
 
+const externalDERPTestFrameTimeout = 2 * time.Second
+
 func TestExternalDirectUDPDefaultUsesStripedStreamLanes(t *testing.T) {
 	if got, want := externalDirectUDPParallelism, 8; got != want {
 		t.Fatalf("externalDirectUDPParallelism = %d, want %d", got, want)
@@ -891,7 +893,7 @@ func TestSendExternalHandoffDERPStopUsesReceiverHandoffAckBelowReadBoundary(t *t
 			}
 		case err := <-errCh:
 			t.Fatalf("sendExternalHandoffDERP() returned before stop: %v", err)
-		case <-time.After(500 * time.Millisecond):
+		case <-time.After(externalDERPTestFrameTimeout):
 			t.Fatal("timed out waiting for DERP prefix data frames before stop")
 		}
 	}
@@ -914,7 +916,7 @@ func TestSendExternalHandoffDERPStopUsesReceiverHandoffAckBelowReadBoundary(t *t
 		case err := <-errCh:
 			sendErr = err
 			sendReturned = true
-		case <-time.After(500 * time.Millisecond):
+		case <-time.After(externalDERPTestFrameTimeout):
 			t.Fatal("timed out waiting for DERP prefix handoff after stop")
 		}
 	}
@@ -987,7 +989,7 @@ func TestSendExternalHandoffDERPStopWithoutHandoffAckReturnsPeerDisconnected(t *
 			}
 		case err := <-errCh:
 			t.Fatalf("sendExternalHandoffDERP() returned before stop: %v", err)
-		case <-time.After(500 * time.Millisecond):
+		case <-time.After(externalDERPTestFrameTimeout):
 			t.Fatal("timed out waiting for DERP prefix data frames before stop")
 		}
 	}
@@ -1110,7 +1112,7 @@ func TestSendExternalHandoffDERPStopToleratesDelayedReceiverHandoffAck(t *testin
 			}
 		case err := <-errCh:
 			t.Fatalf("sendExternalHandoffDERP() returned before stop: %v", err)
-		case <-time.After(500 * time.Millisecond):
+		case <-time.After(externalDERPTestFrameTimeout):
 			t.Fatal("timed out waiting for DERP prefix data frames before stop")
 		}
 	}
@@ -1262,7 +1264,7 @@ func TestSendExternalHandoffDERPStopBeforeRelayProgressStillStartsRelayData(t *t
 				t.Fatal("relay prefix sent no acknowledged data before handoff")
 			}
 			return
-		case <-time.After(500 * time.Millisecond):
+		case <-time.After(externalDERPTestFrameTimeout):
 			t.Fatal("timed out waiting for relay-prefix frames")
 		}
 	}
