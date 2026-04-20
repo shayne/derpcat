@@ -67,11 +67,11 @@ func TestAppleWebTunnelTaskUsesRuntimePayload(t *testing.T) {
 
 	generatedToken := regexp.MustCompile(`\b(?:dtc1|dts1)_[A-Za-z0-9_-]{20,}\b`)
 	for name, contents := range map[string]string{
-		"apple-web-tunnel.sh":             script,
+		"apple-web-tunnel.sh":              script,
 		"LiveWebLaunchConfiguration.swift": launchConfig,
-		"ContentView.swift":               contentView,
-		"WebTabView.swift":                webTabView,
-		"DerpholeUITests.swift":           uiTests,
+		"ContentView.swift":                contentView,
+		"WebTabView.swift":                 webTabView,
+		"DerpholeUITests.swift":            uiTests,
 	} {
 		if generatedToken.MatchString(contents) {
 			t.Fatalf("%s contains a hardcoded generated derptun token", name)

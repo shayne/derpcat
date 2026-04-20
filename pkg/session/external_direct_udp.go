@@ -133,7 +133,6 @@ const (
 var externalDirectUDPPreviewTransportCaps = probe.PreviewTransportCaps
 var externalDirectUDPProbeCandidates = publicProbeCandidates
 var externalDirectUDPProbeSendFn = probe.Send
-var externalDirectUDPProbeReceiveToWriterFn = probe.ReceiveToWriter
 var externalRelayUDPProbeReceiveToWriterFn = func(ctx context.Context, conn net.PacketConn, dst io.Writer, cfg probe.ReceiveConfig) (probe.TransferStats, error) {
 	return probe.ReceiveBlastParallelToWriter(ctx, []net.PacketConn{conn}, dst, cfg, 0)
 }
