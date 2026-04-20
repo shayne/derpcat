@@ -14,6 +14,7 @@ func TestApplePhysicalTransferTaskUsesRuntimeTokenInjection(t *testing.T) {
 	script := readScriptFile(t, "apple-physical-transfer.sh")
 	launchConfig := readRepoFile(t, "apple/Derphole/Derphole/LiveReceiveLaunchConfiguration.swift")
 	contentView := readRepoFile(t, "apple/Derphole/Derphole/ContentView.swift")
+	filesTabView := readRepoFile(t, "apple/Derphole/Derphole/FilesTabView.swift")
 
 	if !strings.Contains(mise, `[tasks."apple:physical-transfer"]`) {
 		t.Fatal(".mise.toml missing apple:physical-transfer task")
@@ -59,15 +60,18 @@ func TestApplePhysicalTransferTaskUsesRuntimeTokenInjection(t *testing.T) {
 			t.Fatalf("LiveReceiveLaunchConfiguration.swift missing %q", want)
 		}
 	}
-	if !strings.Contains(contentView, "receiveRuntimeInjectedPayloadIfConfigured") {
-		t.Fatal("ContentView.swift does not invoke the runtime injected receive hook")
+	if !strings.Contains(contentView, "FilesTabView") {
+		t.Fatal("ContentView.swift does not render FilesTabView")
+	}
+	if !strings.Contains(filesTabView, "receiveRuntimeInjectedPayloadIfConfigured") {
+		t.Fatal("FilesTabView.swift does not invoke the runtime injected receive hook")
 	}
 
 	for _, forbidden := range []string{
 		"testLivePhysicalReceive" + "DirectFirst",
 		strings.Join([]string{"iphone", "direct", "live"}, "-"),
 	} {
-		if strings.Contains(script, forbidden) || strings.Contains(launchConfig, forbidden) || strings.Contains(contentView, forbidden) {
+		if strings.Contains(script, forbidden) || strings.Contains(launchConfig, forbidden) || strings.Contains(contentView, forbidden) || strings.Contains(filesTabView, forbidden) {
 			t.Fatalf("live transfer harness contains forbidden hardcoded test token artifact %q", forbidden)
 		}
 	}

@@ -1,15 +1,8 @@
-//
-//  TransferState.swift
-//  Derphole
-//
-//  Created by Codex on 4/19/26.
-//
-
 import Combine
-import Foundation
 import DerpholeMobile
+import Foundation
 
-final class TransferState: ObservableObject {
+final class FilesReceiveState: ObservableObject {
     enum Phase: Equatable {
         case idle
         case scanning
@@ -37,25 +30,39 @@ final class TransferState: ObservableObject {
     }
 
     @Published var pastedPayload = ""
+    @Published var isScannerPresented = false
+    @Published var isSaveFilePresented = false
     @Published private(set) var phase: Phase = .idle
     @Published private(set) var statusText = "Ready."
     @Published private(set) var traceText = ""
     @Published private(set) var route: Route = .unknown
     @Published private(set) var progressCurrent: Int64 = 0
     @Published private(set) var progressTotal: Int64 = 0
+    @Published private(set) var speedBytesPerSecond: Double = 0
     @Published private(set) var validatedToken = ""
     @Published private(set) var completedFileURL: URL?
     @Published private(set) var errorText: String?
-    @Published var isExporterPresented = false
 
+    let showsDebugPayloadControls: Bool
+
+    private let now: () -> Date
     private var activeReceiver: DerpholemobileReceiver?
     private var callbackPump: TransferUIUpdatePump?
     private var transferID = UUID()
     private var cancelRequested = false
     private var lastScannedPayload = ""
+    private var lastProgressSample: (bytes: Int64, date: Date)?
     #if DEBUG
     private var runtimeInjectedReceiveStarted = false
     #endif
+
+    init(
+        showsDebugPayloadControls: Bool = AppLaunchMode.showsDebugPayloadControls,
+        now: @escaping () -> Date = Date.init
+    ) {
+        self.showsDebugPayloadControls = showsDebugPayloadControls
+        self.now = now
+    }
 
     var isReceiving: Bool {
         phase == .receiving
@@ -66,24 +73,39 @@ final class TransferState: ObservableObject {
     }
 
     var canValidatePayload: Bool {
-        !pastedPayload.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && !isReceiving && !canExport
+        !pastedPayload.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && !isReceiving && !canSave
     }
 
     var canStartReceive: Bool {
-        canValidatePayload && !canExport
+        canValidatePayload && !canSave
     }
 
     var canStartScan: Bool {
-        !isReceiving && !canExport
+        !isReceiving && !canSave
+    }
+
+    var canSave: Bool {
+        completedFileURL != nil && !isReceiving
     }
 
     var canExport: Bool {
-        completedFileURL != nil && !isReceiving
+        canSave
     }
 
     var progressFraction: Double? {
         guard progressTotal > 0 else { return nil }
         return min(max(Double(progressCurrent) / Double(progressTotal), 0), 1)
+    }
+
+    var progressText: String {
+        guard progressTotal > 0 else {
+            return TransferFormatting.mib(progressCurrent)
+        }
+        return "\(TransferFormatting.mib(progressCurrent)) / \(TransferFormatting.mib(progressTotal))"
+    }
+
+    var speedText: String {
+        TransferFormatting.speed(bytesPerSecond: speedBytesPerSecond)
     }
 
     var statusSummary: String {
@@ -120,9 +142,8 @@ final class TransferState: ObservableObject {
     func scanStarted() {
         guard canStartScan else { return }
         phase = .scanning
-        route = .unknown
-        progressCurrent = 0
-        progressTotal = 0
+        isScannerPresented = true
+        resetTransferProgress()
         validatedToken = ""
         completedFileURL = nil
         traceText = ""
@@ -130,6 +151,13 @@ final class TransferState: ObservableObject {
         errorText = nil
         cancelRequested = false
         lastScannedPayload = ""
+    }
+
+    func scannerDismissed() {
+        guard phase == .scanning else { return }
+        isScannerPresented = false
+        phase = .idle
+        statusText = "Ready."
     }
 
     func receivePastedPayload() {
@@ -163,6 +191,7 @@ final class TransferState: ObservableObject {
     func cancel() {
         guard isReceiving else {
             phase = .canceled
+            isScannerPresented = false
             statusText = "Receive canceled."
             errorText = nil
             return
@@ -172,21 +201,27 @@ final class TransferState: ObservableObject {
         activeReceiver?.cancel()
     }
 
-    func presentExporter() {
+    func saveFile() {
         guard completedFileURL != nil else { return }
-        isExporterPresented = true
+        isSaveFilePresented = true
+    }
+
+    func presentExporter() {
+        saveFile()
+    }
+
+    func saveFinished(saved: Bool) {
+        isSaveFilePresented = false
+        guard saved else { return }
+        resetToIdle(deleteReceivedFile: false)
     }
 
     func exporterFinished(exported: Bool) {
-        isExporterPresented = false
-        guard exported else { return }
-        phase = .idle
-        route = .unknown
-        progressCurrent = 0
-        progressTotal = 0
-        completedFileURL = nil
-        traceText = ""
-        statusText = "Ready."
+        saveFinished(saved: exported)
+    }
+
+    func discardReceivedFile() {
+        resetToIdle(deleteReceivedFile: true)
     }
 
     #if DEBUG
@@ -201,7 +236,22 @@ final class TransferState: ObservableObject {
         pastedPayload = payload
         startReceive(from: payload, source: .manual)
     }
+
+    func markCompletedForTesting(fileURL: URL) {
+        resetTransferProgress()
+        phase = .received
+        completedFileURL = fileURL
+        statusText = "Receive complete."
+    }
+
+    func recordStatusForTesting(_ status: String) {
+        handleStatus(status, transferID: transferID)
+    }
     #endif
+
+    func recordProgress(current: Int64, total: Int64) {
+        handleProgress(current: current, total: total, transferID: transferID)
+    }
 
     private enum ReceiveSource {
         case manual
@@ -209,7 +259,7 @@ final class TransferState: ObservableObject {
     }
 
     private func startReceive(from payload: String, source: ReceiveSource) {
-        guard !isReceiving, !canExport else { return }
+        guard !isReceiving, !canSave else { return }
 
         let token: String
         do {
@@ -217,6 +267,7 @@ final class TransferState: ObservableObject {
         } catch {
             validatedToken = ""
             lastScannedPayload = ""
+            isScannerPresented = false
             phase = .failed
             errorText = error.localizedDescription
             statusText = source == .scanner ? "Scanned code was invalid." : "Payload validation failed."
@@ -227,6 +278,7 @@ final class TransferState: ObservableObject {
         do {
             try FileManager.default.createDirectory(at: receiveRoot, withIntermediateDirectories: true)
         } catch {
+            isScannerPresented = false
             phase = .failed
             errorText = error.localizedDescription
             statusText = "Could not prepare a receive directory."
@@ -234,6 +286,7 @@ final class TransferState: ObservableObject {
         }
 
         guard let receiver = DerpholemobileNewReceiver() else {
+            isScannerPresented = false
             phase = .failed
             errorText = "Could not create the Derphole receiver bridge."
             statusText = "Receiver initialization failed."
@@ -247,10 +300,9 @@ final class TransferState: ObservableObject {
             lastScannedPayload = payload.trimmingCharacters(in: .whitespacesAndNewlines)
         }
         cancelRequested = false
+        isScannerPresented = false
         phase = .receiving
-        route = .unknown
-        progressCurrent = 0
-        progressTotal = 0
+        resetTransferProgress()
         validatedToken = token
         completedFileURL = nil
         errorText = nil
@@ -308,6 +360,17 @@ final class TransferState: ObservableObject {
 
     private func handleProgress(current: Int64, total: Int64, transferID: UUID) {
         guard self.transferID == transferID else { return }
+
+        let sampleDate = now()
+        if let previous = lastProgressSample {
+            let elapsed = sampleDate.timeIntervalSince(previous.date)
+            let delta = current - previous.bytes
+            if elapsed > 0, delta >= 0 {
+                speedBytesPerSecond = Double(delta) / elapsed
+            }
+        }
+        lastProgressSample = (bytes: current, date: sampleDate)
+
         progressCurrent = current
         progressTotal = total
     }
@@ -375,6 +438,36 @@ final class TransferState: ObservableObject {
             errorText = description
         }
         cancelRequested = false
+    }
+
+    private func resetTransferProgress() {
+        route = .unknown
+        progressCurrent = 0
+        progressTotal = 0
+        speedBytesPerSecond = 0
+        lastProgressSample = nil
+    }
+
+    private func resetToIdle(deleteReceivedFile: Bool) {
+        if deleteReceivedFile, let completedFileURL {
+            try? FileManager.default.removeItem(at: completedFileURL.deletingLastPathComponent())
+        }
+
+        activeReceiver?.cancel()
+        callbackPump = nil
+        activeReceiver = nil
+        phase = .idle
+        isScannerPresented = false
+        isSaveFilePresented = false
+        cancelRequested = false
+        validatedToken = ""
+        completedFileURL = nil
+        traceText = ""
+        errorText = nil
+        lastScannedPayload = ""
+        pastedPayload = ""
+        statusText = "Ready."
+        resetTransferProgress()
     }
 
     private static func receiveWithBridge(

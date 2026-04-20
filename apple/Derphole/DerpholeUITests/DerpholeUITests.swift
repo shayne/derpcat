@@ -6,7 +6,36 @@ final class DerpholeUITests: XCTestCase {
     }
 
     @MainActor
-    func testLaunchShowsQRFirstUIAndPayloadSupport() throws {
+    func testLaunchShowsNativeTabsAndMinimalFilesUI() throws {
+        let app = XCUIApplication()
+        app.launch()
+
+        XCTAssertTrue(app.tabBars.buttons["Files"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.tabBars.buttons["Web"].exists)
+        XCTAssertTrue(app.tabBars.buttons["SSH"].exists)
+        XCTAssertTrue(app.descendants(matching: .any)["filesTab"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.buttons["filesScanQRCodeButton"].waitForExistence(timeout: 5))
+        XCTAssertFalse(app.textFields["filesDebugPayloadField"].exists)
+
+        app.tabBars.buttons["Web"].tap()
+        XCTAssertTrue(app.descendants(matching: .any)["webTab"].waitForExistence(timeout: 5))
+
+        app.tabBars.buttons["SSH"].tap()
+        XCTAssertTrue(app.descendants(matching: .any)["sshTab"].waitForExistence(timeout: 5))
+    }
+
+    @MainActor
+    func testDebugPayloadControlsAreHiddenUnlessLaunchModeRequestsThem() throws {
+        let app = XCUIApplication()
+        app.launchArguments.append("--derphole-debug-payload-controls")
+        app.launch()
+
+        XCTAssertTrue(app.descendants(matching: .any)["filesTab"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.textFields["filesDebugPayloadField"].waitForExistence(timeout: 5))
+    }
+
+    @MainActor
+    func testScanButtonPresentsModalScanner() throws {
         let app = XCUIApplication()
         addUIInterruptionMonitor(withDescription: "Camera permission") { alert in
             let button = alert.buttons.element(boundBy: 0)
@@ -19,30 +48,10 @@ final class DerpholeUITests: XCTestCase {
         app.launch()
         app.tap()
 
-        let scanButton = app.buttons["Scan QR Code"]
+        let scanButton = app.buttons["filesScanQRCodeButton"]
         XCTAssertTrue(scanButton.waitForExistence(timeout: 5))
-        XCTAssertTrue(app.otherElements["qrScannerView"].waitForExistence(timeout: 10))
-        XCTAssertTrue(app.otherElements["pastedPayloadSection"].waitForExistence(timeout: 5))
-
         scanButton.tap()
-        XCTAssertTrue(app.staticTexts["Scanning for QR code."].waitForExistence(timeout: 5))
 
-        let payloadField = app.textFields["pastedPayloadField"]
-        XCTAssertTrue(payloadField.waitForExistence(timeout: 5))
-
-        payloadField.tap()
-        payloadField.typeText("raw-token-123")
-
-        let validateButton = app.buttons["validatePayloadButton"]
-        XCTAssertTrue(validateButton.waitForExistence(timeout: 5))
-        XCTAssertTrue(validateButton.isEnabled)
-        validateButton.tap()
-
-        XCTAssertTrue(app.staticTexts["Payload looks valid."].waitForExistence(timeout: 5))
-        XCTAssertTrue(app.buttons["receivePayloadButton"].isEnabled)
-        XCTAssertTrue(app.buttons["validatePayloadButton"].waitForExistence(timeout: 5))
-        XCTAssertTrue(app.buttons["receivePayloadButton"].waitForExistence(timeout: 5))
-        XCTAssertTrue(app.buttons["cancelReceiveButton"].waitForExistence(timeout: 5))
-        XCTAssertTrue(app.buttons["exportReceivedFileButton"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.otherElements["filesScannerSheet"].waitForExistence(timeout: 10))
     }
 }

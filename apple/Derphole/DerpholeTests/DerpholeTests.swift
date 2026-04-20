@@ -4,7 +4,7 @@ import XCTest
 final class DerpholeTests: XCTestCase {
     @MainActor
     func testInitialStateIsIdle() {
-        let state = TransferState()
+        let state = FilesReceiveState()
 
         XCTAssertEqual(state.phase, .idle)
         XCTAssertEqual(state.statusText, "Ready.")
@@ -23,7 +23,7 @@ final class DerpholeTests: XCTestCase {
 
     @MainActor
     func testScanStartedSetsScanningState() {
-        let state = TransferState()
+        let state = FilesReceiveState()
         state.pastedPayload = "raw-token-123"
         state.validatePastedPayload()
         XCTAssertEqual(state.validatedToken, "raw-token-123")
@@ -45,7 +45,7 @@ final class DerpholeTests: XCTestCase {
 
     @MainActor
     func testCancelSetsCanceledState() {
-        let state = TransferState()
+        let state = FilesReceiveState()
 
         state.cancel()
 
@@ -57,7 +57,7 @@ final class DerpholeTests: XCTestCase {
 
     @MainActor
     func testValidatePastedPayloadAcceptsRawToken() {
-        let state = TransferState()
+        let state = FilesReceiveState()
         state.pastedPayload = "  raw-token-123  "
 
         XCTAssertTrue(state.canValidatePayload)
@@ -72,7 +72,7 @@ final class DerpholeTests: XCTestCase {
 
     @MainActor
     func testCancelReceiveUsesCanceledState() {
-        let state = TransferState()
+        let state = FilesReceiveState()
         state.pastedPayload = "token-789"
         state.validatePastedPayload()
 
@@ -87,7 +87,7 @@ final class DerpholeTests: XCTestCase {
 
     @MainActor
     func testInvalidScannedPayloadThenCorrectedValidation() {
-        let state = TransferState()
+        let state = FilesReceiveState()
 
         state.receiveScannedPayload("http://example.com")
 

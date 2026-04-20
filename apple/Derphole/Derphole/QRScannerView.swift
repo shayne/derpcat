@@ -98,7 +98,7 @@ final class ScannerViewController: UIViewController {
         ])
 
         #if targetEnvironment(simulator)
-        showMessage("Camera scanning is unavailable in the Simulator.\nPaste a payload below to test receive flows.")
+        showMessage("Camera scanning is unavailable in the Simulator.")
         #else
         configureCameraIfNeeded()
         #endif
