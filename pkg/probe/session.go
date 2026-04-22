@@ -3935,6 +3935,7 @@ func ReceiveBlastStreamParallelToWriter(ctx context.Context, conns []net.PacketC
 
 	lanes := make([]*blastStreamReceiveLane, len(conns))
 	var connected atomic.Bool
+	var receiveComplete atomic.Bool
 	var wg sync.WaitGroup
 	errCh := make(chan error, len(conns)+1)
 	for i, conn := range conns {
@@ -3949,7 +3950,10 @@ func ReceiveBlastStreamParallelToWriter(ctx context.Context, conns []net.PacketC
 		wg.Add(1)
 		go func(i int, lane *blastStreamReceiveLane) {
 			defer wg.Done()
-			if err := readBlastStreamReceiveLaneDirect(receiveCtx, i, lane, cfg, coordinator, &connected, cancel); err != nil {
+			if err := readBlastStreamReceiveLaneDirect(receiveCtx, i, lane, cfg, coordinator, &connected, &receiveComplete, cancel); err != nil {
+				if blastStreamReceiveCompletionCanceled(err, ctx, &receiveComplete) {
+					return
+				}
 				select {
 				case errCh <- err:
 				default:
@@ -3969,22 +3973,45 @@ func ReceiveBlastStreamParallelToWriter(ctx context.Context, conns []net.PacketC
 			return TransferStats{}, ctx.Err()
 		case now := <-repairTicker.C:
 			if err := coordinator.handleRepairTick(receiveCtx, now); err != nil {
+				if blastStreamReceiveCompletionCanceled(err, ctx, &receiveComplete) {
+					return coordinator.stats(conns, connected.Load()), nil
+				}
 				return TransferStats{}, err
 			}
 		case err := <-errCh:
 			if err != nil {
+				if blastStreamReceiveCompletionCanceled(err, ctx, &receiveComplete) {
+					return coordinator.stats(conns, connected.Load()), nil
+				}
 				return TransferStats{}, err
 			}
 		case <-receiveCtx.Done():
 			if ctx.Err() != nil {
 				return TransferStats{}, ctx.Err()
 			}
+			if !receiveComplete.Load() {
+				select {
+				case err := <-errCh:
+					if err != nil {
+						return TransferStats{}, err
+					}
+				default:
+				}
+				return TransferStats{}, receiveCtx.Err()
+			}
 			return coordinator.stats(conns, connected.Load()), nil
 		}
 	}
 }
 
-func readBlastStreamReceiveLaneDirect(ctx context.Context, laneIndex int, lane *blastStreamReceiveLane, cfg ReceiveConfig, coordinator *blastStreamReceiveCoordinator, connected *atomic.Bool, cancel context.CancelFunc) error {
+func blastStreamReceiveCompletionCanceled(err error, parent context.Context, receiveComplete *atomic.Bool) bool {
+	if err == nil || parent == nil || receiveComplete == nil {
+		return false
+	}
+	return errors.Is(err, context.Canceled) && parent.Err() == nil && receiveComplete.Load()
+}
+
+func readBlastStreamReceiveLaneDirect(ctx context.Context, laneIndex int, lane *blastStreamReceiveLane, cfg ReceiveConfig, coordinator *blastStreamReceiveCoordinator, connected *atomic.Bool, receiveComplete *atomic.Bool, cancel context.CancelFunc) error {
 	if lane == nil || lane.batcher == nil {
 		return nil
 	}
@@ -4040,6 +4067,9 @@ func readBlastStreamReceiveLaneDirect(ctx context.Context, laneIndex int, lane *
 				return err
 			}
 			if complete {
+				if receiveComplete != nil {
+					receiveComplete.Store(true)
+				}
 				cancel()
 				return nil
 			}

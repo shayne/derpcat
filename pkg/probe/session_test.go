@@ -800,6 +800,27 @@ func TestBlastParallelStreamPreservesOrderAcrossLoopback(t *testing.T) {
 	}
 }
 
+func TestBlastStreamReceiveCompletionCancelIsBenignOnlyAfterComplete(t *testing.T) {
+	var complete atomic.Bool
+	if blastStreamReceiveCompletionCanceled(context.Canceled, context.Background(), &complete) {
+		t.Fatal("completion cancellation was benign before receive completion")
+	}
+
+	complete.Store(true)
+	if !blastStreamReceiveCompletionCanceled(context.Canceled, context.Background(), &complete) {
+		t.Fatal("completion cancellation was not benign after receive completion")
+	}
+	if blastStreamReceiveCompletionCanceled(errors.New("boom"), context.Background(), &complete) {
+		t.Fatal("non-cancellation error was treated as benign completion")
+	}
+
+	canceledCtx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if blastStreamReceiveCompletionCanceled(context.Canceled, canceledCtx, &complete) {
+		t.Fatal("parent context cancellation was treated as benign completion")
+	}
+}
+
 func TestBlastParallelStreamPreservesOrderWithStripedLanesAcrossLoopback(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
