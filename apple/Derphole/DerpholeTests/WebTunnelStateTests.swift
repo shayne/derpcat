@@ -131,18 +131,48 @@ final class WebTunnelStateTests: XCTestCase {
         XCTAssertEqual(opener.openCallCount, 1)
         XCTAssertEqual(state.browserURL?.absoluteString, "http://127.0.0.1:49286/probe")
     }
+
+    @MainActor
+    func testDuplicateScannedWebPayloadWhileOpeningDoesNotRestartTunnel() async throws {
+        let suiteName = "WebTunnelStateTests-\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let store = TokenStore(defaults: defaults)
+        var createdOpeners: [RecordingWebTunnelOpener] = []
+        let state = WebTunnelState(tokenStore: store, tunnelOpenerFactory: {
+            let opener = RecordingWebTunnelOpener(boundAddr: nil)
+            createdOpeners.append(opener)
+            return opener
+        })
+
+        let payload = "derphole://web?path=%2Fadmin&scheme=http&token=dtc1_web_token&v=1"
+        state.acceptScannedPayload(payload)
+        guard let firstOpener = createdOpeners.first else {
+            XCTFail("expected first web tunnel opener")
+            return
+        }
+        await fulfillment(of: [firstOpener.openedExpectation], timeout: 2)
+
+        state.acceptScannedPayload(payload)
+        try await Task.sleep(nanoseconds: 100_000_000)
+
+        XCTAssertEqual(createdOpeners.count, 1)
+        XCTAssertEqual(firstOpener.openCallCount, 1)
+        XCTAssertFalse(firstOpener.cancelCalled)
+        XCTAssertTrue(state.isConnecting)
+    }
 }
 
 nonisolated private final class RecordingWebTunnelOpener: WebTunnelOpening, @unchecked Sendable {
     let openedExpectation = XCTestExpectation(description: "web tunnel opened")
-    private let boundAddrToReport: String
+    private let boundAddrToReport: String?
 
     private(set) var openedToken: String?
     private(set) var openedListenAddr: String?
     private(set) var cancelCalled = false
     private(set) var openCallCount = 0
 
-    init(boundAddr: String) {
+    init(boundAddr: String?) {
         self.boundAddrToReport = boundAddr
     }
 
@@ -152,7 +182,9 @@ nonisolated private final class RecordingWebTunnelOpener: WebTunnelOpening, @unc
         openedListenAddr = listenAddr
 
         callbacks.status("connected-direct")
-        callbacks.boundAddr(boundAddrToReport)
+        if let boundAddrToReport {
+            callbacks.boundAddr(boundAddrToReport)
+        }
         openedExpectation.fulfill()
     }
 

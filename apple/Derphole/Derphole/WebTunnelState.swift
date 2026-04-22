@@ -86,6 +86,7 @@ final class WebTunnelState: ObservableObject {
 
     func acceptScannedPayload(_ payload: String) {
         isScannerPresented = false
+        guard !isConnecting else { return }
         do {
             let parsed = try parseWebPayload(payload)
             tokenStore.webToken = parsed.token
