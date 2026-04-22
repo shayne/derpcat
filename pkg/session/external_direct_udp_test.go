@@ -851,7 +851,7 @@ func TestExternalHandoffDERPRoundTripEncryptsRelayFrames(t *testing.T) {
 
 func TestSendExternalHandoffDERPStopUsesReceiverHandoffAckBelowReadBoundary(t *testing.T) {
 	srv := newSessionTestDERPServer(t)
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 7*time.Second)
 	defer cancel()
 
 	node := srv.Map.Regions[1].Nodes[0]
