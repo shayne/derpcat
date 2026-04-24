@@ -36,15 +36,21 @@ public struct DerptunEndpoint: Equatable, Sendable {
             throw DerpholeTunnelError.invalidBoundAddress(trimmed)
         }
 
-        var host = String(trimmed[..<colon])
-        if host.hasPrefix("[") && host.hasSuffix("]") {
+        let rawHost = String(trimmed[..<colon])
+        var host = rawHost
+        if rawHost.hasPrefix("[") || rawHost.hasSuffix("]") {
+            guard rawHost.hasPrefix("["),
+                  rawHost.hasSuffix("]"),
+                  rawHost.count > 2 else {
+                throw DerpholeTunnelError.invalidBoundAddress(rawHost)
+            }
             host.removeFirst()
             host.removeLast()
         }
 
         let portText = String(trimmed[trimmed.index(after: colon)...])
-        guard !host.isEmpty else {
-            throw DerpholeTunnelError.invalidBoundAddress(trimmed)
+        guard !host.isEmpty, DerptunEndpoint.isValidHost(host) else {
+            throw DerpholeTunnelError.invalidBoundAddress(host.isEmpty ? rawHost : host)
         }
         guard let port = Int(portText), (1...65_535).contains(port) else {
             throw DerpholeTunnelError.invalidBoundAddress(portText)
@@ -54,20 +60,38 @@ public struct DerptunEndpoint: Equatable, Sendable {
         guard let websocketURL = URL(string: "ws://\(urlHost):\(port)/") else {
             throw DerpholeTunnelError.invalidBoundAddress(trimmed)
         }
+        guard DerptunEndpoint.normalizedHost(websocketURL.host ?? "") == DerptunEndpoint.normalizedHost(host),
+              websocketURL.port == port else {
+            throw DerpholeTunnelError.invalidBoundAddress(trimmed)
+        }
 
         self.boundAddress = trimmed
         self.host = host
         self.port = port
         self.websocketURL = websocketURL
     }
+
+    private static func isValidHost(_ host: String) -> Bool {
+        let forbidden = CharacterSet(charactersIn: "/?#").union(.whitespacesAndNewlines)
+        return host.rangeOfCharacter(from: forbidden) == nil
+    }
+
+    private static func normalizedHost(_ host: String) -> String {
+        if host.hasPrefix("[") && host.hasSuffix("]") {
+            return String(host.dropFirst().dropLast())
+        }
+        return host
+    }
 }
 
 public enum DerpholeRoute: Equatable, Sendable {
+    case negotiating
     case relay
     case direct
 }
 
 public enum DerpholeTunnelEvent: Equatable, Sendable {
+    case status(String)
     case route(DerpholeRoute)
     case trace(String)
 }
@@ -101,7 +125,7 @@ public enum DerpholeTunnelError: Error, Equatable, LocalizedError, Sendable {
 public final class DerptunTunnelClient: @unchecked Sendable {
     private let client: DerpholemobileTunnelClient
     private let lock = NSLock()
-    private var activeAdapter: CallbackAdapter?
+    private var openState = TunnelOpenState()
 
     public init() throws {
         guard let client = DerpholemobileNewTunnelClient() else {
@@ -115,11 +139,14 @@ public final class DerptunTunnelClient: @unchecked Sendable {
         onEvent: @escaping @Sendable (DerpholeTunnelEvent) -> Void = { _ in }
     ) async throws -> DerptunEndpoint {
         let adapter = CallbackAdapter(onEvent: onEvent)
-        setActiveAdapter(adapter)
+        let generation = beginOpen(adapter: adapter)
 
         do {
             let endpoint = try await withTaskCancellationHandler(operation: {
                 try Task.checkCancellation()
+                if self.isOpenCanceled(generation) {
+                    throw CancellationError()
+                }
                 return try await Task.detached(priority: .userInitiated) { [client] in
                     do {
                         try client.openInvite(
@@ -130,12 +157,15 @@ public final class DerptunTunnelClient: @unchecked Sendable {
                     } catch is CancellationError {
                         throw CancellationError()
                     } catch {
-                        if Task.isCancelled {
+                        if self.isOpenCanceled(generation) || Task.isCancelled {
                             throw CancellationError()
                         }
                         throw DerpholeTunnelError.openFailed(error.localizedDescription)
                     }
 
+                    if self.isOpenCanceled(generation) {
+                        throw CancellationError()
+                    }
                     try Task.checkCancellation()
                     guard let boundAddress = adapter.boundAddress else {
                         throw DerpholeTunnelError.missingBoundAddress
@@ -143,11 +173,15 @@ public final class DerptunTunnelClient: @unchecked Sendable {
                     return try DerptunEndpoint(boundAddress: boundAddress)
                 }.value
             }, onCancel: {
+                self.markOpenCanceled()
                 self.client.cancel()
             })
+            if isOpenCanceled(generation) {
+                throw CancellationError()
+            }
             return endpoint
         } catch {
-            clearActiveAdapter(adapter)
+            clearFailedOpen(generation: generation, adapter: adapter)
             client.cancel()
             throw error
         }
@@ -161,9 +195,7 @@ public final class DerptunTunnelClient: @unchecked Sendable {
     }
 
     public func cancel() {
-        lock.lock()
-        activeAdapter = nil
-        lock.unlock()
+        markOpenCanceled()
         client.cancel()
     }
 
@@ -171,18 +203,56 @@ public final class DerptunTunnelClient: @unchecked Sendable {
         cancel()
     }
 
-    private func setActiveAdapter(_ adapter: CallbackAdapter) {
+    private func beginOpen(adapter: CallbackAdapter) -> UInt64 {
         lock.lock()
-        activeAdapter = adapter
+        defer { lock.unlock() }
+        return openState.begin(adapter: adapter)
+    }
+
+    private func markOpenCanceled() {
+        lock.lock()
+        openState.cancelActive()
         lock.unlock()
     }
 
-    private func clearActiveAdapter(_ adapter: CallbackAdapter) {
+    private func isOpenCanceled(_ generation: UInt64) -> Bool {
         lock.lock()
-        if activeAdapter === adapter {
-            activeAdapter = nil
-        }
+        defer { lock.unlock() }
+        return openState.isCanceled(generation)
+    }
+
+    private func clearFailedOpen(generation: UInt64, adapter: CallbackAdapter) {
+        lock.lock()
+        openState.clearFailure(generation: generation, adapter: adapter)
         lock.unlock()
+    }
+}
+
+struct TunnelOpenState {
+    private(set) var generation: UInt64 = 0
+    private var canceledGeneration: UInt64?
+    private var activeAdapter: CallbackAdapter?
+
+    mutating func begin(adapter: CallbackAdapter) -> UInt64 {
+        generation &+= 1
+        canceledGeneration = nil
+        activeAdapter = adapter
+        return generation
+    }
+
+    mutating func cancelActive() {
+        guard activeAdapter != nil else { return }
+        canceledGeneration = generation
+        activeAdapter = nil
+    }
+
+    func isCanceled(_ generation: UInt64) -> Bool {
+        canceledGeneration == generation
+    }
+
+    mutating func clearFailure(generation: UInt64, adapter: CallbackAdapter) {
+        guard self.generation == generation, activeAdapter === adapter else { return }
+        activeAdapter = nil
     }
 }
 
@@ -217,7 +287,8 @@ nonisolated final class CallbackAdapter: NSObject, DerpholemobileTunnelCallbacks
         case "connected-direct":
             onEvent(.route(.direct))
         default:
-            break
+            guard !trimmed.isEmpty else { return }
+            onEvent(.status(trimmed))
         }
     }
 
