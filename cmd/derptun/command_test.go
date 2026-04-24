@@ -100,8 +100,22 @@ func TestRunServeRejectsRemovedWebFlag(t *testing.T) {
 	if code != 2 {
 		t.Fatalf("code = %d, want 2", code)
 	}
-	if !strings.Contains(stderr.String(), "unknown flag") && !strings.Contains(stderr.String(), "Usage:") {
-		t.Fatalf("stderr = %q, want usage for removed --web flag", stderr.String())
+	if !strings.Contains(stderr.String(), "unknown flag") && !strings.Contains(stderr.String(), "unsupported flag") {
+		t.Fatalf("stderr = %q, want unknown or unsupported flag error", stderr.String())
+	}
+	if strings.Contains(stderr.String(), "--web requires --qr") {
+		t.Fatalf("stderr = %q, contains legacy --web requires --qr behavior", stderr.String())
+	}
+}
+
+func TestRunServeHelpOmitsRemovedWebFlag(t *testing.T) {
+	var stderr bytes.Buffer
+	code := run([]string{"serve", "--help"}, strings.NewReader(""), &bytes.Buffer{}, &stderr)
+	if code != 0 {
+		t.Fatalf("code = %d stderr=%s", code, stderr.String())
+	}
+	if strings.Contains(stderr.String(), "--web") {
+		t.Fatalf("serve help mentions removed --web flag:\n%s", stderr.String())
 	}
 }
 
