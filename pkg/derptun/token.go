@@ -128,7 +128,7 @@ func GenerateClientToken(opts ClientTokenOptions) (string, error) {
 	if _, err := rand.Read(client.TokenID[:]); err != nil {
 		return "", err
 	}
-	client.ClientName = "client-" + hex.EncodeToString(client.ClientID[:4])
+	client.ClientName = clientNameForID(client.ClientID)
 	serverTok, err := server.SessionToken()
 	if err != nil {
 		return "", err
