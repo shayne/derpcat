@@ -6,9 +6,11 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/shayne/derphole/pkg/derphole"
 	"github.com/shayne/derphole/pkg/derphole/qrpayload"
+	"github.com/shayne/derphole/pkg/derptun"
 	"github.com/shayne/derphole/pkg/session"
 )
 
@@ -65,6 +67,33 @@ func TestParsePayloadClassifiesModes(t *testing.T) {
 				t.Fatalf("Path() = %q, want %q", parsed.Path(), tt.path)
 			}
 		})
+	}
+}
+
+func TestParsePayloadClassifiesCompactInviteAsTCP(t *testing.T) {
+	now := time.Now()
+	server, err := derptun.GenerateServerToken(derptun.ServerTokenOptions{Now: now, Days: 7})
+	if err != nil {
+		t.Fatalf("GenerateServerToken() error = %v", err)
+	}
+	client, err := derptun.GenerateClientToken(derptun.ClientTokenOptions{Now: now, ServerToken: server, Days: 3})
+	if err != nil {
+		t.Fatalf("GenerateClientToken() error = %v", err)
+	}
+	invite, err := derptun.EncodeClientInvite(client)
+	if err != nil {
+		t.Fatalf("EncodeClientInvite() error = %v", err)
+	}
+
+	parsed, err := ParsePayload(invite)
+	if err != nil {
+		t.Fatalf("ParsePayload() error = %v", err)
+	}
+	if parsed.Kind() != "tcp" {
+		t.Fatalf("Kind() = %q, want tcp", parsed.Kind())
+	}
+	if parsed.Token() == "" {
+		t.Fatal("Token() is empty")
 	}
 }
 
@@ -134,6 +163,47 @@ func TestTunnelClientOpenUsesDerptunOpen(t *testing.T) {
 
 	client.Cancel()
 	<-canceled
+}
+
+func TestTunnelClientOpenInviteUsesDerptunOpen(t *testing.T) {
+	oldOpen := derptunOpen
+	t.Cleanup(func() { derptunOpen = oldOpen })
+
+	now := time.Now()
+	server, err := derptun.GenerateServerToken(derptun.ServerTokenOptions{Now: now, Days: 7})
+	if err != nil {
+		t.Fatalf("GenerateServerToken() error = %v", err)
+	}
+	clientToken, err := derptun.GenerateClientToken(derptun.ClientTokenOptions{Now: now, ServerToken: server, Days: 3})
+	if err != nil {
+		t.Fatalf("GenerateClientToken() error = %v", err)
+	}
+	invite, err := derptun.EncodeClientInvite(clientToken)
+	if err != nil {
+		t.Fatalf("EncodeClientInvite() error = %v", err)
+	}
+
+	derptunOpen = func(ctx context.Context, cfg session.DerptunOpenConfig) error {
+		if cfg.ClientToken == "" {
+			t.Fatal("ClientToken is empty")
+		}
+		if cfg.ListenAddr != "127.0.0.1:0" {
+			t.Fatalf("ListenAddr = %q, want 127.0.0.1:0", cfg.ListenAddr)
+		}
+		cfg.BindAddrSink <- "127.0.0.1:54322"
+		<-ctx.Done()
+		return nil
+	}
+
+	callbacks := &recordingTunnelCallbacks{}
+	client := NewTunnelClient()
+	if err := client.OpenInvite(invite, "127.0.0.1:0", callbacks); err != nil {
+		t.Fatalf("OpenInvite() error = %v", err)
+	}
+	if callbacks.boundAddr != "127.0.0.1:54322" {
+		t.Fatalf("boundAddr = %q, want 127.0.0.1:54322", callbacks.boundAddr)
+	}
+	client.Cancel()
 }
 
 func TestTunnelClientOpenReturnsFirstError(t *testing.T) {

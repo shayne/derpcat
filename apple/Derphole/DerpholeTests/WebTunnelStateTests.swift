@@ -3,7 +3,7 @@ import XCTest
 
 final class WebTunnelStateTests: XCTestCase {
     @MainActor
-    func testAcceptingWebPayloadPersistsTokenAndBuildsBrowserURLAfterBind() async throws {
+    func testAcceptingLegacyWebPayloadPersistsTokenAndBuildsBrowserURLAfterBind() async throws {
         let suiteName = "WebTunnelStateTests-\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suiteName)!
         defer { defaults.removePersistentDomain(forName: suiteName) }
@@ -25,6 +25,26 @@ final class WebTunnelStateTests: XCTestCase {
     }
 
     @MainActor
+    func testAcceptingGenericTCPPayloadPersistsTokenAndUsesHTTPDefaults() async throws {
+        let suiteName = "WebTunnelStateTests-\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let store = TokenStore(defaults: defaults)
+        let opener = RecordingWebTunnelOpener(boundAddr: "127.0.0.1:49280")
+        let state = WebTunnelState(tokenStore: store, tunnelOpenerFactory: { opener })
+
+        state.acceptScannedPayload("derphole://tcp?token=dtc1_web_token&v=1")
+        await fulfillment(of: [opener.openedExpectation], timeout: 2)
+        await Task.yield()
+
+        XCTAssertEqual(store.webToken, "dtc1_web_token")
+        XCTAssertEqual(opener.openedToken, "dtc1_web_token")
+        XCTAssertEqual(state.browserURL?.absoluteString, "http://127.0.0.1:49280/")
+        XCTAssertTrue(state.isConnected)
+        XCTAssertFalse(state.isConnecting)
+    }
+
+    @MainActor
     func testDisconnectKeepsRememberedTokenAndMarksDisconnected() async {
         let suiteName = "WebTunnelStateTests-\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suiteName)!
@@ -33,7 +53,7 @@ final class WebTunnelStateTests: XCTestCase {
         let opener = RecordingWebTunnelOpener(boundAddr: "127.0.0.1:49282")
         let state = WebTunnelState(tokenStore: store, tunnelOpenerFactory: { opener })
 
-        state.acceptScannedPayload("derphole://web?path=%2Fadmin&scheme=http&token=dtc1_web_token&v=1")
+        state.acceptScannedPayload("derphole://tcp?token=dtc1_web_token&v=1")
         await fulfillment(of: [opener.openedExpectation], timeout: 2)
         await Task.yield()
 
@@ -56,7 +76,7 @@ final class WebTunnelStateTests: XCTestCase {
         let opener = RecordingWebTunnelOpener(boundAddr: "127.0.0.1:49283")
         let state = WebTunnelState(tokenStore: store, tunnelOpenerFactory: { opener })
 
-        state.acceptScannedPayload("derphole://tcp?token=dtc1_tcp_token&v=1")
+        state.acceptScannedPayload("derphole://file?token=file-token&v=1")
 
         XCTAssertNil(store.webToken)
         XCTAssertNil(opener.openedToken)
@@ -94,7 +114,7 @@ final class WebTunnelStateTests: XCTestCase {
         let opener = RecordingWebTunnelOpener(boundAddr: "127.0.0.1:49285")
         let state = WebTunnelState(tokenStore: store, tunnelOpenerFactory: { opener })
 
-        state.acceptScannedPayload("derphole://web?path=%2Fadmin&scheme=http&token=dtc1_web_token&v=1")
+        state.acceptScannedPayload("derphole://tcp?token=dtc1_web_token&v=1")
         state.disconnect()
 
         try await Task.sleep(nanoseconds: 100_000_000)
@@ -115,21 +135,21 @@ final class WebTunnelStateTests: XCTestCase {
         let state = WebTunnelState(tokenStore: store, tunnelOpenerFactory: { opener })
 
         state.openRuntimeInjectedPayloadIfConfigured(
-            environment: ["DERPHOLE_LIVE_WEB_PAYLOAD": " derphole://web?path=%2Fprobe&scheme=http&token=dtc1_runtime_web&v=1 "],
+            environment: ["DERPHOLE_LIVE_WEB_PAYLOAD": " derphole://tcp?token=dtc1_runtime_web&v=1 "],
             arguments: []
         )
         await fulfillment(of: [opener.openedExpectation], timeout: 2)
         await Task.yield()
 
         state.openRuntimeInjectedPayloadIfConfigured(
-            environment: ["DERPHOLE_LIVE_WEB_PAYLOAD": " derphole://web?path=%2Fsecond&scheme=http&token=dtc1_second_web&v=1 "],
+            environment: ["DERPHOLE_LIVE_WEB_PAYLOAD": " derphole://tcp?token=dtc1_second_web&v=1 "],
             arguments: []
         )
 
         XCTAssertEqual(store.webToken, "dtc1_runtime_web")
         XCTAssertEqual(opener.openedToken, "dtc1_runtime_web")
         XCTAssertEqual(opener.openCallCount, 1)
-        XCTAssertEqual(state.browserURL?.absoluteString, "http://127.0.0.1:49286/probe")
+        XCTAssertEqual(state.browserURL?.absoluteString, "http://127.0.0.1:49286/")
     }
 
     @MainActor
@@ -145,7 +165,7 @@ final class WebTunnelStateTests: XCTestCase {
             return opener
         })
 
-        let payload = "derphole://web?path=%2Fadmin&scheme=http&token=dtc1_web_token&v=1"
+        let payload = "derphole://tcp?token=dtc1_web_token&v=1"
         state.acceptScannedPayload(payload)
         guard let firstOpener = createdOpeners.first else {
             XCTFail("expected first web tunnel opener")
@@ -160,6 +180,23 @@ final class WebTunnelStateTests: XCTestCase {
         XCTAssertEqual(firstOpener.openCallCount, 1)
         XCTAssertFalse(firstOpener.cancelCalled)
         XCTAssertTrue(state.isConnecting)
+    }
+
+    @MainActor
+    func testTestingHelperAcceptsGenericTCPInviteDefaults() {
+        let suiteName = "WebTunnelStateTests-\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let store = TokenStore(defaults: defaults)
+        let state = WebTunnelState(tokenStore: store, tunnelOpenerFactory: { nil })
+
+        state.acceptPayloadForTesting(kind: "tcp", token: "dtc1_web_token")
+        state.markBoundForTesting("127.0.0.1:49287")
+
+        XCTAssertEqual(store.webToken, "dtc1_web_token")
+        XCTAssertEqual(state.browserURL?.absoluteString, "http://127.0.0.1:49287/")
+        XCTAssertTrue(state.isConnected)
+        XCTAssertFalse(state.isConnecting)
     }
 }
 

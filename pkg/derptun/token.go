@@ -140,6 +140,10 @@ func GenerateClientToken(opts ClientTokenOptions) (string, error) {
 	return encodeJSONToken(ClientTokenPrefix, client)
 }
 
+func EncodeClientCredential(cred ClientCredential) (string, error) {
+	return encodeJSONToken(ClientTokenPrefix, cred)
+}
+
 func DecodeServerToken(encoded string, now time.Time) (ServerCredential, error) {
 	var cred ServerCredential
 	if err := decodeJSONToken(encoded, ServerTokenPrefix, &cred); err != nil {

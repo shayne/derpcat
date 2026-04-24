@@ -9,9 +9,11 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/shayne/derphole/pkg/derphole"
 	"github.com/shayne/derphole/pkg/derphole/qrpayload"
+	"github.com/shayne/derphole/pkg/derptun"
 	"github.com/shayne/derphole/pkg/session"
 	"github.com/shayne/derphole/pkg/telemetry"
 )
@@ -89,6 +91,18 @@ func (p *ParsedPayload) Path() string {
 }
 
 func ParsePayload(payload string) (*ParsedPayload, error) {
+	payload = strings.TrimSpace(payload)
+	if strings.HasPrefix(payload, derptun.CompactInvitePrefix) {
+		cred, err := derptun.DecodeClientInvite(payload, time.Now())
+		if err != nil {
+			return nil, err
+		}
+		clientToken, err := derptun.EncodeClientCredential(cred)
+		if err != nil {
+			return nil, err
+		}
+		return &ParsedPayload{kind: "tcp", token: clientToken}, nil
+	}
 	parsed, err := qrpayload.Parse(payload)
 	if err != nil {
 		return nil, err
@@ -110,6 +124,17 @@ func ParseFileToken(payload string) (string, error) {
 		return "", qrpayload.ErrUnsupportedPayload
 	}
 	return parsed.Token, nil
+}
+
+func (c *TunnelClient) OpenInvite(invite, listenAddr string, callbacks TunnelCallbacks) error {
+	parsed, err := ParsePayload(invite)
+	if err != nil {
+		return err
+	}
+	if parsed.Kind() != "tcp" {
+		return qrpayload.ErrUnsupportedPayload
+	}
+	return c.Open(parsed.Token(), listenAddr, callbacks)
 }
 
 func (r *Receiver) Receive(payloadOrToken string, outputDir string, callbacks Callbacks) (string, error) {

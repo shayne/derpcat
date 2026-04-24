@@ -138,7 +138,7 @@ final class WebTunnelState: ObservableObject {
     }
 
     func acceptPayloadForTesting(kind: String, token: String, scheme: String = "http", path: String = "/") {
-        guard kind == "web" else {
+        guard kind == "web" || kind == "tcp" else {
             failBeforeConnect(status: "Scanned code was not a web tunnel.", error: "Scan a Derphole web tunnel QR code.")
             return
         }
@@ -228,13 +228,13 @@ final class WebTunnelState: ObservableObject {
         if let error {
             throw error
         }
-        guard parsed.kind() == "web" else {
+        guard parsed.kind() == "web" || parsed.kind() == "tcp" else {
             throw WebTunnelError.nonWebPayload
         }
         return (
             token: parsed.token(),
-            scheme: parsed.scheme(),
-            path: parsed.path()
+            scheme: parsed.scheme().isEmpty ? "http" : parsed.scheme(),
+            path: parsed.path().isEmpty ? "/" : parsed.path()
         )
     }
 
