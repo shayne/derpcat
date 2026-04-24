@@ -150,6 +150,22 @@ PATH="$PWD/dist/tools/bin:$PATH" GOPATH="$tools_gopath" GOFLAGS="-modfile=$tools
   ./pkg/derpholemobile
 """
 
+[tasks."swiftpm:framework"]
+description = "Build the DerpholeMobile XCFramework zip for SwiftPM"
+run = "bash ./tools/packaging/build-swiftpm-framework.sh"
+
+[tasks."swiftpm:test"]
+description = "Build and test the Derphole Swift package wrapper"
+shell = "bash -c"
+run = """
+set -euo pipefail
+mise run swiftpm:framework >/tmp/derphole-swiftpm-checksum.txt
+xcodebuild -scheme derphole \
+  -destination 'platform=iOS Simulator,name=iPhone 17' \
+  -derivedDataPath dist/swiftpm-derived-data \
+  test
+"""
+
 [tasks.build-linux-amd64]
 shell = "bash -c"
 run = """
