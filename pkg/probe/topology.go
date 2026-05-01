@@ -21,6 +21,7 @@ type TopologyReport struct {
 	UDPReachability []UDPReachabilityResult `json:"udp_reachability,omitempty"`
 	PunchTests      []UDPPunchResult        `json:"punch_tests,omitempty"`
 	Classifications []string                `json:"classifications,omitempty"`
+	Errors          []string                `json:"errors,omitempty"`
 }
 
 type TopologyHost struct {
@@ -29,6 +30,7 @@ type TopologyHost struct {
 	Interfaces []TopologyInterface `json:"interfaces,omitempty"`
 	Firewall   []string            `json:"firewall,omitempty"`
 	UDPListen  []string            `json:"udp_listen,omitempty"`
+	Error      string              `json:"error,omitempty"`
 }
 
 type TopologyInterface struct {
