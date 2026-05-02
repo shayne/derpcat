@@ -25,14 +25,16 @@ var rootRegistry = yargs.Registry{
 			"derptun serve --token-file server.dts --tcp 127.0.0.1:22",
 			"derptun open --token-file client.dtc --listen 127.0.0.1:2222",
 			"ssh -o ProxyCommand='derptun connect --token-file ~/.config/derptun/client.dtc --stdio' foo@serverhost",
+			"derptun netcheck",
 		},
 	},
 	SubCommands: map[string]yargs.CommandSpec{
-		"token":   {Info: yargs.SubCommandInfo{Name: "token", Description: "Generate server credentials or client access tokens."}},
-		"serve":   {Info: yargs.SubCommandInfo{Name: "serve", Description: "Serve a local TCP target using a server token."}},
-		"open":    {Info: yargs.SubCommandInfo{Name: "open", Description: "Open a local TCP listener using a client token."}},
-		"connect": {Info: yargs.SubCommandInfo{Name: "connect", Description: "Connect one client tunnel stream over stdin/stdout."}},
-		"version": {Info: yargs.SubCommandInfo{Name: "version", Description: "Print the derptun version."}},
+		"token":    {Info: yargs.SubCommandInfo{Name: "token", Description: "Generate server credentials or client access tokens."}},
+		"serve":    {Info: yargs.SubCommandInfo{Name: "serve", Description: "Serve a local TCP target using a server token."}},
+		"open":     {Info: yargs.SubCommandInfo{Name: "open", Description: "Open a local TCP listener using a client token."}},
+		"connect":  {Info: yargs.SubCommandInfo{Name: "connect", Description: "Connect one client tunnel stream over stdin/stdout."}},
+		"version":  {Info: yargs.SubCommandInfo{Name: "version", Description: "Print the derptun version."}},
+		"netcheck": {Info: yargs.SubCommandInfo{Name: "netcheck", Description: "Check local direct UDP network capabilities."}},
 	},
 }
 
@@ -71,6 +73,8 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return runConnect(remaining[1:], level, stdin, stdout, stderr)
 	case "version":
 		return runVersion(stdout, stderr)
+	case "netcheck":
+		return runNetcheckCmd(remaining[1:], stdout, stderr)
 	default:
 		fmt.Fprintf(stderr, "unknown command: %s\nRun 'derptun --help' for usage\n", remaining[0])
 		return 2
