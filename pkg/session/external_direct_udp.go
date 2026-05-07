@@ -98,6 +98,8 @@ const (
 	externalRelayPrefixDERPStartupBytes            = 4 << 20
 	externalRelayPrefixDERPHandoffAckWait          = 5 * time.Second
 	externalRelayPrefixDirectPrepStallWait         = 250 * time.Millisecond
+	externalRelayPrefixNoProbeStartMbps            = 100
+	externalRelayPrefixNoProbeCeilingMbps          = externalDirectUDPInitialProbeFallbackMbps
 )
 
 var externalDirectUDPRateProbeMagic = [16]byte{0, 'd', 'e', 'r', 'p', 'h', 'o', 'l', 'e', '-', 'r', 'a', 't', 'e', 'v', '1'}
@@ -672,14 +674,17 @@ func externalPrepareDirectUDPSend(ctx context.Context, tok token.Token, derpClie
 		sendCfg.StreamReplayWindowBytes = externalDirectUDPDataPathBudget(selectedRateMbps, activeRateMbps, rateCeilingMbps, len(probeConns), sendCfg.StripedBlast).ReplayWindowBytes
 	} else if cfg.skipDirectUDPRateProbes {
 		rateCeilingMbps = externalDirectUDPRelayPrefixNoProbeRateCeilingMbps(maxRateMbps)
-		selectedRateMbps = externalDirectUDPActiveLaneTwoMaxMbps
-		activeRateMbps = externalDirectUDPActiveLaneTwoMaxMbps
+		selectedRateMbps = externalRelayPrefixNoProbeStartMbps
+		if rateCeilingMbps > 0 && selectedRateMbps > rateCeilingMbps {
+			selectedRateMbps = rateCeilingMbps
+		}
+		activeRateMbps = selectedRateMbps
 		sendCfg.RateMbps = activeRateMbps
 		sendCfg.RateCeilingMbps = rateCeilingMbps
 		if maxRateMbps > rateCeilingMbps {
 			sendCfg.RateExplorationCeilingMbps = maxRateMbps
 		}
-		sendCfg.StreamReplayWindowBytes = externalDirectUDPStreamReplayBytes
+		sendCfg.StreamReplayWindowBytes = externalDirectUDPReplayWindowBytesForRate(activeRateMbps)
 	}
 
 	var retainedLanes int
@@ -5109,12 +5114,12 @@ func externalDirectUDPDataStartRateMbpsForCeiling(selectedRateMbps int, rateCeil
 
 func externalDirectUDPRelayPrefixNoProbeRateCeilingMbps(maxRateMbps int) int {
 	if maxRateMbps <= 0 {
-		return externalDirectUDPRateProbeDefaultMaxMbps
+		return externalRelayPrefixNoProbeCeilingMbps
 	}
-	if maxRateMbps < externalDirectUDPRateProbeDefaultMaxMbps {
+	if maxRateMbps < externalRelayPrefixNoProbeCeilingMbps {
 		return maxRateMbps
 	}
-	return externalDirectUDPRateProbeDefaultMaxMbps
+	return externalRelayPrefixNoProbeCeilingMbps
 }
 
 func externalDirectUDPDataStartRateMbpsForProbeSamples(selectedRateMbps int, rateCeilingMbps int, sent []directUDPRateProbeSample, received []directUDPRateProbeSample) int {

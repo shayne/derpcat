@@ -2354,10 +2354,13 @@ func TestExternalPrepareDirectUDPSendSkipsBlockingRateProbesForRelayPrefixUpgrad
 	if rateProbeWaitCalled {
 		t.Fatal("externalPrepareDirectUDPSend() waited for blocking rate probe result for relay-prefix upgrade")
 	}
-	if got, wantMin := result.plan.startRateMbps, externalDirectUDPActiveLaneTwoMaxMbps; got < wantMin {
-		t.Fatalf("relay-prefix no-probe start rate = %d, want at least %d", got, wantMin)
+	if got, want := result.plan.startRateMbps, externalRelayPrefixNoProbeStartMbps; got != want {
+		t.Fatalf("relay-prefix no-probe start rate = %d, want %d", got, want)
 	}
-	if got, want := len(result.plan.probeConns), externalDirectUDPActiveLanesForRate(externalDirectUDPActiveLaneTwoMaxMbps, externalDirectUDPParallelism); got != want {
+	if got, want := result.plan.rateCeilingMbps, externalRelayPrefixNoProbeCeilingMbps; got != want {
+		t.Fatalf("relay-prefix no-probe rate ceiling = %d, want %d", got, want)
+	}
+	if got, want := len(result.plan.probeConns), externalDirectUDPActiveLanesForRate(externalRelayPrefixNoProbeStartMbps, externalDirectUDPParallelism); got != want {
 		t.Fatalf("relay-prefix no-probe active lanes = %d, want %d", got, want)
 	}
 	if got, want := len(result.plan.remoteAddrs), len(result.plan.probeConns); got != want {
@@ -3638,13 +3641,16 @@ func TestExternalDirectUDPDataStartRateUsesHighCeilingForSenderLimitedProbe(t *t
 }
 
 func TestExternalDirectUDPRelayPrefixNoProbeRateCeilingUsesGuardedDefault(t *testing.T) {
-	if got, want := externalDirectUDPRelayPrefixNoProbeRateCeilingMbps(10_000), externalDirectUDPRateProbeDefaultMaxMbps; got != want {
+	if got, want := externalDirectUDPRelayPrefixNoProbeRateCeilingMbps(10_000), externalRelayPrefixNoProbeCeilingMbps; got != want {
 		t.Fatalf("externalDirectUDPRelayPrefixNoProbeRateCeilingMbps(10000) = %d, want %d", got, want)
 	}
-	if got, want := externalDirectUDPRelayPrefixNoProbeRateCeilingMbps(700), 700; got != want {
+	if got, want := externalDirectUDPRelayPrefixNoProbeRateCeilingMbps(700), externalRelayPrefixNoProbeCeilingMbps; got != want {
 		t.Fatalf("externalDirectUDPRelayPrefixNoProbeRateCeilingMbps(700) = %d, want %d", got, want)
 	}
-	if got, want := externalDirectUDPRelayPrefixNoProbeRateCeilingMbps(0), externalDirectUDPRateProbeDefaultMaxMbps; got != want {
+	if got, want := externalDirectUDPRelayPrefixNoProbeRateCeilingMbps(75), 75; got != want {
+		t.Fatalf("externalDirectUDPRelayPrefixNoProbeRateCeilingMbps(75) = %d, want %d", got, want)
+	}
+	if got, want := externalDirectUDPRelayPrefixNoProbeRateCeilingMbps(0), externalRelayPrefixNoProbeCeilingMbps; got != want {
 		t.Fatalf("externalDirectUDPRelayPrefixNoProbeRateCeilingMbps(0) = %d, want %d", got, want)
 	}
 }
