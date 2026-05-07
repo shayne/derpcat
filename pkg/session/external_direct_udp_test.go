@@ -863,6 +863,8 @@ func TestSendExternalHandoffDERPStopUsesReceiverHandoffAckBelowReadBoundary(t *t
 		t.Fatalf("NewClient(sender) error = %v", err)
 	}
 	defer senderDERP.Close()
+	warmExternalQUICModeTestDERPRoute(t, ctx, senderDERP, listenerDERP)
+	warmExternalQUICModeTestDERPRoute(t, ctx, listenerDERP, senderDERP)
 	aead := testExternalSessionAEAD(t, 0x61)
 
 	relayFrames, unsubscribe := listenerDERP.SubscribeLossless(func(pkt derpbind.Packet) bool {
@@ -960,6 +962,7 @@ func TestSendExternalHandoffDERPStopWithoutHandoffAckReturnsPeerDisconnected(t *
 		t.Fatalf("NewClient(sender) error = %v", err)
 	}
 	defer senderDERP.Close()
+	warmExternalQUICModeTestDERPRoute(t, ctx, senderDERP, listenerDERP)
 	aead := testExternalSessionAEAD(t, 0x62)
 
 	relayFrames, unsubscribe := listenerDERP.SubscribeLossless(func(pkt derpbind.Packet) bool {
@@ -1013,7 +1016,7 @@ func TestSendExternalHandoffDERPStopWithoutHandoffAckReturnsPeerDisconnected(t *
 
 func TestSendExternalHandoffDERPWaitsForRelayPauseControlBeforeSendingFrames(t *testing.T) {
 	srv := newSessionTestDERPServer(t)
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 7*time.Second)
 	defer cancel()
 
 	node := srv.Map.Regions[1].Nodes[0]
@@ -1027,6 +1030,7 @@ func TestSendExternalHandoffDERPWaitsForRelayPauseControlBeforeSendingFrames(t *
 		t.Fatalf("NewClient(sender) error = %v", err)
 	}
 	defer senderDERP.Close()
+	warmExternalQUICModeTestDERPRoute(t, ctx, senderDERP, listenerDERP)
 	aead := testExternalSessionAEAD(t, 0x62)
 
 	relayFrames, unsubscribe := listenerDERP.SubscribeLossless(func(pkt derpbind.Packet) bool {
@@ -1069,7 +1073,7 @@ func TestSendExternalHandoffDERPWaitsForRelayPauseControlBeforeSendingFrames(t *
 
 func TestSendExternalHandoffDERPStopToleratesDelayedReceiverHandoffAck(t *testing.T) {
 	srv := newSessionTestDERPServer(t)
-	ctx, cancel := context.WithTimeout(context.Background(), 6*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
 	node := srv.Map.Regions[1].Nodes[0]
@@ -1083,6 +1087,8 @@ func TestSendExternalHandoffDERPStopToleratesDelayedReceiverHandoffAck(t *testin
 		t.Fatalf("NewClient(sender) error = %v", err)
 	}
 	defer senderDERP.Close()
+	warmExternalQUICModeTestDERPRoute(t, ctx, senderDERP, listenerDERP)
+	warmExternalQUICModeTestDERPRoute(t, ctx, listenerDERP, senderDERP)
 	aead := testExternalSessionAEAD(t, 0x63)
 
 	relayFrames, unsubscribe := listenerDERP.SubscribeLossless(func(pkt derpbind.Packet) bool {
@@ -1191,7 +1197,7 @@ func TestReceiveExternalViaDirectUDPOnlyLetsPrepareConsumeReady(t *testing.T) {
 
 func TestSendExternalHandoffDERPStopBeforeRelayProgressStillStartsRelayData(t *testing.T) {
 	srv := newSessionTestDERPServer(t)
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 7*time.Second)
 	defer cancel()
 
 	node := srv.Map.Regions[1].Nodes[0]
@@ -1205,6 +1211,8 @@ func TestSendExternalHandoffDERPStopBeforeRelayProgressStillStartsRelayData(t *t
 		t.Fatalf("NewClient(sender) error = %v", err)
 	}
 	defer senderDERP.Close()
+	warmExternalQUICModeTestDERPRoute(t, ctx, senderDERP, listenerDERP)
+	warmExternalQUICModeTestDERPRoute(t, ctx, listenerDERP, senderDERP)
 	aead := testExternalSessionAEAD(t, 0x64)
 
 	relayFrames, unsubscribe := listenerDERP.SubscribeLossless(func(pkt derpbind.Packet) bool {
