@@ -12,6 +12,7 @@ const (
 	blastRateHighCeilingInitialHold      = 500 * time.Millisecond
 	blastRateHighCeilingPressureHold     = 1 * time.Second
 	blastRateLossConfirmDelay            = 2 * blastRateFeedbackInterval
+	blastRateCommitStallWindow           = 500 * time.Millisecond
 	blastRateRepairPressureEvery         = blastRateHoldAfterDecrease
 	blastPacerMaxScheduleDebt            = 250 * time.Millisecond
 	blastRateIncreaseMultiplier          = 1.08
@@ -51,6 +52,9 @@ type blastRateController struct {
 	cleanAtLossCeiling int
 	last               blastRateFeedback
 	lastFeedbackAt     time.Time
+	lastProgressBytes  uint64
+	lastProgressAt     time.Time
+	commitStallAt      time.Time
 	holdIncrease       time.Time
 	startupLossHold    time.Time
 	lossCandidateAt    time.Time
@@ -100,6 +104,7 @@ func newBlastRateControllerWithInitialLossCeiling(rateMbps int, ceilingMbps int,
 		lossCeilingMbps:    lossCeilingMbps,
 		initialLossCeiling: initialLossCeiling,
 		lastFeedbackAt:     now,
+		lastProgressAt:     now,
 		holdIncrease:       now.Add(initialHold),
 		startupLossHold:    now.Add(blastRateHoldAfterDecrease),
 	}
@@ -329,8 +334,18 @@ func (c *blastRateController) Observe(now time.Time, feedback blastRateFeedback)
 
 	c.last = feedback
 	c.lastFeedbackAt = now
+	if feedback.ReceivedPayloadBytes > c.lastProgressBytes {
+		c.lastProgressBytes = feedback.ReceivedPayloadBytes
+		c.lastProgressAt = now
+		c.commitStallAt = time.Time{}
+	}
 
 	if sentDelta == 0 {
+		return
+	}
+	if c.shouldBackOffForCommitStall(now, feedback, receivedDelta) {
+		c.decreaseFromCommitStall(now)
+		c.commitStallAt = now
 		return
 	}
 	loss := missing > blastRateLossBudgetPackets(feedback.ReceivedPackets) &&
@@ -446,6 +461,26 @@ func (c *blastRateController) decreaseFromReplayPressure(now time.Time) {
 func (c *blastRateController) decreaseFromRepairPressure(now time.Time) {
 	capLossCeiling := c == nil || c.ceilingMbps <= 1500 || c.initialLossCeiling
 	c.decreaseWithCeiling(now, true, capLossCeiling)
+}
+
+func (c *blastRateController) decreaseFromCommitStall(now time.Time) {
+	c.decreaseWithCeiling(now, true, true)
+}
+
+func (c *blastRateController) shouldBackOffForCommitStall(now time.Time, feedback blastRateFeedback, receivedDelta uint64) bool {
+	if c == nil || c.rateMbps <= blastRateMinMbps {
+		return false
+	}
+	if receivedDelta > 0 || feedback.SentPayloadBytes <= feedback.ReceivedPayloadBytes {
+		return false
+	}
+	if c.lastProgressAt.IsZero() || now.Sub(c.lastProgressAt) < blastRateCommitStallWindow {
+		return false
+	}
+	if !c.commitStallAt.IsZero() && now.Sub(c.commitStallAt) < c.pressureHoldAfterDecrease() {
+		return false
+	}
+	return true
 }
 
 func (c *blastRateController) decreaseWithCeiling(now time.Time, forceLossCeiling bool, capLossCeiling bool) {

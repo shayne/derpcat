@@ -1757,6 +1757,52 @@ func TestBlastStreamReceiveCoordinatorAcksStoredStripedPendingOutput(t *testing.
 	}
 }
 
+func TestBlastStreamReceiveCoordinatorReportsCommittedStripedProgress(t *testing.T) {
+	runID := testRunID(0xbf)
+	peer := &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 12345}
+	batcher0 := &capturingBatcher{}
+	batcher1 := &capturingBatcher{}
+	lanes := []*blastStreamReceiveLane{
+		{batcher: batcher0, peer: peer},
+		{batcher: batcher1, peer: peer},
+	}
+	var dst bytes.Buffer
+	coordinator := newBlastStreamReceiveCoordinator(context.Background(), lanes, &dst, ReceiveConfig{
+		Blast:           true,
+		RequireComplete: true,
+		ExpectedRunID:   runID,
+	}, 0, time.Now())
+
+	blockBytes := uint64(parallelBlastStripeBlockPackets * defaultChunkSize)
+	if complete, err := coordinator.handlePacketStripe(context.Background(), lanes[1], 1, 2, PacketTypeData, runID, 0, blockBytes, 0, []byte("future"), peer); err != nil || complete {
+		t.Fatalf("handlePacketStripe(future data) complete=%v err=%v, want false nil", complete, err)
+	}
+	coordinator.sendStatsFeedbackLocked(context.Background(), runID, coordinator.runs[runID], time.Now(), true)
+
+	packet := firstPacketOfType(t, batcher1.writes, PacketTypeStats)
+	stats, ok := unmarshalBlastStatsPayload(packet.Payload)
+	if !ok {
+		t.Fatal("failed to unmarshal striped stats payload")
+	}
+	if stats.ReceivedPayloadBytes != 0 {
+		t.Fatalf("striped stats ReceivedPayloadBytes = %d, want 0 while output frontier is stalled", stats.ReceivedPayloadBytes)
+	}
+
+	if complete, err := coordinator.handlePacketStripe(context.Background(), lanes[0], 0, 2, PacketTypeData, runID, 0, 0, 0, []byte("first"), peer); err != nil || complete {
+		t.Fatalf("handlePacketStripe(first data) complete=%v err=%v, want false nil", complete, err)
+	}
+	coordinator.sendStatsFeedbackLocked(context.Background(), runID, coordinator.runs[runID], time.Now().Add(blastRateFeedbackInterval), true)
+
+	packet = firstPacketOfType(t, batcher0.writes, PacketTypeStats)
+	stats, ok = unmarshalBlastStatsPayload(packet.Payload)
+	if !ok {
+		t.Fatal("failed to unmarshal striped stats payload after commit")
+	}
+	if stats.ReceivedPayloadBytes != uint64(len("first")) {
+		t.Fatalf("striped stats ReceivedPayloadBytes = %d, want %d after output frontier advances", stats.ReceivedPayloadBytes, len("first"))
+	}
+}
+
 func BenchmarkBlastStreamReceiveCoordinatorStripedDiscard(b *testing.B) {
 	runID := testRunID(0xbd)
 	peer := &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 12345}

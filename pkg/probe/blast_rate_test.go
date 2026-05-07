@@ -127,6 +127,34 @@ func TestBlastRateControllerBacksOffWhenFeedbackShowsDeliveryLoss(t *testing.T) 
 	}
 }
 
+func TestBlastRateControllerBacksOffWhenCommittedProgressStalls(t *testing.T) {
+	start := time.Unix(0, 0)
+	controller := newBlastRateController(700, 2250, start)
+
+	for i := 1; i <= 6; i++ {
+		controller.Observe(start.Add(time.Duration(i)*blastRateFeedbackInterval), blastRateFeedback{
+			SentPayloadBytes:     uint64(i) * 8_000_000,
+			ReceivedPayloadBytes: 0,
+			ReceivedPackets:      uint64(i) * 1000,
+			MaxSeqPlusOne:        uint64(i) * 1000,
+		})
+	}
+
+	if got := controller.RateMbps(); got >= 700 {
+		t.Fatalf("RateMbps() = %d, want committed-progress stall to reduce rate below 700", got)
+	}
+	held := controller.RateMbps()
+	controller.Observe(start.Add(7*blastRateFeedbackInterval), blastRateFeedback{
+		SentPayloadBytes:     64_000_000,
+		ReceivedPayloadBytes: 0,
+		ReceivedPackets:      7000,
+		MaxSeqPlusOne:        7000,
+	})
+	if got := controller.RateMbps(); got != held {
+		t.Fatalf("RateMbps() = %d, want stall backoff hold at %d", got, held)
+	}
+}
+
 func TestBlastRateControllerToleratesSmallTransientMissingWindow(t *testing.T) {
 	start := time.Unix(0, 0)
 	controller := newBlastRateController(2250, 2250, start)

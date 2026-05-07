@@ -3072,12 +3072,8 @@ func (c *blastStreamReceiveCoordinator) sendStatsFeedbackLocked(ctx context.Cont
 		}
 	}
 	c.lastStatsAt[runID] = now
-	receivedBytes := int64(state.feedbackBytes)
-	if receivedBytes < 0 {
-		receivedBytes = 0
-	}
 	stats := blastReceiverStats{
-		ReceivedPayloadBytes: uint64(receivedBytes),
+		ReceivedPayloadBytes: c.committedPayloadBytesLocked(state),
 		ReceivedPackets:      state.seen.Len(),
 		MaxSeqPlusOne:        state.maxSeqPlusOne,
 		AckFloor:             state.nextWriteSeq,
@@ -3103,12 +3099,8 @@ func (c *blastStreamReceiveCoordinator) sendStripedStatsFeedbackLocked(ctx conte
 		}
 	}
 	c.lastStatsAt[runID] = now
-	receivedBytes := int64(state.feedbackBytes)
-	if receivedBytes < 0 {
-		receivedBytes = 0
-	}
 	aggregateStats := blastReceiverStats{
-		ReceivedPayloadBytes: uint64(receivedBytes),
+		ReceivedPayloadBytes: c.committedPayloadBytesLocked(state),
 	}
 	for _, stripe := range state.stripes {
 		if stripe == nil {
@@ -3125,6 +3117,16 @@ func (c *blastStreamReceiveCoordinator) sendStripedStatsFeedbackLocked(ctx conte
 		stats.AckFloor = stripe.expectedSeq
 		sendBlastStatsBestEffortStripe(ctx, stripe.lane.batcher, stripe.lane.peer, runID, stripeID, stats)
 	}
+}
+
+func (c *blastStreamReceiveCoordinator) committedPayloadBytesLocked(state *blastReceiveRunState) uint64 {
+	if c == nil || state == nil || c.bytesReceived <= 0 {
+		return 0
+	}
+	if state.striped && c.dst != io.Discard {
+		return state.nextOffset
+	}
+	return uint64(c.bytesReceived)
 }
 
 func (c *blastStreamReceiveCoordinator) sendStatsFeedbackForAllLocked(ctx context.Context, now time.Time, force bool) {
