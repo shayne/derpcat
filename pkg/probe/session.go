@@ -122,6 +122,7 @@ type SendConfig struct {
 	RateCeilingMbps            int
 	RateExplorationCeilingMbps int
 	StreamReplayWindowBytes    uint64
+	MaxActiveLanes             int
 }
 
 type ReceiveConfig struct {
@@ -1153,7 +1154,7 @@ func SendBlastParallel(ctx context.Context, conns []net.PacketConn, remoteAddrs 
 		controlCeilingMbps = cfg.RateExplorationCeilingMbps
 	}
 	control := newBlastSendControlWithInitialLossCeiling(cfg.RateMbps, controlCeilingMbps, cfg.RateCeilingMbps, time.Now())
-	activeLanes := parallelActiveLanesForRate(control.RateMbps(), len(lanes), stripedBlast)
+	activeLanes := parallelActiveLanesForConfig(control.RateMbps(), len(lanes), stripedBlast, cfg.MaxActiveLanes)
 	if activeLanes == 0 {
 		return TransferStats{}, errors.New("no active parallel blast lanes")
 	}
@@ -1226,7 +1227,7 @@ func SendBlastParallel(ctx context.Context, conns []net.PacketConn, remoteAddrs 
 		defer stopControlReader()
 	}
 	updateLaneRates := func() {
-		activeLanes = parallelActiveLanesForRate(control.RateMbps(), len(lanes), stripedBlast)
+		activeLanes = parallelActiveLanesForConfig(control.RateMbps(), len(lanes), stripedBlast, cfg.MaxActiveLanes)
 		rate := parallelLaneRateMbps(control.RateMbps(), activeLanes)
 		for i, lane := range lanes {
 			if i >= activeLanes {
@@ -1342,7 +1343,7 @@ func SendBlastParallel(ctx context.Context, conns []net.PacketConn, remoteAddrs 
 				}
 				laneIndex := int(seq % uint64(activeLanes))
 				if stripedBlast {
-					laneIndex = blastParallelLaneIndexForOffset(offset, len(lanes), cfg.ChunkSize)
+					laneIndex = blastParallelLaneIndexForOffset(offset, activeLanes, cfg.ChunkSize)
 				}
 				lane := lanes[laneIndex]
 				packetSeq := seq
@@ -1559,6 +1560,17 @@ func parallelActiveLanesForRate(rateMbps int, available int, striped bool) int {
 		return available
 	}
 	return target
+}
+
+func parallelActiveLanesForConfig(rateMbps int, available int, striped bool, maxActiveLanes int) int {
+	active := parallelActiveLanesForRate(rateMbps, available, striped)
+	if maxActiveLanes <= 0 || active <= maxActiveLanes {
+		return active
+	}
+	if maxActiveLanes > available {
+		return available
+	}
+	return maxActiveLanes
 }
 
 func shouldUseConnectedBatcherForParallelSend(batcher packetBatcher, laneCount int, cfg SendConfig) bool {

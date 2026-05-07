@@ -896,6 +896,90 @@ func TestBlastParallelStreamPreservesOrderWithStripedLanesAcrossLoopback(t *test
 	}
 }
 
+func TestSendBlastParallelMaxActiveLanesCapsStripedDataScheduling(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	serverA, err := net.ListenPacket("udp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer serverA.Close()
+
+	serverB, err := net.ListenPacket("udp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer serverB.Close()
+
+	clientABase, err := net.ListenPacket("udp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer clientABase.Close()
+	clientA := &dataCountingPacketConn{PacketConn: clientABase}
+
+	clientBBase, err := net.ListenPacket("udp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer clientBBase.Close()
+	clientB := &dataCountingPacketConn{PacketConn: clientBBase}
+
+	src := bytes.Repeat([]byte("active-lane-cap-striped-"), 1<<13)
+	var got bytes.Buffer
+	statsCh := make(chan TransferStats, 1)
+	errCh := make(chan error, 2)
+	runID := testRunID(0xa9)
+	go func() {
+		stats, err := ReceiveBlastStreamParallelToWriter(ctx, []net.PacketConn{serverA, serverB}, &got, ReceiveConfig{
+			Blast:           true,
+			ExpectedRunID:   runID,
+			RequireComplete: true,
+		}, int64(len(src)))
+		if err != nil {
+			errCh <- err
+			return
+		}
+		statsCh <- stats
+	}()
+
+	sendStats, err := SendBlastParallel(ctx, []net.PacketConn{clientA, clientB}, []string{serverA.LocalAddr().String(), serverB.LocalAddr().String()}, bytes.NewReader(src), SendConfig{
+		Blast:          true,
+		ChunkSize:      512,
+		RunID:          runID,
+		RepairPayloads: true,
+		StripedBlast:   true,
+		MaxActiveLanes: 1,
+	})
+	if err != nil {
+		t.Fatalf("SendBlastParallel() error = %v", err)
+	}
+	if sendStats.BytesSent != int64(len(src)) {
+		t.Fatalf("BytesSent = %d, want %d", sendStats.BytesSent, len(src))
+	}
+
+	select {
+	case err := <-errCh:
+		t.Fatalf("parallel striped active-lane cap error = %v", err)
+	case stats := <-statsCh:
+		if stats.BytesReceived != int64(len(src)) {
+			t.Fatalf("BytesReceived = %d, want %d", stats.BytesReceived, len(src))
+		}
+	case <-ctx.Done():
+		t.Fatalf("timed out waiting for striped active-lane cap receive: %v", ctx.Err())
+	}
+	if !bytes.Equal(got.Bytes(), src) {
+		t.Fatalf("parallel striped active-lane cap payload mismatch: got %d bytes, want %d", got.Len(), len(src))
+	}
+	if clientA.DataWrites() == 0 {
+		t.Fatal("active lane wrote no data packets")
+	}
+	if got := clientB.DataWrites(); got != 0 {
+		t.Fatalf("inactive lane data writes = %d, want 0", got)
+	}
+}
+
 func TestSendBlastParallelSkipsUnreachableOptionalLane(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
@@ -5915,6 +5999,27 @@ func (c *countingPacketConn) WriteTo(p []byte, addr net.Addr) (int, error) {
 	c.writes++
 	c.mu.Unlock()
 	return c.PacketConn.WriteTo(p, addr)
+}
+
+type dataCountingPacketConn struct {
+	net.PacketConn
+
+	dataWrites atomic.Int64
+}
+
+func (c *dataCountingPacketConn) WriteTo(p []byte, addr net.Addr) (int, error) {
+	packet, err := UnmarshalPacket(p, nil)
+	if err == nil && packet.Type == PacketTypeData {
+		c.dataWrites.Add(1)
+	}
+	return c.PacketConn.WriteTo(p, addr)
+}
+
+func (c *dataCountingPacketConn) DataWrites() int64 {
+	if c == nil {
+		return 0
+	}
+	return c.dataWrites.Load()
 }
 
 type writeDeadlineRecordingPacketConn struct {

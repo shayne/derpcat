@@ -3466,6 +3466,29 @@ func TestExternalDirectUDPRetainedLanesForRateKeepsStripedHeadroom(t *testing.T)
 	}
 }
 
+func TestExternalDirectUDPActiveLaneCapForPolicy(t *testing.T) {
+	tests := []struct {
+		name      string
+		policy    ParallelPolicy
+		available int
+		want      int
+	}{
+		{name: "fixed one caps eight lanes", policy: FixedParallelPolicy(1), available: externalDirectUDPParallelism, want: 1},
+		{name: "fixed four caps eight lanes", policy: FixedParallelPolicy(4), available: externalDirectUDPParallelism, want: 4},
+		{name: "fixed above available clamps to available", policy: FixedParallelPolicy(16), available: 2, want: 2},
+		{name: "auto default does not cap eight lanes", policy: AutoParallelPolicy(), available: externalDirectUDPParallelism, want: 0},
+		{name: "zero policy normalizes to default fixed", policy: ParallelPolicy{}, available: externalDirectUDPParallelism, want: DefaultParallelInitial},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := externalDirectUDPActiveLaneCapForPolicy(tt.policy, tt.available); got != tt.want {
+				t.Fatalf("externalDirectUDPActiveLaneCapForPolicy(%#v, %d) = %d, want %d", tt.policy, tt.available, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestExternalDirectUDPDataLaneRateBasisUsesMeasuredProbeTierForUnlockedCeiling(t *testing.T) {
 	rates := []int{8, 25, 75, 150, 350, 700, 1200, 2250}
 

@@ -594,6 +594,11 @@ func externalPrepareDirectUDPSend(ctx context.Context, tok token.Token, derpClie
 	if err != nil {
 		return plan, err
 	}
+	policyActiveLaneCap := externalDirectUDPActiveLaneCapForPolicy(cfg.ParallelPolicy, len(probeConns))
+	stripedDecisionLanes := len(probeConns)
+	if policyActiveLaneCap > 0 && policyActiveLaneCap < stripedDecisionLanes {
+		stripedDecisionLanes = policyActiveLaneCap
+	}
 	sendCfg := probe.SendConfig{
 		Blast:                    true,
 		Transport:                externalDirectUDPTransportLabel,
@@ -605,10 +610,11 @@ func externalPrepareDirectUDPSend(ctx context.Context, tok token.Token, derpClie
 		TailReplayBytes:          externalDirectUDPTailReplayBytes,
 		StreamReplayWindowBytes:  externalDirectUDPStreamReplayBytes,
 		FECGroupSize:             externalDirectUDPStreamFECGroupSize,
-		StripedBlast:             externalDirectUDPShouldUseStripedBlast(len(probeConns), readyAck.FastDiscard),
+		StripedBlast:             externalDirectUDPShouldUseStripedBlast(stripedDecisionLanes, readyAck.FastDiscard),
 		PacketAEAD:               packetAEAD,
 		AllowPartialParallel:     true,
 		ParallelHandshakeTimeout: externalDirectUDPHandshakeWait,
+		MaxActiveLanes:           policyActiveLaneCap,
 	}
 	emitExternalDirectUDPReceiveStartDebug(cfg.Emitter, directExpectedBytes)
 	start := externalDirectUDPStreamStart(maxRateMbps, directExpectedBytes)
@@ -689,6 +695,9 @@ func externalPrepareDirectUDPSend(ctx context.Context, tok token.Token, derpClie
 			retainedLanes = noProbeLanes
 		}
 	}
+	if policyActiveLaneCap > 0 && (retainedLanes == 0 || policyActiveLaneCap < retainedLanes) {
+		retainedLanes = policyActiveLaneCap
+	}
 	if retainedLanes == 0 {
 		return plan, errors.New("direct UDP established without active send lanes")
 	}
@@ -719,6 +728,9 @@ func externalPrepareDirectUDPSend(ctx context.Context, tok token.Token, derpClie
 		cfg.Emitter.Debug("udp-rate-selected-mbps=" + strconv.Itoa(selectedRateMbps))
 		cfg.Emitter.Debug("udp-rate-start-mbps=" + strconv.Itoa(activeRateMbps))
 		cfg.Emitter.Debug("udp-active-lanes-selected=" + strconv.Itoa(len(probeConns)))
+		if sendCfg.MaxActiveLanes > 0 {
+			cfg.Emitter.Debug("udp-active-lane-cap=" + strconv.Itoa(sendCfg.MaxActiveLanes))
+		}
 		cfg.Emitter.Debug("udp-rate-mbps=" + strconv.Itoa(activeRateMbps))
 		cfg.Emitter.Debug("udp-stream=true")
 		cfg.Emitter.Debug("udp-stream-replay-window-bytes=" + strconv.FormatUint(sendCfg.StreamReplayWindowBytes, 10))
@@ -4912,6 +4924,28 @@ func externalDirectUDPRetainedLanesForRate(rateMbps int, available int, striped 
 
 func externalDirectUDPNoProbeActiveLanes(rateMbps int, available int) int {
 	return externalDirectUDPActiveLanesForRate(rateMbps, available)
+}
+
+func externalDirectUDPActiveLaneCapForPolicy(policy ParallelPolicy, available int) int {
+	if available <= 0 {
+		return 0
+	}
+	policy = policy.normalized()
+	switch policy.Mode {
+	case ParallelModeFixed:
+		if policy.Initial <= 0 {
+			return 0
+		}
+		if policy.Initial > available {
+			return available
+		}
+		return policy.Initial
+	case ParallelModeAuto:
+		if policy.Cap > 0 && policy.Cap < available {
+			return policy.Cap
+		}
+	}
+	return 0
 }
 
 func externalDirectUDPDataLaneRateBasisMbps(activeRateMbps int, rateCeilingMbps int, probeRates []int) int {
